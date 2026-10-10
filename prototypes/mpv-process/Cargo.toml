@@ -1,0 +1,10 @@
+[package]
+name = "mpv-process-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libmpv2 = { version = "=6.0.0", default-features = false }
+libc = "=0.2.189"
+serde_json = "=1.0.140"
