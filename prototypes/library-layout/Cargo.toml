@@ -1,0 +1,9 @@
+[package]
+name = "library-layout-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui-kit = { version = "=0.7.0", default-features = false, features = ["assets"] }
+gpui-omarchy = "=0.2.0"
