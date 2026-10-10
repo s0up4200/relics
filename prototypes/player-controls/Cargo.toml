@@ -1,0 +1,8 @@
+[package]
+name = "player-controls-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libmpv2 = { version = "=6.0.0", default-features = false }
