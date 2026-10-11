@@ -1,8 +1,12 @@
 pub mod api;
 pub mod artwork;
+pub mod browse;
+pub mod grid;
 pub mod home;
 pub mod library;
+pub mod library_page;
 pub mod mpv;
+pub mod pages;
 pub mod playback;
 pub mod profiles;
 pub mod player;

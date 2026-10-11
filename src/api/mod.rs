@@ -330,6 +330,11 @@ impl Client {
         self.auth.lock().unwrap().tokens.clone()
     }
 
+    /// Takes the tokens of a new sign-in of the same Account.
+    pub fn set_tokens(&self, tokens: Tokens) {
+        self.auth.lock().unwrap().tokens = tokens;
+    }
+
     /// Sets the Profile that the next requests act for. It drops the PIN token and the Server settings of the
     /// old Profile.
     pub fn set_profile(&self, profile_id: Option<String>) {
@@ -368,23 +373,7 @@ impl Client {
         let layout: wire::SectionLayout = self.call(Method::GET, "home/layout", None).await?;
         let path = format!("home/sections?image_size={image_size}");
         let sections: wire::SectionCollection = self.call(Method::GET, &path, None).await?;
-        let mut sections = sections.sections;
-        Ok(layout
-            .sections
-            .into_iter()
-            .map(|entry| {
-                let section = sections.iter().position(|s| s.id == entry.id).map(|i| sections.swap_remove(i));
-                let (items, total) = section.map_or((Vec::new(), 0), |s| (s.items, s.total_count));
-                HomeSection {
-                    view_all: total > items.len() as i64,
-                    id: entry.id,
-                    section_type: entry.section_type,
-                    title: entry.title,
-                    featured: entry.featured,
-                    items,
-                }
-            })
-            .collect())
+        Ok(rows(layout, sections.sections))
     }
 
     async fn call<T: DeserializeOwned>(
@@ -783,6 +772,74 @@ impl Client {
         auth.profile_token = Some(token);
         true
     }
+
+    // Library page (#31).
+
+    /// The video Libraries that the Profile sees, in the server order. Book, comic and podcast Libraries
+    /// are out of scope.
+    pub async fn libraries(&self) -> Result<Vec<wire::UserLibrary>, Error> {
+        let list: wire::CollectionUserLibrary = self.call(Method::GET, "user/libraries", None).await?;
+        let mut libraries: Vec<_> = list
+            .items
+            .into_iter()
+            .filter(|l| {
+                !matches!(
+                    l.type_.as_str(),
+                    "audiobooks" | "audiobook" | "ebooks" | "ebook" | "manga" | "podcasts" | "podcast"
+                )
+            })
+            .collect();
+        libraries.sort_by_key(|l| l.sort_order);
+        Ok(libraries)
+    }
+
+    /// The rows of the Recommended tab of a Library, like the Home sections.
+    pub async fn library_rows(&self, library_id: &str, image_size: &str) -> Result<Vec<HomeSection>, Error> {
+        let layout: wire::SectionLayout = self.call(Method::GET, &format!("library/{library_id}/layout"), None).await?;
+        let sections = futures::future::try_join_all(layout.sections.iter().map(|entry| {
+            let path = format!("library/{library_id}/sections/{}/items?image_size={image_size}", entry.id);
+            async move { self.call::<wire::Section>(Method::GET, &path, None).await }
+        }))
+        .await?;
+        Ok(rows(layout, sections))
+    }
+
+    /// One page of a catalog query. `image_size` is the rung of the Artwork ladder for the artwork URLs.
+    pub async fn query_catalog(
+        &self,
+        query: &wire::CatalogQuery,
+        image_size: &str,
+    ) -> Result<wire::CatalogBrowseCollection, Error> {
+        let body = serde_json::to_value(query).map_err(|err| Error::Decode(err.to_string()))?;
+        self.call(Method::POST, &format!("catalog/query?image_size={image_size}"), Some(body)).await
+    }
+
+    /// The genres of the Items in a Library, for the filter menu.
+    pub async fn genres(&self, library_id: &str) -> Result<Vec<String>, Error> {
+        let path = format!("catalog/filters?library_id={library_id}&skip_technical=true");
+        Ok(self.call::<wire::CatalogFilters>(Method::GET, &path, None).await?.genres)
+    }
+}
+
+/// The rows of a layout, in layout order, with the items of the matching section. A section that the
+/// server did not send gives an empty row.
+fn rows(layout: wire::SectionLayout, mut sections: Vec<wire::Section>) -> Vec<HomeSection> {
+    layout
+        .sections
+        .into_iter()
+        .map(|entry| {
+            let section = sections.iter().position(|s| s.id == entry.id).map(|i| sections.swap_remove(i));
+            let (items, total) = section.map_or((Vec::new(), 0), |s| (s.items, s.total_count));
+            HomeSection {
+                view_all: total > items.len() as i64,
+                id: entry.id,
+                section_type: entry.section_type,
+                title: entry.title,
+                featured: entry.featured,
+                items,
+            }
+        })
+        .collect()
 }
 
 /// The language of the audio track that the server picked for the plan: the language of the track, else

@@ -27,6 +27,10 @@ _Avoid_: profile token, unlock token
 An entry in a Server's catalog that the user can open: a movie, a series, a season or an episode. Only movies and episodes play.
 _Avoid_: media, title, video
 
+**Library**:
+A collection of Items of one media type on a Silo server, for example Movies or Shows. The user opens each one from the sidebar.
+_Avoid_: Collection (Silo uses Collection for a curated group of Items)
+
 **Home section**:
 One row on the home page. The server defines it, with a type, a title and an order.
 _Avoid_: Shelf, carousel, rail

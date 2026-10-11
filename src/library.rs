@@ -15,7 +15,8 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
 use crate::api::{self, Client, Device, Error, Server, Trouble, Url, wire};
-use crate::home::{self, Home};
+use crate::home;
+use crate::pages::Pages;
 use crate::player::{PlaybackError, PlayerClosed, PlayerWindow};
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
@@ -54,8 +55,11 @@ pub struct LibraryWindow {
     /// The server refused the sign-in during playback. The sign-in screen shows when the player closes.
     sign_in_waits: bool,
     _troubles: Option<Task<()>>,
-    /// The subscription to the Play events of Home.
+    /// The subscription to the Play events of the pages.
     _play: Option<Subscription>,
+    /// The pages that showed when the server refused the sign-in, and the id of their Profile. The sign-in
+    /// opens them again.
+    parked: Option<(String, Entity<Pages>)>,
     /// The Profiles of the active Account.
     profiles: Vec<wire::Profile>,
     /// A request that waits for the PIN of its Profile.
@@ -66,15 +70,15 @@ pub struct LibraryWindow {
 struct PinWait {
     profile_id: String,
     reply: oneshot::Sender<Option<String>>,
-    /// The Home that sent the request. It comes back after the PIN entry.
-    home: Entity<Home>,
+    /// The pages that sent the request. They come back after the PIN entry.
+    pages: Entity<Pages>,
 }
 
 enum Screen {
     /// The user adds a Server.
     Connect,
     SignIn(Entity<SignIn>),
-    Home(Entity<Home>),
+    Pages(Entity<Pages>),
     Profiles(Entity<ProfilePicker>),
     /// A full-window message, for example while the app restores the sign-in.
     Message(String),
@@ -147,6 +151,7 @@ impl LibraryWindow {
             sign_in_waits: false,
             _troubles: None,
             _play: None,
+            parked: None,
             profiles: Vec::new(),
             pin_wait: None,
             _pin_requests: None,
@@ -213,13 +218,18 @@ impl LibraryWindow {
 
     fn signed_in(&mut self, event: &SignedIn, window: &mut Window, cx: &mut Context<Self>) {
         let server = event.client.server();
-        // After a refused refresh, the new client sends the positions that the old client kept.
-        if let Some(old) = self.client.take()
-            && old.server().id == server.id
-            && self.account_id() == *event.account.id
-        {
-            event.client.adopt_pending(old.take_pending());
-        }
+        // After a refused refresh, the old client of the Account takes the new tokens. It keeps the positions
+        // that it did not send, and the pages that use it open again.
+        let client = match self.client.take() {
+            Some(old) if old.server().id == server.id && self.account_id() == *event.account.id => {
+                old.set_tokens(event.client.tokens());
+                old
+            }
+            _ => {
+                self.parked = None;
+                event.client.clone()
+            }
+        };
         self.state.remember(
             SavedServer { id: server.id.clone(), url: server.url.to_string(), accounts: Vec::new() },
             SavedAccount {
@@ -229,10 +239,10 @@ impl LibraryWindow {
             },
         );
         self.save_state();
-        let (server_id, account_id, tokens) = (server.id.clone(), event.account.id.to_string(), event.client.tokens());
+        let (server_id, account_id, tokens) = (server.id.clone(), event.account.id.to_string(), client.tokens());
         // When the Secret Service is missing, the tokens stay only in memory. The sign-in screen told the user why.
         cx.background_spawn(async move { secrets::save(&server_id, &account_id, &tokens).await.ok() }).detach();
-        self.open_account(event.client.clone(), window, cx);
+        self.open_account(client, window, cx);
     }
 
     /// Keeps the new tokens after each refresh, and opens the Profile of the Account: the last Profile, the
@@ -313,12 +323,16 @@ impl LibraryWindow {
             account.last_profile = Some(profile.id.to_string());
         }
         self.save_state();
-        let home = cx.new(|cx| Home::new(client.clone(), profile.name.clone(), window, cx));
-        self.show_home(client, home, cx);
+        let pages = match self.parked.take() {
+            Some((id, pages)) if id == *profile.id => pages,
+            _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
+        };
+        self.show_pages(client, pages, window, cx);
     }
 
-    fn show_home(&mut self, client: Arc<Client>, home: Entity<Home>, cx: &mut Context<Self>) {
-        self._play = Some(cx.subscribe(&home, {
+    fn show_pages(&mut self, client: Arc<Client>, pages: Entity<Pages>, window: &mut Window, cx: &mut Context<Self>) {
+        pages.update(cx, |pages, cx| pages.focus(window, cx));
+        self._play = Some(cx.subscribe(&pages, {
             let client = client.clone();
             move |this, _, home::Play(item), cx| {
                 this.player_error = None;
@@ -326,7 +340,7 @@ impl LibraryWindow {
             }
         }));
         self._screen = None;
-        self.screen = Screen::Home(home);
+        self.screen = Screen::Pages(pages);
         cx.notify();
     }
 
@@ -368,7 +382,7 @@ impl LibraryWindow {
         match self.pin_wait.take() {
             Some(wait) if wait.profile_id == *profile.id => {
                 wait.reply.send(token.clone()).ok();
-                self.show_home(client, wait.home, cx);
+                self.show_pages(client, wait.pages, window, cx);
             }
             _ => self.open_profile(client, profile.clone(), token.clone(), window, cx),
         }
@@ -387,11 +401,11 @@ impl LibraryWindow {
         self._pin_requests = Some(cx.spawn_in(window, async move |this, cx| {
             while let Some((profile_id, reply)) = asked.next().await {
                 this.update_in(cx, |this, window, cx| {
-                    // Only Home sends profile requests. On another screen the request fails.
-                    let Screen::Home(home) = &this.screen else {
+                    // Only the pages send profile requests. On another screen the request fails.
+                    let Screen::Pages(pages) = &this.screen else {
                         return;
                     };
-                    this.pin_wait = Some(PinWait { profile_id: profile_id.clone(), reply, home: home.clone() });
+                    this.pin_wait = Some(PinWait { profile_id: profile_id.clone(), reply, pages: pages.clone() });
                     this.show_picker(client.clone(), Some(&profile_id), window, cx);
                 })
                 .ok();
@@ -425,6 +439,12 @@ impl LibraryWindow {
         let Some(client) = &self.client else {
             return;
         };
+        if let Screen::Pages(pages) = &self.screen
+            && let Some((_, account)) = self.state.active()
+            && let Some(profile) = &account.last_profile
+        {
+            self.parked = Some((profile.clone(), pages.clone()));
+        }
         if !matches!(self.screen, Screen::SignIn(_)) {
             self.show_sign_in(client.server().clone(), Some(Error::SignedOut.to_string()), window, cx);
         }
@@ -536,7 +556,7 @@ impl Render for LibraryWindow {
         let page = match &self.screen {
             Screen::Connect => page.child(self.render_connect(window, cx)),
             Screen::SignIn(view) => page.child(view.clone()),
-            Screen::Home(view) => page.child(view.clone()),
+            Screen::Pages(view) => page.child(view.clone()),
             Screen::Profiles(view) => page.child(view.clone()),
             Screen::Message(text) => page.child(div().max_w(px(560.)).text_color(t.secondary).child(text.clone())),
             Screen::Unreachable(text) => page.child(

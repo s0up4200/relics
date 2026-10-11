@@ -1,12 +1,12 @@
-//! Home: the sidebar, and the Home sections of the active Profile as rows that scroll
-//! sideways. A Featured section shows as a hero above the other rows.
+//! Home: the Home sections of the active Profile as rows that scroll sideways. A Featured section shows
+//! as a hero above the other rows. The Recommended tab of a Library uses the same view for its rows.
 
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, FontWeight, ImageSource, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, RenderImage, Resource, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription, Task, Window, div, img, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement, Render, RenderImage, Resource, ScrollHandle, StatefulInteractiveElement as _, Styled,
+    StyledImage as _, Subscription, Task, Window, div, img, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -16,16 +16,28 @@ use crate::artwork::{self, ArtworkCache};
 /// The user pressed p on a card.
 pub struct Play(pub wire::CatalogItem);
 
+/// The user pressed Enter on a card, or clicked it.
+pub struct Open(pub wire::CatalogItem);
+
+/// Where the rows come from.
+#[derive(Debug, Clone)]
+pub enum Rows {
+    Home,
+    /// The Recommended tab of the Library with this id.
+    Library(String),
+}
+
 pub struct Home {
     client: Arc<Client>,
-    profile_name: String,
+    rows: Rows,
     /// The sections in display order: the Featured sections first, then the others in layout order.
     sections: Vec<HomeSection>,
     status: Option<String>,
     /// The last load failed. The page shows Retry next to the error.
     failed: bool,
     focus: Focus,
-    focus_handle: FocusHandle,
+    /// The page has the keyboard focus, so the focused card shows the focus ring.
+    pub active: bool,
     page_scroll: ScrollHandle,
     row_scrolls: Vec<ScrollHandle>,
     /// The decoded Thumbhash of each card, in the order of `sections`.
@@ -38,11 +50,16 @@ pub struct Home {
 }
 
 impl EventEmitter<Play> for Home {}
+impl EventEmitter<Open> for Home {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
-    Sidebar,
-    Card { row: usize, col: usize },
+    /// No card: the rows are empty, or h or Left left the first column.
+    Outside,
+    Card {
+        row: usize,
+        col: usize,
+    },
 }
 
 /// Moves the focus for an arrow or hjkl key. `rows` holds the number of cards in each row.
@@ -51,8 +68,8 @@ pub fn move_focus(focus: Focus, key: &str, rows: &[usize]) -> Focus {
         range.find(|&row| rows[row] > 0).map(|row| Focus::Card { row, col: col.min(rows[row] - 1) })
     };
     let moved = match (focus, key) {
-        (Focus::Sidebar, "l" | "right") => first_card_in(Box::new(0..rows.len()), 0),
-        (Focus::Card { col: 0, .. }, "h" | "left") => Some(Focus::Sidebar),
+        (Focus::Outside, "l" | "right") => first_card_in(Box::new(0..rows.len()), 0),
+        (Focus::Card { col: 0, .. }, "h" | "left") => Some(Focus::Outside),
         (Focus::Card { row, col }, "h" | "left") => Some(Focus::Card { row, col: col - 1 }),
         (Focus::Card { row, col }, "l" | "right") if col + 1 < rows[row] => Some(Focus::Card { row, col: col + 1 }),
         (Focus::Card { row, col }, "j" | "down") => first_card_in(Box::new(row + 1..rows.len()), col),
@@ -63,9 +80,7 @@ pub fn move_focus(focus: Focus, key: &str, rows: &[usize]) -> Focus {
 }
 
 impl Home {
-    pub fn new(client: Arc<Client>, profile_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle, cx);
+    pub fn new(client: Arc<Client>, rows: Rows, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // A larger scale loads the list again only when the rung goes up.
         let scale = cx.observe_window_bounds(window, |this, window, cx| {
             let size = artwork::image_size(artwork::HOME_CARD_WIDTH, window.scale_factor());
@@ -82,15 +97,15 @@ impl Home {
         .detach();
         let mut home = Self {
             client,
-            profile_name,
+            rows,
             sections: Vec::new(),
             thumbs: Vec::new(),
             artwork: artwork::global(cx),
             image_size: artwork::image_size(artwork::HOME_CARD_WIDTH, window.scale_factor()),
             status: Some("Loading…".into()),
             failed: false,
-            focus: Focus::Sidebar,
-            focus_handle,
+            focus: Focus::Outside,
+            active: false,
             page_scroll: ScrollHandle::new(),
             row_scrolls: Vec::new(),
             _loading: Task::ready(()),
@@ -103,9 +118,12 @@ impl Home {
     /// Loads the Home sections, with artwork URLs for `image_size`.
     fn load(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let image_size = self.image_size;
+        let (image_size, rows) = (self.image_size, self.rows.clone());
         self._loading = cx.spawn(async move |this, cx| {
-            let result = client.home(image_size).await;
+            let result = match rows {
+                Rows::Home => client.home(image_size).await,
+                Rows::Library(id) => client.library_rows(&id, image_size).await,
+            };
             this.update(cx, |this, cx| {
                 match result {
                     Ok(mut sections) => {
@@ -123,10 +141,10 @@ impl Home {
                         let rows = this.row_lengths();
                         let lost = match this.focus {
                             Focus::Card { row, col } => rows.get(row).is_none_or(|&cards| col >= cards),
-                            Focus::Sidebar => first_load,
+                            Focus::Outside => first_load,
                         };
                         if lost {
-                            this.focus = move_focus(Focus::Sidebar, "l", &rows);
+                            this.focus = move_focus(Focus::Outside, "l", &rows);
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
@@ -146,68 +164,29 @@ impl Home {
         self.sections.iter().map(|s| s.items.len()).collect()
     }
 
-    fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if let (Focus::Card { row, col }, "p") = (self.focus, event.keystroke.key.as_str()) {
-            cx.emit(Play(self.sections[row].items[col].clone()));
-            cx.stop_propagation();
-            return;
+    /// Handles a key. Returns false when Home does not use it, for example h or Left in the first column.
+    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if let (Focus::Card { row, col }, "p" | "enter") = (self.focus, key) {
+            let item = self.sections[row].items[col].clone();
+            if key == "p" {
+                cx.emit(Play(item));
+            } else {
+                cx.emit(Open(item));
+            }
+            return true;
         }
-        let focus = move_focus(self.focus, event.keystroke.key.as_str(), &self.row_lengths());
+        let focus = move_focus(self.focus, key, &self.row_lengths());
+        let Focus::Card { row, col } = focus else {
+            return false;
+        };
         if focus == self.focus {
-            return;
+            return false;
         }
-        if let Focus::Card { row, col } = focus {
-            self.page_scroll.scroll_to_item(row);
-            self.row_scrolls[row].scroll_to_item(col);
-        }
+        self.page_scroll.scroll_to_item(row);
+        self.row_scrolls[row].scroll_to_item(col);
         self.focus = focus;
-        cx.stop_propagation();
         cx.notify();
-    }
-
-    fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy();
-        let selected = self.focus == Focus::Sidebar;
-        div()
-            .w(px(240.))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .p(px(14.))
-            .gap(px(4.))
-            .bg(t.inset)
-            .border_r_1()
-            .border_color(t.divider())
-            .child(
-                div()
-                    .px(px(10.))
-                    .pb(px(14.))
-                    .text_size(px(22.))
-                    .font_weight(FontWeight::EXTRA_BOLD)
-                    .text_color(t.bright)
-                    .child("silo"),
-            )
-            .child(
-                div()
-                    .px(px(10.))
-                    .py(px(8.))
-                    .rounded(px(8.))
-                    .bg(t.selected_fill())
-                    .text_color(t.bright)
-                    .border_2()
-                    .border_color(if selected { t.accent } else { gpui::transparent_black() })
-                    .child("Home"),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .px(px(10.))
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(14.)).text_color(t.bright).child(self.profile_name.clone()))
-                    .child(div().text_size(px(11.)).text_color(t.secondary).child(self.client.server().name.clone())),
-            )
+        true
     }
 
     fn row(&self, index: usize, section: &HomeSection, cx: &Context<Self>) -> AnyElement {
@@ -219,7 +198,7 @@ impl Home {
             (false, false) => (150., 225.),
         };
         let cards = section.items.iter().enumerate().map(|(col, item)| {
-            let focused = self.focus == Focus::Card { row: index, col };
+            let focused = self.active && self.focus == Focus::Card { row: index, col };
             let url = art_url(section, item).and_then(|url| self.client.server().url.join(url).ok());
             let thumb = self.thumbs.get(index).and_then(|row| row.get(col)).cloned().flatten();
             let mut art = div()
@@ -315,41 +294,28 @@ impl Render for Home {
         let rows: Vec<_> = self.sections.iter().enumerate().map(|(i, s)| self.row(i, s, cx)).collect();
         div()
             .image_cache(self.artwork.clone())
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(Self::key))
+            .id("home-page")
             .size_full()
             .flex()
-            .bg(t.background)
-            .text_color(t.foreground)
-            .font_family(t.font.clone())
-            .text_size(px(14.))
-            .child(self.sidebar(cx))
-            .child(
+            .flex_col()
+            .gap(px(36.))
+            .pt(px(32.))
+            .pb(px(80.))
+            .overflow_y_scroll()
+            .track_scroll(&self.page_scroll)
+            .children(rows)
+            .children(self.status.clone().map(|status| {
+                let retry = button("home-retry", "Retry", ButtonVariant::Secondary, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
                 div()
-                    .id("home-page")
-                    .flex_1()
-                    .h_full()
+                    .px(px(40.))
                     .flex()
-                    .flex_col()
-                    .gap(px(36.))
-                    .pt(px(32.))
-                    .pb(px(80.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.page_scroll)
-                    .children(rows)
-                    .children(self.status.clone().map(|status| {
-                        let retry = button("home-retry", "Retry", ButtonVariant::Secondary, cx)
-                            .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
-                        div()
-                            .px(px(40.))
-                            .flex()
-                            .items_center()
-                            .gap(px(14.))
-                            .text_color(if self.failed { t.danger } else { t.secondary })
-                            .child(status)
-                            .children(self.failed.then_some(retry))
-                    })),
-            )
+                    .items_center()
+                    .gap(px(14.))
+                    .text_color(if self.failed { t.danger } else { t.secondary })
+                    .child(status)
+                    .children(self.failed.then_some(retry))
+            }))
     }
 }
 
@@ -371,7 +337,7 @@ fn thumb(section: &HomeSection, item: &wire::CatalogItem) -> Option<Arc<RenderIm
 }
 
 /// The artwork of a card. The Thumbhash shows while the image loads and after it fails.
-fn artwork_image(url: Option<String>, thumb: Option<Arc<RenderImage>>) -> AnyElement {
+pub(crate) fn artwork_image(url: Option<String>, thumb: Option<Arc<RenderImage>>) -> AnyElement {
     let preview = move || match thumb.clone() {
         Some(thumb) => img(ImageSource::Render(thumb)).size_full().object_fit(ObjectFit::Cover).into_any_element(),
         None => div().into_any_element(),
@@ -394,7 +360,7 @@ fn progress(item: &wire::CatalogItem) -> Option<f32> {
 }
 
 /// The line below the title: the series with the season and episode, or the year.
-fn short_line(item: &wire::CatalogItem) -> String {
+pub(crate) fn short_line(item: &wire::CatalogItem) -> String {
     match (&item.series_title, item.season_number, item.episode_number) {
         (Some(series), Some(season), Some(episode)) => format!("{series} · S{season} E{episode}"),
         _ => item.year.map(|year| year.to_string()).unwrap_or_default(),
@@ -409,14 +375,14 @@ mod tests {
     fn hjkl_and_arrows_move_between_the_sidebar_and_the_cards() {
         let rows = [3, 0, 2];
         let card = |row, col| Focus::Card { row, col };
-        assert_eq!(move_focus(Focus::Sidebar, "l", &rows), card(0, 0));
-        assert_eq!(move_focus(card(0, 0), "h", &rows), Focus::Sidebar);
+        assert_eq!(move_focus(Focus::Outside, "l", &rows), card(0, 0));
+        assert_eq!(move_focus(card(0, 0), "h", &rows), Focus::Outside);
         assert_eq!(move_focus(card(0, 1), "right", &rows), card(0, 2));
         assert_eq!(move_focus(card(0, 2), "l", &rows), card(0, 2), "the last card stays");
         assert_eq!(move_focus(card(0, 2), "j", &rows), card(2, 1), "an empty row is skipped");
         assert_eq!(move_focus(card(2, 1), "up", &rows), card(0, 1));
         assert_eq!(move_focus(card(0, 1), "k", &rows), card(0, 1));
-        assert_eq!(move_focus(Focus::Sidebar, "j", &rows), Focus::Sidebar);
-        assert_eq!(move_focus(Focus::Sidebar, "l", &[]), Focus::Sidebar);
+        assert_eq!(move_focus(Focus::Outside, "j", &rows), Focus::Outside);
+        assert_eq!(move_focus(Focus::Outside, "l", &[]), Focus::Outside);
     }
 }
