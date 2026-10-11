@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc;
-use gpui::{AppContext as _, Context, EventEmitter, Task};
+use gpui::{AppContext as _, Context, EventEmitter, Hsla, Rgba, Task};
+use gpui_omarchy::ActiveTheme as _;
 
 use crate::api::{Client, wire};
 use crate::mpv;
@@ -124,6 +125,13 @@ impl PlayerWindow {
             }
             Command::ClosePlayer => self.close_mpv(),
             Command::ShowError(text) => cx.emit(PlaybackError(text)),
+            Command::SendTheme => {
+                let theme = cx.omarchy();
+                let [accent, foreground, background] = [theme.accent, theme.foreground, theme.background].map(hex);
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.send_theme(&accent, &foreground, &background)) {
+                    eprintln!("silo-omarchy: cannot send the theme to the player: {err}");
+                }
+            }
         }
     }
 
@@ -136,7 +144,15 @@ impl PlayerWindow {
     fn open_mpv(&mut self, cx: &mut Context<Self>) -> Result<&mpv::Player, mpv::Error> {
         if self.mpv.is_none() {
             let (tx, mut rx) = mpsc::unbounded();
-            self.mpv = Some(mpv::Player::open(HWDEC, &[], move |input| {
+            let controls = mpv::find_controls(|name| std::env::var_os(name));
+            let options = match controls.as_deref().and_then(|path| path.to_str()) {
+                Some(path) => vec![("scripts", path)],
+                None => {
+                    eprintln!("silo-omarchy: silo-controls.lua not found, so the player has no controls");
+                    vec![]
+                }
+            };
+            self.mpv = Some(mpv::Player::open(HWDEC, &options, move |input| {
                 tx.unbounded_send(input).ok();
             })?);
             self.mpv_id += 1;
@@ -156,4 +172,11 @@ impl PlayerWindow {
         }
         Ok(self.mpv.as_ref().expect("opened above"))
     }
+}
+
+/// A color as `#RRGGBB`.
+fn hex(color: Hsla) -> String {
+    let Rgba { r, g, b, .. } = color.into();
+    let byte = |c: f32| (c * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
 }

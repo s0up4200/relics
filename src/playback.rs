@@ -44,6 +44,8 @@ pub enum Input {
     End,
     /// The periodic tick of the caller.
     Tick,
+    /// The Lua controller loaded and waits for the theme.
+    ControlsReady,
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -66,6 +68,8 @@ pub enum Command {
     ClosePlayer,
     /// Show this text to the user.
     ShowError(String),
+    /// Send the theme colors to the Lua controller.
+    SendTheme,
 }
 
 pub struct Session {
@@ -141,6 +145,7 @@ impl Session {
                 Vec::new()
             }
             Input::Tick => self.report(now),
+            Input::ControlsReady => vec![Command::SendTheme],
             Input::EndOfFile => {
                 let position = self.end_position();
                 self.finish(position, true)

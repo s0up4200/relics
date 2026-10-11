@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use silo_omarchy::mpv::Player;
+use silo_omarchy::mpv::{Player, find_controls};
 use silo_omarchy::playback::Input;
 
 /// One request that the stub got: the path, the `Authorization` header and the device name header.
@@ -173,4 +173,87 @@ fn closing_the_player_ends_with_shutdown() {
     .unwrap();
     drop(player);
     wait_for(&rx, |input| matches!(input, Input::Shutdown));
+}
+
+fn open_with_controls() -> (Player, Receiver<Input>) {
+    let (tx, rx) = mpsc::channel();
+    let script = format!("{}/data/silo-controls.lua", env!("CARGO_MANIFEST_DIR"));
+    let player = Player::open("no", &[("vo", "null"), ("ao", "null"), ("scripts", &script)], move |input| {
+        tx.send(input).ok();
+    })
+    .unwrap();
+    (player, rx)
+}
+
+#[test]
+fn the_controller_says_that_it_is_ready() {
+    let (_player, rx) = open_with_controls();
+    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
+}
+
+#[test]
+fn the_controller_is_found_in_the_data_dirs_in_order() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("controls-search");
+    std::fs::remove_dir_all(&root).ok();
+    let script = |dir: &str| {
+        let path = root.join(dir).join("silo-controls.lua");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        path
+    };
+    let own = script("own");
+    let user = script("home/.local/share/silo-omarchy");
+    let system = script("usr/share/silo-omarchy");
+    std::fs::create_dir_all(root.join("empty")).unwrap();
+    let dir = |d: &str| Some(root.join(d).into_os_string());
+    let data_dirs = Some(format!("{0}/empty:{0}/usr/share", root.display()).into());
+
+    let found = find_controls(|name| match name {
+        "SILO_OMARCHY_DATA" => dir("own"),
+        "HOME" => dir("home"),
+        "XDG_DATA_DIRS" => data_dirs.clone(),
+        _ => None,
+    });
+    assert_eq!(found, Some(own));
+    // XDG_DATA_HOME is $HOME/.local/share when it is not set.
+    let found = find_controls(|name| match name {
+        "SILO_OMARCHY_DATA" => dir("empty"),
+        "HOME" => dir("home"),
+        "XDG_DATA_DIRS" => data_dirs.clone(),
+        _ => None,
+    });
+    assert_eq!(found, Some(user));
+    let found = find_controls(|name| match name {
+        "XDG_DATA_HOME" => dir("empty"),
+        "XDG_DATA_DIRS" => data_dirs.clone(),
+        _ => None,
+    });
+    assert_eq!(found, Some(system));
+    assert_eq!(find_controls(|name| (name == "XDG_DATA_HOME").then(|| dir("empty")).flatten()), None);
+}
+
+/// Waits up to 15 s until the mpv property `name` has the value `want`.
+fn wait_for_property(player: &Player, name: &str, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while player.property(name).ok().as_deref() != Some(want) {
+        assert!(Instant::now() < deadline, "{name} is {:?}, not {want}", player.property(name).ok());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_cycles_the_audio_track_only_for_the_file_that_plays() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open_with_controls();
+    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
+    let url = format!("{}/sample.mp4", stub.url);
+    player.load(&url, &headers(), 0.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
+    wait_for_property(&player, "aid", "1");
+    // The test video has one audio track, so the next track is none.
+    player.command(&["keypress", "a"]).unwrap();
+    wait_for_property(&player, "aid", "no");
+    player.load(&url, &headers(), 0.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
+    wait_for_property(&player, "aid", "1");
 }

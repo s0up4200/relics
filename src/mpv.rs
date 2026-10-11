@@ -3,6 +3,8 @@
 //! session and turns mpv events into Playback session inputs.
 #![allow(clippy::disallowed_types)]
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -38,6 +40,12 @@ impl Player {
             init.set_option("fullscreen", true)?;
             init.set_option("hwdec", hwdec)?;
             init.set_option("load-scripts", false)?;
+            // The Lua controller draws the controls, so the built-in controller and OSD bar are off.
+            init.set_option("osc", false)?;
+            init.set_option("osd-bar", false)?;
+            // mpv keeps a track change for the next file. A track change must apply only to
+            // the Playback session that plays now.
+            init.set_option("reset-on-next-file", "aid,sid")?;
             // Without this, the built-in ytdl hook opens a failed URL again without the headers.
             init.set_option("ytdl", false)?;
             // libmpv turns off the keys and the window close by default. q and the close
@@ -72,6 +80,41 @@ impl Player {
         let options = [option("http-header-fields", &fields.join(",")), option("start", &start.to_string())];
         self.mpv.command("loadfile", &[url, "replace", "-1", &options.join(",")])
     }
+
+    /// Sends the theme colors, as `#RRGGBB`, to the Lua controller.
+    pub fn send_theme(&self, accent: &str, foreground: &str, background: &str) -> Result<(), Error> {
+        self.mpv.command("script-message", &["silo-theme", accent, foreground, background])
+    }
+
+    /// Runs one mpv input command, for example `["keypress", "a"]`. The tests use it.
+    pub fn command(&self, args: &[&str]) -> Result<(), Error> {
+        let (name, args) = args.split_first().expect("a command has a name");
+        self.mpv.command(name, args)
+    }
+
+    /// Reads an mpv property as text. The tests use it.
+    pub fn property(&self, name: &str) -> Result<String, Error> {
+        self.mpv.get_property(name)
+    }
+}
+
+/// Finds `silo-controls.lua`, the Lua controller of the Player window. `var` reads an
+/// environment variable. The search order is `$SILO_OMARCHY_DATA`, then
+/// `$XDG_DATA_HOME/silo-omarchy`, then `silo-omarchy` in each `$XDG_DATA_DIRS` entry,
+/// with the XDG defaults when a variable is not set.
+pub fn find_controls(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    // The XDG spec treats an empty variable as not set.
+    let var = |name: &str| var(name).filter(|value| !value.is_empty());
+    let data_home = var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| var("HOME").map(|home| Path::new(&home).join(".local/share")));
+    let data_dirs = var("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    var("SILO_OMARCHY_DATA")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(data_home.into_iter().chain(std::env::split_paths(&data_dirs)).map(|dir| dir.join("silo-omarchy")))
+        .map(|dir| dir.join("silo-controls.lua"))
+        .find(|path| path.is_file())
 }
 
 /// One `name=value` item of an mpv key-value list. The `%length%` prefix quotes the value,
@@ -107,6 +150,7 @@ fn read_events(mpv: &Mpv, on_input: impl Fn(Input)) {
                 ("pause", PropertyData::Flag(paused)) => Input::Paused(paused),
                 _ => continue,
             },
+            Some(Ok(Event::ClientMessage(message))) if message == ["silo-ready"] => Input::ControlsReady,
             // libmpv2 turns an end of file with an error into an error event. This is how a
             // failed load, such as a 401 on the stream URL, arrives.
             Some(Err(_)) => Input::LoadFailed,

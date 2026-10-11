@@ -165,3 +165,9 @@ fn an_unplayable_item_shows_the_server_message() {
         session.step(Input::Started { decision: Decision::Unknown("queued".into()), headers: headers() }, at(0));
     assert!(matches!(&commands[..], [Command::ShowError(text), Command::ClosePlayer] if text.contains("queued")));
 }
+
+#[test]
+fn the_controller_gets_the_theme_when_it_is_ready() {
+    let mut session = playing(None);
+    assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme]);
+}
