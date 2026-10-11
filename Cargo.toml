@@ -1,0 +1,23 @@
+[package]
+name = "silo-omarchy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The gpui crates move in lockstep: gpui-kit 0.7.0 pins gpui-pre =0.3.7, and
+# gpui-pre-reqwest-client and gpui-pre-http-client must have the same version as gpui-pre.
+# Each pin must be 7 days old or more. Raise them together, one bump per PR.
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui-kit = { version = "=0.7.0", default-features = false, features = ["assets"] }
+gpui-omarchy = "=0.2.0"
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.7" }
+libmpv2 = { version = "=6.0.0", default-features = false }
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+futures = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+
+[dev-dependencies]
+http_client = { package = "gpui-pre-http-client", version = "=0.3.7", features = ["test-support"] }

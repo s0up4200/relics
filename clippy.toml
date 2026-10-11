@@ -1,0 +1,4 @@
+# Only the mpv adapter (src/mpv.rs) may hold a libmpv handle.
+disallowed-types = [
+    { path = "libmpv2::Mpv", reason = "only the mpv adapter in src/mpv.rs may use libmpv" },
+]
