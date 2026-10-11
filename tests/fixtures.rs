@@ -5,12 +5,14 @@
 use serde_json::{Value, json};
 use silo_omarchy::api::{Problem, types, wire};
 
-fn dir() -> String {
-    format!("{}/tests/fixtures/silo", env!("CARGO_MANIFEST_DIR"))
+/// `silo` holds the server fixtures, `own` the fixtures that this app adds in the same format.
+fn read_in(dir: &str, file: &str) -> Value {
+    let path = format!("{}/tests/fixtures/{dir}/{file}", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
 fn read(file: &str) -> Value {
-    serde_json::from_str(&std::fs::read_to_string(format!("{}/{file}", dir())).unwrap()).unwrap()
+    read_in("silo", file)
 }
 
 /// Decodes `body` as the schema `name`. `None` means that the test knows no type for it.
@@ -60,15 +62,22 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
 
 /// Each fixture with a JSON body, as (fixture name, schema name, body).
 fn fixtures() -> Vec<(String, String, Value)> {
-    let index = read("index.json");
-    let fixtures = index["fixtures"].as_array().unwrap();
-    assert!(fixtures.len() > 50, "the index lists only {} fixtures", fixtures.len());
-    fixtures
-        .iter()
-        .filter_map(|f| {
-            let schema = f["schema"].as_str()?.strip_prefix("#/components/schemas/").unwrap();
-            let body = read(f["body_file"].as_str()?);
-            Some((f["name"].as_str().unwrap().to_string(), schema.to_string(), body))
+    let server = read("index.json")["fixtures"].as_array().unwrap().len();
+    assert!(server > 50, "the index lists only {server} fixtures");
+    ["silo", "own"]
+        .into_iter()
+        .flat_map(|dir| {
+            let index = read_in(dir, "index.json");
+            index["fixtures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|f| {
+                    let schema = f["schema"].as_str()?.strip_prefix("#/components/schemas/").unwrap();
+                    let body = read_in(dir, f["body_file"].as_str()?);
+                    Some((f["name"].as_str().unwrap().to_string(), schema.to_string(), body))
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }

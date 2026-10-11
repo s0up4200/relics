@@ -12,6 +12,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
 use crate::api::{self, Client, Device, Error, Server, Url};
 use crate::home::{self, Home};
+use crate::player::{PlaybackError, PlayerWindow};
 use crate::secrets;
 use crate::sign_in::{SignIn, SignedIn};
 use crate::state::{SavedAccount, SavedServer, State};
@@ -28,6 +29,12 @@ pub struct LibraryWindow {
     _enter: Subscription,
     /// The subscription to the events of the screen view.
     _screen: Option<Subscription>,
+    player: Entity<PlayerWindow>,
+    /// The last playback error, shown at the bottom of the window.
+    player_error: Option<String>,
+    _player: Subscription,
+    /// The subscription to the Play events of Home.
+    _play: Option<Subscription>,
 }
 
 enum Screen {
@@ -61,6 +68,24 @@ impl LibraryWindow {
         });
         let device =
             Device { id: state.device_id.clone(), name: gethostname::gethostname().to_string_lossy().into_owned() };
+        let player = cx.new(PlayerWindow::new);
+        let player_events = cx.subscribe(&player, |this, _, PlaybackError(text), cx| {
+            this.player_error = Some(text.clone());
+            cx.notify();
+        });
+        // Closing the Library window sends the stop report, closes the player and quits.
+        window.on_window_should_close(cx, {
+            let player = player.clone();
+            move |_, cx| {
+                let stopped = player.update(cx, |player, cx| player.quit(cx));
+                cx.spawn(async move |cx| {
+                    stopped.await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+                false
+            }
+        });
         let mut this = Self {
             state,
             state_dir,
@@ -71,6 +96,10 @@ impl LibraryWindow {
             task: None,
             _enter: enter,
             _screen: None,
+            player,
+            player_error: None,
+            _player: player_events,
+            _play: None,
         };
         this.restore(window, cx);
         this
@@ -172,6 +201,13 @@ impl LibraryWindow {
                             }
                             this.save_state();
                             let home = cx.new(|cx| Home::new(client.clone(), profile.name.clone(), window, cx));
+                            this._play = Some(cx.subscribe(&home, {
+                                let client = client.clone();
+                                move |this, _, home::Play(item), cx| {
+                                    this.player_error = None;
+                                    this.player.update(cx, |player, cx| player.play(client.clone(), item, cx));
+                                }
+                            }));
                             let server = client.server().clone();
                             this._screen = Some(cx.subscribe_in(
                                 &home,
@@ -250,11 +286,23 @@ impl Render for LibraryWindow {
             .bg(t.background)
             .text_color(t.foreground)
             .font_family(t.font.clone());
-        match &self.screen {
+        let page = match &self.screen {
             Screen::Connect => page.child(self.render_connect(window, cx)),
             Screen::SignIn(view) => page.child(view.clone()),
             Screen::Home(view) => page.child(view.clone()),
             Screen::Message(text) => page.child(div().max_w(px(560.)).text_color(t.secondary).child(text.clone())),
-        }
+        };
+        page.children(self.player_error.clone().map(|text| {
+            div()
+                .absolute()
+                .bottom(px(24.))
+                .left(px(24.))
+                .px(px(16.))
+                .py(px(10.))
+                .rounded(px(12.))
+                .bg(t.surface)
+                .text_color(t.danger)
+                .child(text)
+        }))
     }
 }

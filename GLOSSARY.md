@@ -26,3 +26,14 @@ _Avoid_: Shelf, carousel, rail
 **Featured section**:
 A Home section that the server marks as featured. The Library window shows it as a hero above the other rows.
 _Avoid_: Banner
+
+**Player window**:
+The window that libmpv draws video in. Its app id is `silo-player`. The app has at most one Player window. It can show several Playback sessions one after another. It closes when the user quits it or the last item ends.
+
+**Playback session**:
+One viewing of one Item, from the start request to the stop report. The server knows it by its session id. A reload at the current position and a replan stay in the same Playback session.
+_Avoid_: stream, play
+
+**Normal end**:
+An end of file that mpv reports within 8 s of the Item's duration or at 98.5% of it or more. Only a Normal end lets the stop report carry the full duration.
+_Avoid_: finished, complete

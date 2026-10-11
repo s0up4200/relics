@@ -9,10 +9,13 @@ use gpui::{
 };
 use gpui_omarchy::ActiveTheme;
 
-use crate::api::{Client, Error, HomeSection};
+use crate::api::{Client, Error, HomeSection, wire};
 
 /// A request failed because the server refused the refresh token.
 pub struct SignedOut;
+
+/// The user pressed p on a card.
+pub struct Play(pub wire::CatalogItem);
 
 pub struct Home {
     client: Arc<Client>,
@@ -28,6 +31,7 @@ pub struct Home {
 }
 
 impl EventEmitter<SignedOut> for Home {}
+impl EventEmitter<Play> for Home {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -95,6 +99,11 @@ impl Home {
     }
 
     fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let (Focus::Card { row, col }, "p") = (self.focus, event.keystroke.key.as_str()) {
+            cx.emit(Play(self.sections[row].items[col].clone()));
+            cx.stop_propagation();
+            return;
+        }
         let focus = move_focus(self.focus, event.keystroke.key.as_str(), &self.row_lengths());
         if focus == self.focus {
             return;

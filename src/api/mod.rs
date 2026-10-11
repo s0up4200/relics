@@ -12,7 +12,9 @@ pub mod types;
 pub mod wire;
 
 pub use gpui::http_client::Url;
-pub use types::Problem;
+pub use types::{Decision, Problem};
+
+use crate::playback::Sample;
 
 /// A Silo server that the user added. The app knows it by `id`, the stable id that
 /// the server reports, not by its URL.
@@ -153,6 +155,8 @@ pub struct Client {
     /// each refresh, so a second refresh with the old token can fail.
     refreshing: futures::lock::Mutex<()>,
     on_tokens: Mutex<SaveTokens>,
+    /// The id of the server installation from the playback capabilities. Progress and stop send it.
+    installation_id: Mutex<String>,
 }
 
 type SaveTokens = Box<dyn Fn(&Tokens) + Send + Sync>;
@@ -171,6 +175,7 @@ impl Client {
             auth: Mutex::new(Auth { tokens, profile_id: None }),
             refreshing: futures::lock::Mutex::new(()),
             on_tokens: Mutex::new(Box::new(|_| {})),
+            installation_id: Mutex::default(),
         }
     }
 
@@ -281,6 +286,74 @@ impl Client {
         (self.on_tokens.lock().unwrap())(&tokens);
         Ok(())
     }
+
+    // Playback (#25).
+
+    /// The headers that mpv sends on each media request: the auth, profile and device headers.
+    pub fn media_headers(&self) -> Vec<(String, String)> {
+        self.headers().0.into_iter().map(|(name, value)| (name.to_string(), value)).collect()
+    }
+
+    /// Starts a Playback session for the Item `content_id`. With no `start_position`, the
+    /// server starts at the saved resume point of the Profile.
+    pub async fn start_playback(&self, content_id: &str, start_position: Option<f64>) -> Result<Decision, Error> {
+        let versions: wire::FileVersionCollection =
+            self.call(Method::GET, &format!("catalog/items/{content_id}/versions"), None).await?;
+        let Some(version) = versions.items.first() else {
+            return Ok(Decision::Unavailable {
+                reason: "no_file".into(),
+                message: "This Item has no file to play".into(),
+            });
+        };
+        let capabilities: wire::PlaybackCapabilities = self.call(Method::GET, "playback/capabilities", None).await?;
+        let installation_id = capabilities.installation_id.map(String::from).unwrap_or_default();
+        *self.installation_id.lock().unwrap() = installation_id.clone();
+        let mut features = vec!["playback_plan_v3"];
+        if capabilities.features.iter().any(|f| f == "header_authenticated_media_v1") {
+            features.push("header_authenticated_media_v1");
+        }
+        let profile_id = self.auth.lock().unwrap().profile_id.clone().unwrap_or_default();
+        let mut body = start_request(&version.file_id, &installation_id, &profile_id, &features);
+        if let Some(position) = start_position {
+            body["start_position"] = position.into();
+        }
+        let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
+        let mut decision = Decision::from(decision);
+        if let Decision::Playable { plan, .. } = &mut decision {
+            // The plan URL is relative to the server origin. Join it below the base URL, which keeps a sub-path.
+            let url = self.server.url.join(plan.stream.url.trim_start_matches('/')).map_err(|_| Error::InvalidUrl)?;
+            plan.stream.url = url.to_string();
+        }
+        Ok(decision)
+    }
+
+    pub async fn report_progress(&self, session_id: &str, sample: &Sample) -> Result<(), Error> {
+        let body = serde_json::json!({
+            "installation_id": *self.installation_id.lock().unwrap(),
+            "sequence": sample.sequence,
+            "position": sample.position,
+            "is_paused": sample.paused,
+        });
+        let _: wire::PlaybackMutation =
+            self.call(Method::POST, &format!("playback/{session_id}/progress"), Some(body)).await?;
+        Ok(())
+    }
+
+    /// Stops the Playback session. The server writes `sample` as the final position.
+    pub async fn stop_playback(&self, session_id: &str, sample: Option<&Sample>) -> Result<(), Error> {
+        let mut body = serde_json::json!({
+            "installation_id": *self.installation_id.lock().unwrap(),
+            "stop_id": uuid::Uuid::new_v4().to_string(),
+        });
+        if let Some(sample) = sample {
+            body["sequence"] = sample.sequence.into();
+            body["position"] = sample.position.into();
+            body["is_paused"] = sample.paused.into();
+        }
+        let _: wire::PlaybackMutation =
+            self.call(Method::DELETE, &format!("playback/{session_id}"), Some(body)).await?;
+        Ok(())
+    }
 }
 
 fn is_unauthorized(err: &Error) -> bool {
@@ -334,4 +407,73 @@ async fn send<T: DeserializeOwned>(
     } else {
         Err(Error::Status(status.as_u16()))
     }
+}
+
+/// The body of a playback protocol v3 start request. mpv uses FFmpeg, which decodes
+/// nearly every codec, so the app declares wide flat lists with `declared` evidence
+/// and lets the server choose direct play or a transcode.
+fn start_request(file_id: &str, installation_id: &str, profile_id: &str, features: &[&str]) -> serde_json::Value {
+    let video = ["h264", "hevc", "av1", "vp9", "vp8", "mpeg2video", "mpeg4", "vc1"];
+    let audio = ["aac", "mp3", "opus", "vorbis", "flac", "alac", "ac3", "eac3", "dts", "truehd", "pcm"];
+    let containers = ["mp4", "mkv", "webm", "mov", "avi", "mpegts", "m2ts"];
+    // mpv draws ASS with its styles and fonts, and draws bitmap subtitles.
+    let subtitles = serde_json::json!({
+        "embedded_text": true,
+        "sidecar_text": true,
+        "ass_styling": true,
+        "embedded_bitmap": true,
+        "sidecar_bitmap": true,
+        "font_attachments": true,
+    });
+    let delivery = |containers: &[&str], claims: &[&str]| {
+        serde_json::json!({
+            "enabled": true,
+            "supported_on_device": true,
+            "containers": containers,
+            "video_codecs": video,
+            "audio_decode_codecs": audio,
+            "audio_passthrough_codecs": [],
+            "subtitles": subtitles,
+            "features": [],
+            "auth_header_refresh": false,
+            "validated_claims": claims,
+            "transformations": [],
+        })
+    };
+    serde_json::json!({
+        "protocol_version": 3,
+        "client_features": features,
+        "file_id": file_id,
+        "installation_id": installation_id,
+        "profile_id": profile_id,
+        "playback_attempt_id": uuid::Uuid::new_v4().to_string(),
+        "quality_preference": "original",
+        "subtitle_fidelity_preference": "preserve",
+        "metered": false,
+        "client_capabilities": {
+            "video_evidence": "declared",
+            "audio_evidence": "declared",
+            "codecs_video": video,
+            // On the declared tier the server treats both lists the same.
+            "codecs_video_hardware": video,
+            "codecs_audio": audio,
+            "containers": containers,
+            "hdr": false,
+        },
+        "client_playback_context": {
+            "protocol_version": 3,
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "form_factor": "desktop",
+            "device": { "platform": "linux" },
+            "output": {},
+            "deliveries": {
+                "original_http": delivery(
+                    &containers,
+                    &["client_managed_dynamic_range_v1", "client_selected_audio_track_v1"],
+                ),
+                "progressive": delivery(&containers, &[]),
+                "hls": delivery(&["hls"], &[]),
+            },
+        },
+    })
 }

@@ -95,3 +95,29 @@ open_enum! {
     /// The kind of a Marker.
     MarkerKind { Intro = "intro", Credits = "credits", Recap = "recap", Preview = "preview" }
 }
+
+/// The answer of the server to a playback start or replan.
+#[derive(Debug, Clone)]
+pub enum Decision {
+    /// The server made a plan. `Client::start_playback` makes its `stream.url` absolute.
+    Playable { session_id: String, plan: Box<super::wire::PlaybackPlan> },
+    /// The server cannot play the Item for this client. `message` is for the user.
+    Unavailable { reason: String, message: String },
+    /// An outcome that this version of the app does not know.
+    Unknown(String),
+}
+
+impl From<super::wire::PlaybackDecision> for Decision {
+    fn from(decision: super::wire::PlaybackDecision) -> Self {
+        match (decision.outcome.as_str(), decision.playback_plan, decision.terminal) {
+            ("playable", Some(plan), _) => {
+                let session_id = decision.session_id.or_else(|| plan.session_id.clone()).unwrap_or_default();
+                Decision::Playable { session_id, plan: Box::new(plan) }
+            }
+            ("adaptation_unavailable", _, Some(terminal)) => {
+                Decision::Unavailable { reason: terminal.reason, message: terminal.message }
+            }
+            _ => Decision::Unknown(decision.outcome),
+        }
+    }
+}
