@@ -1,7 +1,10 @@
-//! The Library window. It picks the screen: add a Server, sign in, or Home.
+//! The Library window. It picks the screen: add a Server, sign in, choose a Profile, or Home.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use futures::channel::{mpsc, oneshot};
+use futures::{FutureExt as _, StreamExt as _};
 
 use gpui::{
     AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled, Subscription, Task,
@@ -10,9 +13,10 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
-use crate::api::{self, Client, Device, Error, Server, Url};
+use crate::api::{self, Client, Device, Error, Server, Url, wire};
 use crate::home::{self, Home};
 use crate::player::{PlaybackError, PlayerWindow};
+use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
 use crate::sign_in::{SignIn, SignedIn};
 use crate::state::{SavedAccount, SavedServer, State};
@@ -35,6 +39,18 @@ pub struct LibraryWindow {
     _player: Subscription,
     /// The subscription to the Play events of Home.
     _play: Option<Subscription>,
+    /// The Profiles of the active Account.
+    profiles: Vec<wire::Profile>,
+    /// A request that waits for the PIN of its Profile.
+    pin_wait: Option<PinWait>,
+    _pin_requests: Option<Task<()>>,
+}
+
+struct PinWait {
+    profile_id: String,
+    reply: oneshot::Sender<Option<String>>,
+    /// The Home that sent the request. It comes back after the PIN entry.
+    home: Entity<Home>,
 }
 
 enum Screen {
@@ -42,6 +58,7 @@ enum Screen {
     Connect,
     SignIn(Entity<SignIn>),
     Home(Entity<Home>),
+    Profiles(Entity<ProfilePicker>),
     /// A full-window message, for example while the app restores the sign-in.
     Message(String),
 }
@@ -100,6 +117,9 @@ impl LibraryWindow {
             player_error: None,
             _player: player_events,
             _play: None,
+            profiles: Vec::new(),
+            pin_wait: None,
+            _pin_requests: None,
         };
         this.restore(window, cx);
         this
@@ -178,69 +198,157 @@ impl LibraryWindow {
         self.open_account(event.client.clone(), window, cx);
     }
 
-    /// Keeps the new tokens after each refresh, and opens the Profile of the Account.
+    /// Keeps the new tokens after each refresh, and opens the Profile of the Account: the last Profile, the
+    /// only Profile without a PIN, or else the Profile picker.
     fn open_account(&mut self, client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) {
         let executor = cx.background_executor().clone();
-        let account_id = self.state.active.clone().map(|(_, account)| account).unwrap_or_default();
+        let account_id = self.account_id();
         let server_id = client.server().id.clone();
         client.on_tokens(move |tokens| {
             let (server_id, account_id, tokens) = (server_id.clone(), account_id.clone(), tokens.clone());
             executor.spawn(async move { secrets::save(&server_id, &account_id, &tokens).await.ok() }).detach();
         });
+        self.listen_for_pin(&client, window, cx);
         self.screen = Screen::Message("Loading Profiles…".into());
         cx.notify();
+        let last = self.state.active().and_then(|(_, account)| account.last_profile.clone());
+        let account_id = self.account_id();
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let profiles = client.profiles().await;
-            this.update_in(cx, |this, window, cx| {
-                this.screen = match profiles {
-                    Ok(profiles) => match api::auto_profile(&profiles) {
-                        Some(profile) => {
-                            client.set_profile(Some(profile.id.to_string()));
-                            if let Some(account) = this.state.active_account_mut() {
-                                account.last_profile = Some(profile.id.to_string());
-                            }
-                            this.save_state();
-                            let home = cx.new(|cx| Home::new(client.clone(), profile.name.clone(), window, cx));
-                            this._play = Some(cx.subscribe(&home, {
-                                let client = client.clone();
-                                move |this, _, home::Play(item), cx| {
-                                    this.player_error = None;
-                                    this.player.update(cx, |player, cx| player.play(client.clone(), item, cx));
-                                }
-                            }));
-                            let server = client.server().clone();
-                            this._screen = Some(cx.subscribe_in(
-                                &home,
-                                window,
-                                move |this, _, _: &home::SignedOut, window, cx| {
-                                    this.show_sign_in(server.clone(), Some(Error::SignedOut.to_string()), window, cx);
-                                },
-                            ));
-                            Screen::Home(home)
-                        }
-                        // ponytail: the Profile picker and the no-Profiles screen come in #23.
-                        None if profiles.is_empty() => {
-                            Screen::Message("This Account has no Profiles. Create one in the Silo web client.".into())
-                        }
-                        None => Screen::Message(
-                            "This Account has more than one Profile or a PIN. The Profile picker is not ready yet."
-                                .into(),
-                        ),
-                    },
-                    Err(Error::SignedOut) => {
-                        return this.show_sign_in(
-                            client.server().clone(),
-                            Some(Error::SignedOut.to_string()),
-                            window,
-                            cx,
-                        );
+            let launch = profiles.as_ref().ok().and_then(|p| api::launch_profile(p, last.as_deref())).cloned();
+            let token = match &launch {
+                Some(profile) if profile.has_pin => {
+                    secrets::load_pin_token(&client.server().id, &account_id, &profile.id).await.ok().flatten()
+                }
+                _ => None,
+            };
+            this.update_in(cx, |this, window, cx| match profiles {
+                Ok(profiles) => {
+                    this.profiles = profiles;
+                    match launch {
+                        Some(profile) => this.open_profile(client, profile, token, window, cx),
+                        None => this.show_picker(client, None, window, cx),
                     }
-                    Err(err) => Screen::Message(err.to_string()),
-                };
-                cx.notify();
+                }
+                Err(Error::SignedOut) => {
+                    this.show_sign_in(client.server().clone(), Some(Error::SignedOut.to_string()), window, cx)
+                }
+                Err(err) => {
+                    this.screen = Screen::Message(err.to_string());
+                    cx.notify();
+                }
             })
             .ok();
         }));
+    }
+
+    /// Makes the Profile active and opens Home. `token` is the PIN token of the Profile.
+    fn open_profile(
+        &mut self,
+        client: Arc<Client>,
+        profile: wire::Profile,
+        token: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pin_wait = None;
+        client.set_profile(Some(profile.id.to_string()));
+        client.set_profile_token(token);
+        if let Some(account) = self.state.active_account_mut() {
+            account.last_profile = Some(profile.id.to_string());
+        }
+        self.save_state();
+        let home = cx.new(|cx| Home::new(client.clone(), profile.name.clone(), window, cx));
+        self.show_home(client, home, window, cx);
+    }
+
+    fn show_home(&mut self, client: Arc<Client>, home: Entity<Home>, window: &mut Window, cx: &mut Context<Self>) {
+        self._play = Some(cx.subscribe(&home, {
+            let client = client.clone();
+            move |this, _, home::Play(item), cx| {
+                this.player_error = None;
+                this.player.update(cx, |player, cx| player.play(client.clone(), item, cx));
+            }
+        }));
+        let server = client.server().clone();
+        self._screen = Some(cx.subscribe_in(&home, window, move |this, _, _: &home::SignedOut, window, cx| {
+            this.show_sign_in(server.clone(), Some(Error::SignedOut.to_string()), window, cx);
+        }));
+        self.screen = Screen::Home(home);
+        cx.notify();
+    }
+
+    /// Shows the Profile picker. With `pin_for`, the PIN entry of that Profile is open.
+    fn show_picker(&mut self, client: Arc<Client>, pin_for: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        let profiles = self.profiles.clone();
+        let view = cx.new(|cx| ProfilePicker::new(client.clone(), profiles, pin_for, window, cx));
+        self._screen = Some(cx.subscribe_in(&view, window, move |this, _, event: &PickerEvent, window, cx| {
+            match event {
+                PickerEvent::Chosen { profile, token } => this.chosen(client.clone(), profile, token, window, cx),
+                PickerEvent::Retry => this.open_account(client.clone(), window, cx),
+                // ponytail: no server sign-out and no keyring delete yet; #35 adds them.
+                PickerEvent::SignOut => this.show_sign_in(client.server().clone(), None, window, cx),
+            }
+        }));
+        self.screen = Screen::Profiles(view);
+        cx.notify();
+    }
+
+    /// The user chose a Profile in the picker. When a request waits for the PIN of this Profile, the request
+    /// gets the PIN token and Home comes back. Otherwise the app opens the Profile.
+    fn chosen(
+        &mut self,
+        client: Arc<Client>,
+        profile: &wire::Profile,
+        token: &Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(token) = token.clone() {
+            let (server_id, account_id, profile_id) =
+                (client.server().id.clone(), self.account_id(), profile.id.to_string());
+            // When the Secret Service is missing, the PIN token stays only in memory.
+            cx.background_spawn(async move {
+                secrets::save_pin_token(&server_id, &account_id, &profile_id, &token).await.ok()
+            })
+            .detach();
+        }
+        match self.pin_wait.take() {
+            Some(wait) if wait.profile_id == *profile.id => {
+                wait.reply.send(token.clone()).ok();
+                self.show_home(client, wait.home, window, cx);
+            }
+            _ => self.open_profile(client, profile.clone(), token.clone(), window, cx),
+        }
+    }
+
+    /// Opens the PIN entry each time that the server answers 403 `profile_verification_required`. The client
+    /// sends the request again with the PIN token that the user unlocks.
+    fn listen_for_pin(&mut self, client: &Arc<Client>, window: &mut Window, cx: &mut Context<Self>) {
+        let (requests, mut asked) = mpsc::unbounded::<(String, oneshot::Sender<Option<String>>)>();
+        client.on_pin_required(move |profile_id| {
+            let (reply, answer) = oneshot::channel();
+            requests.unbounded_send((profile_id, reply)).ok();
+            async move { answer.await.ok().flatten() }.boxed()
+        });
+        let client = client.clone();
+        self._pin_requests = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some((profile_id, reply)) = asked.next().await {
+                this.update_in(cx, |this, window, cx| {
+                    // Only Home sends profile requests. On another screen the request fails.
+                    let Screen::Home(home) = &this.screen else {
+                        return;
+                    };
+                    this.pin_wait = Some(PinWait { profile_id: profile_id.clone(), reply, home: home.clone() });
+                    this.show_picker(client.clone(), Some(&profile_id), window, cx);
+                })
+                .ok();
+            }
+        }));
+    }
+
+    fn account_id(&self) -> String {
+        self.state.active.clone().map(|(_, account)| account).unwrap_or_default()
     }
 
     fn save_state(&self) {
@@ -290,6 +398,7 @@ impl Render for LibraryWindow {
             Screen::Connect => page.child(self.render_connect(window, cx)),
             Screen::SignIn(view) => page.child(view.clone()),
             Screen::Home(view) => page.child(view.clone()),
+            Screen::Profiles(view) => page.child(view.clone()),
             Screen::Message(text) => page.child(div().max_w(px(560.)).text_color(t.secondary).child(text.clone())),
         };
         page.children(self.player_error.clone().map(|text| {

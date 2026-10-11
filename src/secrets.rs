@@ -33,3 +33,34 @@ pub async fn save(server_id: &str, account_id: &str, tokens: &Tokens) -> Result<
     keyring.create_item(LABEL, &attributes(server_id, account_id), serde_json::to_vec(tokens)?, true).await?;
     Ok(())
 }
+
+// PIN tokens (#23). Their `application` value differs from the sign-in items: a search matches each item that
+// has the given attributes, so a PIN item with the sign-in attributes plus `profile_id` would match `load`.
+
+fn pin_attributes<'a>(server_id: &'a str, account_id: &'a str, profile_id: &'a str) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("application", "silo-omarchy-pin"),
+        ("server_id", server_id),
+        ("account_id", account_id),
+        ("profile_id", profile_id),
+    ]
+}
+
+pub async fn load_pin_token(server_id: &str, account_id: &str, profile_id: &str) -> Result<Option<String>> {
+    let keyring = oo7::Keyring::new().await?;
+    keyring.unlock().await?;
+    let attributes = pin_attributes(server_id, account_id, profile_id);
+    let Some(item) = keyring.search_items(&attributes).await?.into_iter().next() else {
+        return Ok(None);
+    };
+    item.unlock().await?;
+    Ok(Some(String::from_utf8(item.secret().await?.to_vec())?))
+}
+
+pub async fn save_pin_token(server_id: &str, account_id: &str, profile_id: &str, token: &str) -> Result<()> {
+    let keyring = oo7::Keyring::new().await?;
+    keyring.unlock().await?;
+    let attributes = pin_attributes(server_id, account_id, profile_id);
+    keyring.create_item("silo-omarchy PIN token", &attributes, token, true).await?;
+    Ok(())
+}

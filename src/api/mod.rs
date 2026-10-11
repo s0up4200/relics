@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use futures::AsyncReadExt as _;
+use futures::future::BoxFuture;
 use gpui::http_client::{AsyncBody, HttpClient, Method, Request};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -116,6 +117,34 @@ pub fn auto_profile(profiles: &[wire::Profile]) -> Option<&wire::Profile> {
     }
 }
 
+/// The Profile that the app opens at launch with no picker: the `last` Profile of the Account
+/// when it still exists, else the `auto_profile`.
+pub fn launch_profile<'a>(profiles: &'a [wire::Profile], last: Option<&str>) -> Option<&'a wire::Profile> {
+    last.and_then(|last| profiles.iter().find(|p| *p.id == last)).or_else(|| auto_profile(profiles))
+}
+
+/// The result of a PIN check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinCheck {
+    /// The PIN matched. The value is the PIN token.
+    Unlocked(String),
+    Wrong,
+    /// Too many wrong PINs locked the Profile. The value is the seconds left on the lock.
+    Locked(Option<u64>),
+}
+
+/// The text that tells the user how long the PIN lock stays.
+pub fn lock_message(seconds: Option<u64>) -> String {
+    match seconds {
+        None => "Too many wrong PINs. Try again later.".into(),
+        Some(seconds) => {
+            let minutes = seconds.div_ceil(60).max(1);
+            let unit = if minutes == 1 { "minute" } else { "minutes" };
+            format!("Too many wrong PINs. Try again in {minutes} {unit}.")
+        }
+    }
+}
+
 /// The values that identify this install to each Server.
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -155,15 +184,24 @@ pub struct Client {
     /// each refresh, so a second refresh with the old token can fail.
     refreshing: futures::lock::Mutex<()>,
     on_tokens: Mutex<SaveTokens>,
+    /// Lets only one PIN entry run at a time.
+    unlocking: futures::lock::Mutex<()>,
+    on_pin_required: Mutex<AskPin>,
     /// The id of the server installation from the playback capabilities. Progress and stop send it.
     installation_id: Mutex<String>,
 }
 
 type SaveTokens = Box<dyn Fn(&Tokens) + Send + Sync>;
 
+/// Asks the user for the PIN of a Profile. It gets the Profile id and returns the PIN token, or `None` when
+/// the user cancels.
+type AskPin = Box<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
+
 struct Auth {
     tokens: Tokens,
     profile_id: Option<String>,
+    /// The PIN token of the Profile, sent as `X-Profile-Token`.
+    profile_token: Option<String>,
 }
 
 impl Client {
@@ -172,9 +210,11 @@ impl Client {
             http,
             server,
             device,
-            auth: Mutex::new(Auth { tokens, profile_id: None }),
+            auth: Mutex::new(Auth { tokens, profile_id: None, profile_token: None }),
             refreshing: futures::lock::Mutex::new(()),
             on_tokens: Mutex::new(Box::new(|_| {})),
+            unlocking: futures::lock::Mutex::new(()),
+            on_pin_required: Mutex::new(Box::new(|_| Box::pin(async { None }))),
             installation_id: Mutex::default(),
         }
     }
@@ -207,9 +247,11 @@ impl Client {
         self.auth.lock().unwrap().tokens.clone()
     }
 
-    /// Sets the Profile that the next requests act for.
+    /// Sets the Profile that the next requests act for. It drops the PIN token of the old Profile.
     pub fn set_profile(&self, profile_id: Option<String>) {
-        self.auth.lock().unwrap().profile_id = profile_id;
+        let mut auth = self.auth.lock().unwrap();
+        auth.profile_id = profile_id;
+        auth.profile_token = None;
     }
 
     pub async fn profiles(&self) -> Result<Vec<wire::Profile>, Error> {
@@ -246,13 +288,18 @@ impl Client {
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
         let (headers, used) = self.headers();
-        match send(&self.http, &self.server, method.clone(), path, &headers, body.clone()).await {
-            Err(err) if is_unauthorized(&err) => {
-                self.refresh(&used).await?;
-                send(&self.http, &self.server, method, path, &self.headers().0, body).await
-            }
-            result => result,
+        let mut result = send(&self.http, &self.server, method.clone(), path, &headers, body.clone()).await;
+        if matches!(&result, Err(err) if is_unauthorized(err)) {
+            self.refresh(&used).await?;
+            result = send(&self.http, &self.server, method.clone(), path, &self.headers().0, body.clone()).await;
         }
+        let stale = headers.iter().find(|(name, _)| *name == "X-Profile-Token").map(|(_, token)| token.as_str());
+        if matches!(&result, Err(Error::Problem(p)) if p.code() == "profile_verification_required")
+            && self.unlock(stale).await
+        {
+            result = send(&self.http, &self.server, method, path, &self.headers().0, body).await;
+        }
+        result
     }
 
     /// Returns the headers of a request, and the access token in them.
@@ -262,6 +309,9 @@ impl Client {
         headers.push(("Authorization", format!("Bearer {}", auth.tokens.access_token)));
         if let Some(profile) = &auth.profile_id {
             headers.push(("X-Profile-Id", profile.clone()));
+        }
+        if let Some(token) = &auth.profile_token {
+            headers.push(("X-Profile-Token", token.clone()));
         }
         (headers, auth.tokens.access_token.clone())
     }
@@ -354,6 +404,62 @@ impl Client {
             self.call(Method::DELETE, &format!("playback/{session_id}"), Some(body)).await?;
         Ok(())
     }
+
+    // Profile PIN (#23).
+
+    /// Sets the PIN token of the active Profile. `set_profile` drops it.
+    pub fn set_profile_token(&self, token: Option<String>) {
+        self.auth.lock().unwrap().profile_token = token;
+    }
+
+    /// Calls `ask` when the server answers 403 `profile_verification_required`. When `ask` returns a PIN
+    /// token, the client sends the request again with it.
+    pub fn on_pin_required(&self, ask: impl Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync + 'static) {
+        *self.on_pin_required.lock().unwrap() = Box::new(ask);
+    }
+
+    /// Checks the PIN of a Profile. The server counts each check, so the app never sends one again by itself.
+    pub async fn verify_pin(&self, profile_id: &str, pin: &str) -> Result<PinCheck, Error> {
+        let body = serde_json::json!({ "pin": pin });
+        match self
+            .call::<wire::ProfileVerification>(Method::POST, &format!("profiles/{profile_id}/verify-pin"), Some(body))
+            .await
+        {
+            Ok(check) => Ok(match check.profile_token {
+                Some(token) if check.valid => PinCheck::Unlocked(token),
+                _ => PinCheck::Wrong,
+            }),
+            Err(Error::Problem(problem)) if problem.status == 429 => Ok(PinCheck::Locked(problem.retry_after)),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Asks the user for the PIN of the active Profile, unless another request already replaced the `stale`
+    /// PIN token. Returns false when the user cancels.
+    async fn unlock(&self, stale: Option<&str>) -> bool {
+        let _guard = self.unlocking.lock().await;
+        let (profile_id, token) = {
+            let auth = self.auth.lock().unwrap();
+            (auth.profile_id.clone(), auth.profile_token.clone())
+        };
+        let Some(profile_id) = profile_id else {
+            return false;
+        };
+        if token.is_some() && token.as_deref() != stale {
+            return true;
+        }
+        let asked = (self.on_pin_required.lock().unwrap())(profile_id.clone());
+        let Some(token) = asked.await else {
+            return false;
+        };
+        let mut auth = self.auth.lock().unwrap();
+        // The user can switch to another Profile while the PIN entry is open.
+        if auth.profile_id.as_deref() != Some(profile_id.as_str()) {
+            return false;
+        }
+        auth.profile_token = Some(token);
+        true
+    }
 }
 
 fn is_unauthorized(err: &Error) -> bool {
@@ -394,6 +500,7 @@ async fn send<T: DeserializeOwned>(
     let network = || Error::Network(server.name.clone());
     let response = http.send(request).await.map_err(|_| network())?;
     let status = response.status();
+    let retry_after = response.headers().get("retry-after").and_then(|v| v.to_str().ok()?.trim().parse().ok());
     let is_problem = response
         .headers()
         .get("content-type")
@@ -402,8 +509,8 @@ async fn send<T: DeserializeOwned>(
     response.into_body().read_to_end(&mut body).await.map_err(|_| network())?;
     if status.is_success() {
         serde_json::from_slice(&body).map_err(|err| Error::Decode(err.to_string()))
-    } else if is_problem && let Ok(problem) = serde_json::from_slice(&body) {
-        Err(Error::Problem(problem))
+    } else if is_problem && let Ok(problem) = serde_json::from_slice::<Problem>(&body) {
+        Err(Error::Problem(Problem { retry_after, ..problem }))
     } else {
         Err(Error::Status(status.as_u16()))
     }

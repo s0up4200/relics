@@ -15,6 +15,14 @@ _Avoid_: user, login
 A household member inside an Account. Progress, watched state, favorites and the Home layout belong to the Profile. A Profile can have a PIN and content limits.
 _Avoid_: user, household member
 
+**Profile picker**:
+The full-screen view where the user chooses the Profile that watches. The PIN entry is inline, below the selected Profile. At launch the app skips the picker when it can open the last Profile of the Account, or the only Profile when that Profile has no PIN.
+_Avoid_: profile selector, who's watching screen
+
+**PIN token**:
+The token that the server gives when the user types the right PIN of a Profile. The app sends it as `X-Profile-Token` and keeps it in the Secret Service. It stays valid until the sign-in ends or the PIN changes. Five wrong PINs lock the Profile for five minutes.
+_Avoid_: profile token, unlock token
+
 **Item**:
 An entry in a Server's catalog that the user can open: a movie, a series, a season or an episode. Only movies and episodes play.
 _Avoid_: media, title, video

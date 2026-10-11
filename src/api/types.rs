@@ -14,6 +14,9 @@ pub struct Problem {
     pub status: u16,
     #[serde(default)]
     pub detail: String,
+    /// The seconds in the `Retry-After` header of the reply.
+    #[serde(skip)]
+    pub retry_after: Option<u64>,
 }
 
 impl Problem {
