@@ -79,7 +79,7 @@ local function draw()
   end
   if prompt ~= "" then
     local px1, py1 = w - 40, h - (bar and 140 or 40)
-    local px0, py0 = px1 - 260, py1 - 60
+    local px0, py0 = px1 - math.max(260, #prompt * 15 + 70), py1 - 60
     rect(a, bgr(theme.bg), "20", px0, py0, px1, py1)
     rect(a, bgr(theme.accent), "00", px0, py1 - 4, px1, py1)
     text(a, (px0 + px1) / 2, (py0 + py1) / 2, 5, 28, prompt .. "  ⏎")

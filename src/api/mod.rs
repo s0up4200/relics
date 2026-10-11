@@ -2,6 +2,7 @@
 //! app adds no second async runtime, and tests can give it a fake client.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::AsyncReadExt as _;
 use futures::future::BoxFuture;
@@ -16,7 +17,7 @@ pub use gpui::http_client::Url;
 use types::Marker;
 pub use types::{Decision, Problem};
 
-use crate::playback::Sample;
+use crate::playback::{Access, Replan, Sample};
 use crate::settings::{self, ServerSettings};
 
 /// A Silo server that the user added. The app knows it by `id`, the stable id that
@@ -195,6 +196,8 @@ pub struct Client {
     installation_id: Mutex<String>,
     /// The Server settings of the active Profile.
     server_settings: Mutex<ServerSettings>,
+    /// The `client_features` of the last start request. A replan sends the same list.
+    features: Mutex<Vec<&'static str>>,
 }
 
 type SaveTokens = Box<dyn Fn(&Tokens) + Send + Sync>;
@@ -223,6 +226,7 @@ impl Client {
             on_pin_required: Mutex::new(Box::new(|_| Box::pin(async { None }))),
             installation_id: Mutex::default(),
             server_settings: Mutex::default(),
+            features: Mutex::default(),
         }
     }
 
@@ -374,9 +378,61 @@ impl Client {
 
     // Playback (#25).
 
-    /// The headers that mpv sends on each media request: the auth, profile and device headers.
-    pub fn media_headers(&self) -> Vec<(String, String)> {
-        self.headers().0.into_iter().map(|(name, value)| (name.to_string(), value)).collect()
+    /// The headers that mpv sends on each media request (the auth, profile and device headers), and when the
+    /// access token in them expires.
+    pub fn media_access(&self) -> Access {
+        let (headers, token) = self.headers();
+        let headers = headers.into_iter().map(|(name, value)| (name.to_string(), value)).collect();
+        Access { headers, expires: token_expiry(&token) }
+    }
+
+    /// Refreshes the access token, unless another request refreshed it while this one waited, and returns the
+    /// new media headers.
+    pub async fn refresh_access(&self) -> Result<Access, Error> {
+        let stale = self.tokens().access_token;
+        self.refresh(&stale).await?;
+        Ok(self.media_access())
+    }
+
+    /// Asks the server for a new plan after the plan in `replan` failed (operation `failure_recovery`).
+    pub async fn replan(&self, replan: &Replan) -> Result<Decision, Error> {
+        let installation_id = self.installation_id.lock().unwrap().clone();
+        let mut body = client_description(&self.features.lock().unwrap());
+        let keys = &replan.attempted_plan_keys;
+        // The server takes at most 16 keys and a count of at most 8.
+        let fields = serde_json::json!({
+            "operation": "failure_recovery",
+            "installation_id": installation_id,
+            "playback_attempt_id": replan.attempt_id,
+            "replan_request_id": uuid::Uuid::new_v4().to_string(),
+            "failed_plan_id": replan.failed_plan_id,
+            "plan_attempt_id": uuid::Uuid::new_v4().to_string(),
+            "plan_attempt_key": replan.plan_attempt_key,
+            "attempted_plan_keys": keys[keys.len().saturating_sub(16)..],
+            "attempt_count": keys.len().clamp(1, 8),
+            "position_seconds": replan.position.max(0.0),
+            "selected_tracks": replan.selected_tracks,
+            "failure": { "classification": "network_degraded" },
+        });
+        body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        let path = format!("playback/{}/replan", replan.session_id);
+        let decision: wire::PlaybackDecision = self.call(Method::POST, &path, Some(body)).await?;
+        let mut decision = Decision::from(decision);
+        if let Decision::Playable { plan, .. } = &mut decision {
+            self.absolute_urls(plan)?;
+        }
+        Ok(decision)
+    }
+
+    /// Joins the stream and subtitle URLs of `plan`, which are relative to the server origin, below the base
+    /// URL, which keeps a sub-path.
+    fn absolute_urls(&self, plan: &mut wire::PlaybackPlan) -> Result<(), Error> {
+        let absolute = |url: &str| self.server.url.join(url.trim_start_matches('/')).map(String::from);
+        plan.stream.url = absolute(&plan.stream.url).map_err(|_| Error::InvalidUrl)?;
+        for track in &mut plan.subtitle.inventory {
+            track.url = track.url.as_deref().and_then(|url| absolute(url).ok());
+        }
+        Ok(())
     }
 
     /// Starts a Playback session for the Item `content_id`. With no `start_position`, the
@@ -397,20 +453,18 @@ impl Client {
         if capabilities.features.iter().any(|f| f == "header_authenticated_media_v1") {
             features.push("header_authenticated_media_v1");
         }
+        *self.features.lock().unwrap() = features.clone();
         let profile_id = self.auth.lock().unwrap().profile_id.clone().unwrap_or_default();
-        let mut body = start_request(&version.file_id, &installation_id, &profile_id, &features);
+        let attempt = uuid::Uuid::new_v4().to_string();
+        let mut body = start_request(&version.file_id, &installation_id, &profile_id, &attempt, &features);
         if let Some(position) = start_position {
             body["start_position"] = position.into();
         }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
-        if let Decision::Playable { plan, audio_language, markers, .. } = &mut decision {
-            // The plan URLs are relative to the server origin. Join them below the base URL, which keeps a sub-path.
-            let absolute = |url: &str| self.server.url.join(url.trim_start_matches('/')).map(String::from);
-            plan.stream.url = absolute(&plan.stream.url).map_err(|_| Error::InvalidUrl)?;
-            for track in &mut plan.subtitle.inventory {
-                track.url = track.url.as_deref().and_then(|url| absolute(url).ok());
-            }
+        if let Decision::Playable { plan, audio_language, markers, attempt_id, .. } = &mut decision {
+            self.absolute_urls(plan)?;
+            *attempt_id = attempt;
             *audio_language = audio_language_of(version, plan);
             *markers = self.markers(&version.file_id).await;
         }
@@ -556,6 +610,15 @@ fn audio_language_of(version: &wire::FileVersion, plan: &wire::PlaybackPlan) -> 
     track.and_then(|track| track.language.clone()).or_else(|| version.effective_audio_language.clone())
 }
 
+/// When the JWT `token` expires: its `exp` claim. The app does not check the signature; the server does.
+fn token_expiry(token: &str) -> Option<SystemTime> {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    let exp = serde_json::from_slice::<serde_json::Value>(&payload).ok()?.get("exp")?.as_f64()?;
+    Some(UNIX_EPOCH + Duration::try_from_secs_f64(exp).ok()?)
+}
+
 fn is_unauthorized(err: &Error) -> bool {
     matches!(err, Error::Status(401)) || matches!(err, Error::Problem(p) if p.status == 401)
 }
@@ -613,7 +676,27 @@ async fn send<T: DeserializeOwned>(
 /// The body of a playback protocol v3 start request. mpv uses FFmpeg, which decodes
 /// nearly every codec, so the app declares wide flat lists with `declared` evidence
 /// and lets the server choose direct play or a transcode.
-fn start_request(file_id: &str, installation_id: &str, profile_id: &str, features: &[&str]) -> serde_json::Value {
+fn start_request(
+    file_id: &str,
+    installation_id: &str,
+    profile_id: &str,
+    attempt_id: &str,
+    features: &[&str],
+) -> serde_json::Value {
+    let mut body = client_description(features);
+    let fields = serde_json::json!({
+        "file_id": file_id,
+        "installation_id": installation_id,
+        "profile_id": profile_id,
+        "playback_attempt_id": attempt_id,
+        "subtitle_fidelity_preference": "preserve",
+    });
+    body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+    body
+}
+
+/// The fields that a start request and a replan request share: what the client is and what it can play.
+fn client_description(features: &[&str]) -> serde_json::Value {
     let video = ["h264", "hevc", "av1", "vp9", "vp8", "mpeg2video", "mpeg4", "vc1"];
     let audio = ["aac", "mp3", "opus", "vorbis", "flac", "alac", "ac3", "eac3", "dts", "truehd", "pcm"];
     let containers = ["mp4", "mkv", "webm", "mov", "avi", "mpegts", "m2ts"];
@@ -644,12 +727,7 @@ fn start_request(file_id: &str, installation_id: &str, profile_id: &str, feature
     serde_json::json!({
         "protocol_version": 3,
         "client_features": features,
-        "file_id": file_id,
-        "installation_id": installation_id,
-        "profile_id": profile_id,
-        "playback_attempt_id": uuid::Uuid::new_v4().to_string(),
         "quality_preference": "original",
-        "subtitle_fidelity_preference": "preserve",
         "metered": false,
         "client_capabilities": {
             "video_evidence": "declared",

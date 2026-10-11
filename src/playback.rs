@@ -6,6 +6,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::api::types::{Decision, Marker, MarkerKind};
+use crate::api::wire;
 use crate::settings::{IntroSkipMode, ServerSettings};
 
 pub mod subtitles;
@@ -21,17 +22,53 @@ const NORMAL_END_FRACTION: f64 = 0.985;
 const PROMPT_TIME: Duration = Duration::from_secs(5);
 /// Credits that end this close to the end of the file, in seconds, run to the end of the file.
 const CREDITS_TO_END_SECONDS: f64 = 1.0;
+/// Before each load, the app refreshes a token that has less time than this left.
+const REFRESH_BEFORE_LOAD: Duration = Duration::from_secs(4 * 3600);
+/// When the token in mpv has this much time left, the app refreshes it and reloads at the position.
+const RENEW_BEFORE_EXPIRY: Duration = Duration::from_secs(600);
+/// A reloaded stream that plays this many seconds is healthy again, and the next failure starts a new chain.
+// ponytail: a fixed distance; a stream that fails every few seconds restarts the chain only by Enter.
+const HEALTHY_SECONDS: f64 = 10.0;
+/// The text of the controller when the recovery chain gave up.
+const LOST: &str = "Lost connection to the server";
 
 /// HTTP headers as (name, value).
 pub type Headers = Vec<(String, String)>;
 
+/// The headers of the media requests, and when the access token in them expires.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Access {
+    pub headers: Headers,
+    pub expires: Option<SystemTime>,
+}
+
+/// What a `replan` request needs to know about the plan that failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Replan {
+    pub session_id: String,
+    /// The `playback_attempt_id` of the start request.
+    pub attempt_id: String,
+    pub failed_plan_id: String,
+    pub plan_attempt_key: String,
+    /// The keys of each plan that failed in this Playback session, the failed plan last.
+    pub attempted_plan_keys: Vec<String>,
+    /// The `selected_tracks` of the failed plan.
+    pub selected_tracks: serde_json::Value,
+    /// The last good source position.
+    pub position: f64,
+}
+
 #[derive(Debug)]
 pub enum Input {
-    /// The server answered the start request. `headers` go on each media request.
+    /// The server answered the start request. The headers of `access` go on each media request.
     Started {
         decision: Decision,
-        headers: Headers,
+        access: Access,
     },
+    /// A token refresh ended. `None` means that it failed.
+    Refreshed(Option<Access>),
+    /// A replan ended. `None` means that the request failed.
+    Replanned(Option<Decision>),
     /// The start request failed. The value is the text for the user.
     StartFailed(String),
     /// mpv opened the file of this session.
@@ -91,6 +128,34 @@ pub enum Command {
     Seek(f64),
     /// Play the next episode in the same Player window. The session has already ended.
     PlayNext,
+    /// Refresh the access token and send `Input::Refreshed`.
+    Refresh,
+    /// Ask the server for a new plan and send `Input::Replanned`.
+    Replan(Replan),
+}
+
+/// The recovery chain: a failure starts it, and each next failure goes one step on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Chain {
+    Healthy,
+    /// The refresh after the failure runs.
+    Refreshing,
+    /// The app reloaded the plan with the refreshed token.
+    Reloaded,
+    /// The replan runs.
+    Replanning,
+    /// The app loaded the new plan.
+    Replanned,
+    /// The controller shows the `LOST` text. Enter starts the chain again.
+    Lost,
+}
+
+/// What the app does when a refresh outside the recovery chain ends.
+enum AfterRefresh {
+    /// Load the plan at this player position, also when the refresh failed.
+    Load(f64),
+    /// Reload at the position that plays then, only when the refresh worked.
+    Renew,
 }
 
 pub struct Session {
@@ -112,6 +177,20 @@ pub struct Session {
     resolved: Vec<usize>,
     prompt: Option<Prompt>,
     has_next: bool,
+    /// The headers for the next load.
+    access: Option<Access>,
+    /// When the token in the file that mpv plays expires.
+    mpv_expires: Option<SystemTime>,
+    /// The token in mpv was renewed or its renewal failed. A load resets it.
+    renewed: bool,
+    after_refresh: Option<AfterRefresh>,
+    chain: Chain,
+    /// The player position of the last load.
+    load_start: f64,
+    /// The language of the audio that the server picked at the start. A replan keeps it.
+    audio_language: Option<String>,
+    /// The keys of the plans that failed.
+    failed_keys: Vec<String>,
 }
 
 /// The Skip prompt that shows now.
@@ -133,6 +212,11 @@ enum Action {
 
 struct Plan {
     session_id: String,
+    attempt_id: String,
+    plan_id: String,
+    plan_attempt_key: String,
+    selected_tracks: serde_json::Value,
+    url: String,
     /// Add it to a player position to get the source position.
     offset: f64,
     /// The command that shows the subtitle track of the subtitle choice, when the file loads.
@@ -158,6 +242,14 @@ impl Session {
             resolved: Vec::new(),
             prompt: None,
             has_next: false,
+            access: None,
+            mpv_expires: None,
+            renewed: false,
+            after_refresh: None,
+            chain: Chain::Healthy,
+            load_start: 0.0,
+            audio_language: None,
+            failed_keys: Vec::new(),
         }
     }
 
@@ -166,31 +258,13 @@ impl Session {
             return Vec::new();
         }
         match input {
-            Input::Started { decision, headers } => match decision {
-                Decision::Playable { session_id, plan, audio_language, markers } => {
-                    let load = Command::Load {
-                        url: plan.stream.url.clone(),
-                        headers,
-                        start: plan.timeline.player_start_seconds,
-                    };
-                    let tracks = &plan.subtitle.inventory;
-                    let chosen = subtitles::choose(tracks, &self.settings, audio_language.as_deref());
-                    // ponytail: a track without a URL needs a burn-in replan, so it shows no subtitles until #27
-                    // adds replan.
-                    let subtitle = tracks.iter().find(|track| Some(track.combined_index) == chosen).and_then(|track| {
-                        Some(Command::AddSubtitle {
-                            url: track.url.clone()?,
-                            title: track.label.clone().unwrap_or_default(),
-                            language: track.language.clone().unwrap_or_default(),
-                        })
-                    });
-                    let offset = plan.timeline.timeline_offset_seconds;
-                    let markers = markers
-                        .into_iter()
-                        .map(|marker| Marker { start: marker.start - offset, end: marker.end - offset, ..marker })
-                        .collect();
-                    self.plan = Some(Plan { session_id, offset, subtitle, markers });
-                    vec![load]
+            Input::Started { decision, access } => match decision {
+                Decision::Playable { session_id, plan, audio_language, markers, attempt_id } => {
+                    self.audio_language = audio_language;
+                    self.access = Some(access);
+                    let start = plan.timeline.player_start_seconds;
+                    self.adopt(session_id, attempt_id, &plan, markers);
+                    self.load(start, now)
                 }
                 Decision::Unavailable { message, .. } => self.fail(message),
                 Decision::Unknown(outcome) => {
@@ -198,6 +272,50 @@ impl Session {
                 }
             },
             Input::StartFailed(message) => self.fail(message),
+            Input::Refreshed(access) => {
+                let worked = access.is_some();
+                if access.is_some() {
+                    self.access = access;
+                }
+                let after = self.after_refresh.take();
+                if self.chain == Chain::Refreshing {
+                    self.chain = Chain::Reloaded;
+                    return self.load_now(self.position.unwrap_or(self.load_start));
+                }
+                match after {
+                    Some(AfterRefresh::Load(start)) => self.load_now(start),
+                    Some(AfterRefresh::Renew) if worked && self.chain == Chain::Healthy => {
+                        self.load_now(self.position.unwrap_or(self.load_start))
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            Input::Replanned(decision) if self.chain == Chain::Replanning => match decision {
+                Some(Decision::Playable { session_id, plan, .. }) => {
+                    let Some(old) = &self.plan else {
+                        return Vec::new();
+                    };
+                    let source = self.position.unwrap_or(self.load_start) + old.offset;
+                    // The Markers come in source time. The plan keeps them in player time.
+                    let markers = old
+                        .markers
+                        .iter()
+                        .map(|marker| Marker {
+                            start: marker.start + old.offset,
+                            end: marker.end + old.offset,
+                            ..marker.clone()
+                        })
+                        .collect();
+                    let attempt_id = old.attempt_id.clone();
+                    self.adopt(session_id, attempt_id, &plan, markers);
+                    let start = (source - plan.timeline.timeline_offset_seconds).max(0.0);
+                    self.position = Some(start);
+                    self.chain = Chain::Replanned;
+                    self.load_now(start)
+                }
+                _ => self.lose(),
+            },
+            Input::Replanned(_) => Vec::new(),
             Input::FileLoaded => {
                 self.loaded = true;
                 self.last_report = Some(now);
@@ -206,6 +324,11 @@ impl Session {
             }
             Input::Position(position) if self.loaded => {
                 self.position = Some(position);
+                if matches!(self.chain, Chain::Reloaded | Chain::Replanned)
+                    && position >= self.load_start + HEALTHY_SECONDS
+                {
+                    self.chain = Chain::Healthy;
+                }
                 self.enter(position, now)
             }
             Input::Duration(duration) if self.loaded => {
@@ -223,9 +346,16 @@ impl Session {
                     commands.push(Command::ShowPrompt(String::new()));
                 }
                 commands.extend(self.report(now));
+                commands.extend(self.renew(now));
                 commands
             }
             Input::ControlsReady => vec![Command::SendTheme, self.show_markers()],
+            Input::Action if self.chain == Chain::Lost => {
+                self.chain = Chain::Healthy;
+                let mut commands = vec![Command::ShowPrompt(String::new())];
+                commands.extend(self.recover());
+                commands
+            }
             Input::Action => match self.prompt.take() {
                 Some(Prompt { action: Action::Seek { to, marker }, .. }) => {
                     self.resolved.push(marker);
@@ -246,20 +376,118 @@ impl Session {
                 let (position, normal) = self.end_position();
                 if normal && self.has_next && self.settings.auto_play_next {
                     self.play_next(position)
-                } else {
+                } else if normal {
                     self.finish(position, true)
+                } else {
+                    // An Early end: the stream usually lost access.
+                    self.recover()
                 }
             }
-            Input::LoadFailed => {
-                // ponytail: #27 replaces this with the recovery chain (refresh, reload, replan).
-                let mut commands = self.finish(self.source_position(), false);
-                commands.extend([Command::ShowError("Lost connection to the server".into()), Command::ClosePlayer]);
-                commands
-            }
+            Input::LoadFailed => self.recover(),
             Input::Shutdown => self.finish(self.source_position(), true),
             Input::End => self.finish(self.source_position(), false),
             Input::Position(_) | Input::Duration(_) => Vec::new(),
         }
+    }
+
+    /// Makes `plan` the plan of the session. `markers` are in source time.
+    fn adopt(&mut self, session_id: String, attempt_id: String, plan: &wire::PlaybackPlan, markers: Vec<Marker>) {
+        let tracks = &plan.subtitle.inventory;
+        let chosen = subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
+        // ponytail: a track without a URL needs a burn-in replan (operation track_change), so it shows no
+        // subtitles.
+        let subtitle = tracks.iter().find(|track| Some(track.combined_index) == chosen).and_then(|track| {
+            Some(Command::AddSubtitle {
+                url: track.url.clone()?,
+                title: track.label.clone().unwrap_or_default(),
+                language: track.language.clone().unwrap_or_default(),
+            })
+        });
+        let offset = plan.timeline.timeline_offset_seconds;
+        let markers = markers
+            .into_iter()
+            .map(|marker| Marker { start: marker.start - offset, end: marker.end - offset, ..marker })
+            .collect();
+        self.plan = Some(Plan {
+            session_id,
+            attempt_id,
+            plan_id: plan.plan_id.clone(),
+            plan_attempt_key: plan.plan_attempt_key.clone(),
+            selected_tracks: serde_json::to_value(&plan.selected_tracks).unwrap_or_default(),
+            url: plan.stream.url.clone(),
+            offset,
+            subtitle,
+            markers,
+        });
+    }
+
+    /// Loads the plan at `start`, after a refresh when the token has less than 4 hours left.
+    fn load(&mut self, start: f64, now: SystemTime) -> Vec<Command> {
+        let expires = self.access.as_ref().and_then(|access| access.expires);
+        if expires.is_some_and(|expires| expires < now + REFRESH_BEFORE_LOAD) {
+            self.after_refresh = Some(AfterRefresh::Load(start));
+            return vec![Command::Refresh];
+        }
+        self.load_now(start)
+    }
+
+    fn load_now(&mut self, start: f64) -> Vec<Command> {
+        let (Some(plan), Some(access)) = (&self.plan, &self.access) else {
+            return Vec::new();
+        };
+        // Drops the events of the file that this load replaces.
+        self.loaded = false;
+        self.load_start = start;
+        self.mpv_expires = access.expires;
+        self.renewed = false;
+        vec![Command::Load { url: plan.url.clone(), headers: access.headers.clone(), start }]
+    }
+
+    /// Refreshes the token in mpv when it has 10 minutes left. The reload follows the refresh.
+    fn renew(&mut self, now: SystemTime) -> Vec<Command> {
+        let due = self.mpv_expires.is_some_and(|expires| now + RENEW_BEFORE_EXPIRY >= expires);
+        if !due || self.renewed || !self.loaded || self.chain != Chain::Healthy || self.after_refresh.is_some() {
+            return Vec::new();
+        }
+        self.renewed = true;
+        self.after_refresh = Some(AfterRefresh::Renew);
+        vec![Command::Refresh]
+    }
+
+    /// The recovery chain after a load failure or an Early end: one refresh and one reload at the last good
+    /// position, then one replan, then the `LOST` text. A failure while a step runs does nothing.
+    fn recover(&mut self) -> Vec<Command> {
+        let Some(plan) = &self.plan else {
+            return self.finish(None, true);
+        };
+        let good = self.position.unwrap_or(self.load_start);
+        match self.chain {
+            Chain::Healthy => {
+                self.chain = Chain::Refreshing;
+                vec![Command::Refresh]
+            }
+            Chain::Reloaded => {
+                self.chain = Chain::Replanning;
+                self.failed_keys.push(plan.plan_attempt_key.clone());
+                vec![Command::Replan(Replan {
+                    session_id: plan.session_id.clone(),
+                    attempt_id: plan.attempt_id.clone(),
+                    failed_plan_id: plan.plan_id.clone(),
+                    plan_attempt_key: plan.plan_attempt_key.clone(),
+                    attempted_plan_keys: self.failed_keys.clone(),
+                    selected_tracks: plan.selected_tracks.clone(),
+                    position: good + plan.offset,
+                })]
+            }
+            Chain::Replanned => self.lose(),
+            Chain::Refreshing | Chain::Replanning | Chain::Lost => Vec::new(),
+        }
+    }
+
+    fn lose(&mut self) -> Vec<Command> {
+        self.chain = Chain::Lost;
+        self.prompt = None;
+        vec![Command::ShowPrompt(LOST.into())]
     }
 
     fn show_markers(&self) -> Command {
@@ -360,7 +588,7 @@ impl Session {
             return Vec::new();
         };
         let mut commands = Vec::new();
-        if self.prompt.take().is_some() {
+        if self.prompt.take().is_some() || self.chain == Chain::Lost {
             commands.push(Command::ShowPrompt(String::new()));
         }
         let sample = position.map(|position| self.sample(position));

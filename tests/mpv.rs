@@ -111,7 +111,7 @@ fn open() -> (Player, Receiver<Input>) {
 }
 
 /// Waits up to 15 s for the first input that `want` accepts.
-fn wait_for(rx: &Receiver<Input>, want: impl Fn(&Input) -> bool) -> Input {
+fn wait_for(rx: &Receiver<Input>, mut want: impl FnMut(&Input) -> bool) -> Input {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -163,6 +163,33 @@ fn a_401_shows_as_a_load_failure() {
     player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
     wait_for(&rx, |input| matches!(input, Input::LoadFailed));
     assert_each_request_has_the_header(&stub);
+}
+
+#[test]
+fn the_end_of_a_file_shows_as_end_of_file() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 5.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::EndOfFile));
+    assert_eq!(player.property("eof-reached").unwrap(), "yes", "mpv keeps the last frame");
+}
+
+#[test]
+fn a_401_in_the_middle_of_an_hls_stream_ends_it_before_the_duration() {
+    // The manifest and the first segment load, then each request gets a 401, as when the token expires.
+    let stub = stub(2);
+    let (player, rx) = open();
+    player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0).unwrap();
+    let mut position = 0.0;
+    let end = wait_for(&rx, |input| {
+        if let Input::Position(p) = input {
+            position = *p;
+        }
+        matches!(input, Input::EndOfFile | Input::LoadFailed)
+    });
+    assert!(position < 5.0, "{end:?} at {position} of 6 s, so the end rule sees an Early end");
+    // The window stays, so the controller can show "Lost connection to the server".
+    assert_eq!(player.property("idle-active").unwrap_or_default(), "no");
 }
 
 #[test]
@@ -278,8 +305,16 @@ fn enter_takes_the_skip_prompt() {
     let (player, rx) = open_with_controls();
     wait_for(&rx, |input| matches!(input, Input::ControlsReady));
     player.show_prompt("Skip intro").unwrap();
-    player.command(&["keypress", "ENTER"]).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::Action));
+    // The script message and the key reach the controller on different paths, so the key can come first.
+    // Press Enter again until the controller sends the action.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        player.command(&["keypress", "ENTER"]).unwrap();
+        if let Ok(Input::Action) = rx.recv_timeout(Duration::from_millis(200)) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the controller sent no action");
+    }
 }
 
 #[test]

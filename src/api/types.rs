@@ -111,13 +111,14 @@ pub struct Marker {
 #[derive(Debug, Clone)]
 pub enum Decision {
     /// The server made a plan. `Client::start_playback` makes its stream and subtitle URLs absolute, and
-    /// sets `audio_language`, the language of the audio track that the server picked, and `markers`, the
-    /// Markers of the file in source time.
+    /// sets `audio_language`, the language of the audio track that the server picked, `markers`, the
+    /// Markers of the file in source time, and `attempt_id`, the `playback_attempt_id` of the start request.
     Playable {
         session_id: String,
         plan: Box<super::wire::PlaybackPlan>,
         audio_language: Option<String>,
         markers: Vec<Marker>,
+        attempt_id: String,
     },
     /// The server cannot play the Item for this client. `message` is for the user.
     Unavailable { reason: String, message: String },
@@ -130,7 +131,13 @@ impl From<super::wire::PlaybackDecision> for Decision {
         match (decision.outcome.as_str(), decision.playback_plan, decision.terminal) {
             ("playable", Some(plan), _) => {
                 let session_id = decision.session_id.or_else(|| plan.session_id.clone()).unwrap_or_default();
-                Decision::Playable { session_id, plan: Box::new(plan), audio_language: None, markers: Vec::new() }
+                Decision::Playable {
+                    session_id,
+                    plan: Box::new(plan),
+                    audio_language: None,
+                    markers: Vec::new(),
+                    attempt_id: String::new(),
+                }
             }
             ("adaptation_unavailable", _, Some(terminal)) => {
                 Decision::Unavailable { reason: terminal.reason, message: terminal.message }

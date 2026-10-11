@@ -65,6 +65,8 @@ pub struct PlayerWindow {
     finding_next: Option<Task<()>>,
     /// The last stop report. Quit waits for it.
     stopping: Option<Task<()>>,
+    /// Changes with each new Item, so that the answer of a refresh or replan of an older session is dropped.
+    generation: u64,
     _mpv_events: Option<Task<()>>,
     _ticks: Task<()>,
 }
@@ -90,6 +92,7 @@ impl PlayerWindow {
             next: None,
             finding_next: None,
             stopping: None,
+            generation: 0,
             _mpv_events: None,
             _ticks: ticks,
         }
@@ -99,6 +102,7 @@ impl PlayerWindow {
     /// same Player window. Resume is the default: the server starts at the saved position.
     pub fn play(&mut self, client: Arc<Client>, item: PlayItem, cx: &mut Context<Self>) {
         self.step(Input::End, cx);
+        self.generation += 1;
         self.session = Some(Session::new(item.runtime, client.server_settings()));
         self.client = Some(client.clone());
         self.next = None;
@@ -122,7 +126,7 @@ impl PlayerWindow {
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
             let input = match client.start_playback(&content_id, None).await {
-                Ok(decision) => Input::Started { decision, headers: client.media_headers() },
+                Ok(decision) => Input::Started { decision, access: client.media_access() },
                 Err(err) => Input::StartFailed(err.to_string()),
             };
             this.update(cx, |this, cx| this.step(input, cx)).ok();
@@ -152,13 +156,26 @@ impl PlayerWindow {
             return;
         };
         match command {
-            Command::Load { url, headers, start } => {
-                let loaded = self.open_mpv(cx).and_then(|mpv| mpv.load(&url, &headers, start));
-                if let Err(err) = loaded {
-                    eprintln!("silo-omarchy: mpv cannot play {url}: {err}");
-                    self.step(Input::LoadFailed, cx);
+            Command::Load { url, headers, start } => match self.open_mpv(cx) {
+                Ok(mpv) => {
+                    if let Err(err) = mpv.load(&url, &headers, start) {
+                        eprintln!("silo-omarchy: mpv cannot play {url}: {err}");
+                        self.step(Input::LoadFailed, cx);
+                    }
                 }
-            }
+                Err(err) => {
+                    cx.emit(PlaybackError(format!("The player cannot start: {err}")));
+                    self.step(Input::End, cx);
+                }
+            },
+            Command::Refresh => self.answer(cx, async move {
+                let access = client.refresh_access().await;
+                Input::Refreshed(access.inspect_err(|err| eprintln!("silo-omarchy: token refresh failed: {err}")).ok())
+            }),
+            Command::Replan(replan) => self.answer(cx, async move {
+                let decision = client.replan(&replan).await;
+                Input::Replanned(decision.inspect_err(|err| eprintln!("silo-omarchy: replan failed: {err}")).ok())
+            }),
             // ponytail: a failed report is lost; #33 keeps it and sends it with syncProgress.
             Command::Progress { session_id, sample } => cx
                 .background_spawn(async move {
@@ -212,6 +229,22 @@ impl PlayerWindow {
                 }
             }
         }
+    }
+
+    /// Runs `request` and gives its input to the session, unless a new Item started meanwhile. A new Item does
+    /// not drop the task: a dropped refresh can lose the new refresh token.
+    fn answer(&self, cx: &mut Context<Self>, request: impl Future<Output = Input> + 'static) {
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let input = request.await;
+            this.update(cx, |this, cx| {
+                if this.generation == generation {
+                    this.step(input, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn close_mpv(&mut self) {

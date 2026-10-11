@@ -47,6 +47,10 @@ impl Player {
             // mpv keeps a track change for the next file. A track change must apply only to
             // the Playback session that plays now.
             init.set_option("reset-on-next-file", "aid,sid")?;
+            // At the end of a file, mpv keeps the last frame and reports `eof-reached` instead of an end-file
+            // event. The window stays after a failed load. So the "Lost connection" text shows in the window.
+            init.set_option("keep-open", "yes")?;
+            init.set_option("force-window", "yes")?;
             // Without this, the built-in ytdl hook opens a failed URL again without the headers.
             init.set_option("ytdl", false)?;
             // libmpv turns off the keys and the window close by default. q and the close
@@ -61,6 +65,7 @@ impl Player {
         mpv.observe_property("time-pos", Format::Double, 0)?;
         mpv.observe_property("duration", Format::Double, 0)?;
         mpv.observe_property("pause", Format::Flag, 0)?;
+        mpv.observe_property("eof-reached", Format::Flag, 0)?;
         let mpv = Arc::new(mpv);
         let events = std::thread::spawn({
             let mpv = mpv.clone();
@@ -176,6 +181,7 @@ fn read_events(mpv: &Mpv, on_input: impl Fn(Input)) {
                 ("time-pos", PropertyData::Double(position)) => Input::Position(position),
                 ("duration", PropertyData::Double(duration)) => Input::Duration(duration),
                 ("pause", PropertyData::Flag(paused)) => Input::Paused(paused),
+                ("eof-reached", PropertyData::Flag(true)) => Input::EndOfFile,
                 _ => continue,
             },
             Some(Ok(Event::ClientMessage(message))) if message == ["silo-ready"] => Input::ControlsReady,

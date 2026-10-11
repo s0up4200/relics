@@ -8,7 +8,7 @@ use futures::executor::block_on;
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response, Url};
 use serde_json::{Value, json};
 use silo_omarchy::api::{Client, Decision, Device, Server, Tokens, types};
-use silo_omarchy::playback::Sample;
+use silo_omarchy::playback::{Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -47,6 +47,12 @@ fn fake(start: &'static str) -> (Client, Arc<Mutex<Vec<Seen>>>) {
                 }
                 ("GET", "catalog/series/series:severance/seasons/2/episodes") => (200, season_two()),
                 ("POST", "playback/start") => (201, fixture(start)),
+                ("POST", "auth/refresh") => (
+                    200,
+                    json!({ "access_token": jwt(1_900_000_000), "refresh_token": "ref2", "expires_in": 28800 })
+                        .to_string(),
+                ),
+                ("POST", p) if p.ends_with("/replan") => (200, fixture("own/playback_replan_failure_recovery.json")),
                 ("POST", p) if p.ends_with("/progress") => (200, fixture("silo/playback_progress_applied.json")),
                 ("DELETE", _) => (200, fixture("silo/playback_stop_completed.json")),
                 _ => (404, String::new()),
@@ -206,10 +212,64 @@ fn progress_and_stop_send_the_installation_id_and_the_sample() {
     assert!(!paths.iter().any(|p| p.contains("watched")), "the app never marks an Item watched: {paths:?}");
 }
 
+/// A JWT whose payload has this `exp`. The signature is not checked.
+fn jwt(exp: u64) -> String {
+    use base64::Engine as _;
+    let part = |json: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.to_string());
+    format!("{}.{}.sig", part(json!({ "alg": "HS256" })), part(json!({ "sub": "u1", "exp": exp })))
+}
+
+#[test]
+fn a_refresh_gives_media_headers_with_the_new_token_and_its_expiry() {
+    let (client, seen) = fake("silo/playback_start_opaque_ids.json");
+    assert_eq!(client.media_access().expires, None, "the token of the fake is no JWT");
+    let access = block_on(client.refresh_access()).unwrap();
+    assert!(access.headers.contains(&("Authorization".into(), format!("Bearer {}", jwt(1_900_000_000)))));
+    assert_eq!(access.expires, Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_900_000_000)));
+    assert_eq!(body_of(&seen, "POST", "auth/refresh")["refresh_token"], json!("ref"));
+}
+
+#[test]
+fn a_replan_sends_the_failed_plan_and_the_last_good_position() {
+    let (client, seen) = fake("silo/playback_start_opaque_ids.json");
+    let Decision::Playable { attempt_id, .. } = block_on(client.start_playback("movie:heat-1995", None)).unwrap()
+    else {
+        panic!("not playable");
+    };
+    let replan = Replan {
+        session_id: SESSION.into(),
+        attempt_id: attempt_id.clone(),
+        failed_plan_id: "plan:478677870860e5e5108c18bff749b34b".into(),
+        plan_attempt_key: "v3:f0144c47fa349e3e".into(),
+        attempted_plan_keys: vec!["v3:f0144c47fa349e3e".into()],
+        selected_tracks: json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
+        position: 3600.0,
+    };
+    let Decision::Playable { plan, .. } = block_on(client.replan(&replan)).unwrap() else {
+        panic!("not playable");
+    };
+    assert_eq!(plan.stream.url, format!("https://silo.test/media/api/v2/playback/transcode/{SESSION}/master.m3u8"));
+    let body = body_of(&seen, "POST", "/replan");
+    assert_eq!(body["playback_attempt_id"], json!(attempt_id));
+    assert_eq!(body_of(&seen, "POST", "playback/start")["playback_attempt_id"], json!(attempt_id));
+    assert_eq!(body["operation"], json!("failure_recovery"));
+    assert_eq!(body["failed_plan_id"], json!("plan:478677870860e5e5108c18bff749b34b"));
+    assert_eq!(body["plan_attempt_key"], json!("v3:f0144c47fa349e3e"));
+    assert_eq!(body["attempted_plan_keys"], json!(["v3:f0144c47fa349e3e"]));
+    assert_eq!(body["attempt_count"], json!(1));
+    assert_eq!(body["position_seconds"], json!(3600.0));
+    assert_eq!(body["installation_id"], json!("11111111-1111-4111-8111-111111111111"));
+    assert_eq!(body["selected_tracks"], replan.selected_tracks);
+    assert!(body["failure"]["classification"].is_string());
+    let start = body_of(&seen, "POST", "playback/start");
+    assert_eq!(body["client_capabilities"], start["client_capabilities"]);
+    assert_eq!(body["client_features"], start["client_features"]);
+}
+
 #[test]
 fn media_headers_carry_the_token_and_the_profile() {
     let (client, _) = fake("silo/playback_start_opaque_ids.json");
-    let headers = client.media_headers();
+    let headers = client.media_access().headers;
     assert!(headers.contains(&("Authorization".into(), "Bearer tok".into())));
     assert!(headers.contains(&("X-Profile-Id".into(), "p-owner".into())));
     assert!(headers.contains(&("X-Silo-Device-Id".into(), "6c1f0d3e-0000-4000-8000-000000000001".into())));
