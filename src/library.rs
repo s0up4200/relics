@@ -1,5 +1,7 @@
-//! The Library window. It picks the screen: add a Server, sign in, choose a Profile, or Home.
+//! The Library window. It picks the screen: add a Server, sign in, choose a Profile, or Home. It also does the
+//! switch to another Profile or Active server, and the sign-out.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,14 +16,15 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
-use crate::api::{self, Client, Device, Error, Server, Trouble, Url, wire};
+use crate::accounts::{AccountChoice, AccountPicker};
+use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
 use crate::home;
-use crate::pages::Pages;
+use crate::pages::{MenuChoice, Pages};
 use crate::player::{PlaybackError, PlayerClosed, PlayerWindow};
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
 use crate::sign_in::{SignIn, SignedIn};
-use crate::state::{SavedAccount, SavedServer, State};
+use crate::state::{Pair, SavedAccount, SavedServer, State};
 
 /// The wait before retry number `attempt` (from 0) while the Server is Offline: 2, 4, 8 and 16 seconds, then
 /// 30 seconds.
@@ -55,8 +58,14 @@ pub struct LibraryWindow {
     /// The server refused the sign-in during playback. The sign-in screen shows when the player closes.
     sign_in_waits: bool,
     _troubles: Option<Task<()>>,
-    /// The subscription to the Play events of the pages.
-    _play: Option<Subscription>,
+    /// The subscriptions to the Play and menu events of the pages.
+    _pages: Vec<Subscription>,
+    /// The pages that showed when the sidebar menu opened the Profile picker or the Server list. Esc there
+    /// shows them again.
+    menu_back: Option<Entity<Pages>>,
+    /// The positions that the server did not get, of each Server and Account that is not active, keyed by
+    /// Server id and Account id. They go back into the client when that Account is active again.
+    kept: HashMap<(String, String), HashMap<(String, String), Pending>>,
     /// The pages that showed when the server refused the sign-in, and the id of their Profile. The sign-in
     /// opens them again.
     parked: Option<(String, Entity<Pages>)>,
@@ -82,6 +91,8 @@ enum Screen {
     Profiles(Entity<ProfilePicker>),
     /// A full-window message, for example while the app restores the sign-in.
     Message(String),
+    /// The Server list of the sidebar menu.
+    Accounts(Entity<AccountPicker>),
     /// The Server did not answer when the app opened the Account. The value is the text.
     Unreachable(String),
 }
@@ -150,7 +161,9 @@ impl LibraryWindow {
             probe: None,
             sign_in_waits: false,
             _troubles: None,
-            _play: None,
+            _pages: Vec::new(),
+            menu_back: None,
+            kept: HashMap::new(),
             parked: None,
             profiles: Vec::new(),
             pin_wait: None,
@@ -220,13 +233,13 @@ impl LibraryWindow {
         let server = event.client.server();
         // After a refused refresh, the old client of the Account takes the new tokens. It keeps the positions
         // that it did not send, and the pages that use it open again.
-        let client = match self.client.take() {
+        let client = match self.client.clone() {
             Some(old) if old.server().id == server.id && self.account_id() == *event.account.id => {
                 old.set_tokens(event.client.tokens());
                 old
             }
             _ => {
-                self.parked = None;
+                self.leave_account(false, cx).detach();
                 event.client.clone()
             }
         };
@@ -251,6 +264,10 @@ impl LibraryWindow {
         let executor = cx.background_executor().clone();
         let account_id = self.account_id();
         let server_id = client.server().id.clone();
+        // `open_profile` sends the kept positions of the Profile that opens. The others wait for their Profile.
+        if let Some(kept) = self.kept.remove(&(server_id.clone(), account_id.clone())) {
+            client.adopt_pending(kept);
+        }
         client.on_tokens(move |tokens| {
             let (server_id, account_id, tokens) = (server_id.clone(), account_id.clone(), tokens.clone());
             executor.spawn(async move { secrets::save(&server_id, &account_id, &tokens).await.ok() }).detach();
@@ -332,13 +349,25 @@ impl LibraryWindow {
 
     fn show_pages(&mut self, client: Arc<Client>, pages: Entity<Pages>, window: &mut Window, cx: &mut Context<Self>) {
         pages.update(cx, |pages, cx| pages.focus(window, cx));
-        self._play = Some(cx.subscribe(&pages, {
+        let play = cx.subscribe(&pages, {
             let client = client.clone();
             move |this, _, home::Play(item), cx| {
                 this.player_error = None;
                 this.player.update(cx, |player, cx| player.play(client.clone(), item.clone(), cx));
             }
-        }));
+        });
+        let menu = cx.subscribe_in(&pages, window, move |this, pages, choice: &MenuChoice, window, cx| match choice {
+            MenuChoice::SwitchProfile => {
+                this.menu_back = Some(pages.clone());
+                this.show_picker(client.clone(), None, window, cx);
+            }
+            MenuChoice::SwitchServer => {
+                this.menu_back = Some(pages.clone());
+                this.show_accounts(window, cx);
+            }
+            MenuChoice::SignOut => this.sign_out(window, cx),
+        });
+        self._pages = vec![play, menu];
         self._screen = None;
         self.screen = Screen::Pages(pages);
         cx.notify();
@@ -348,14 +377,13 @@ impl LibraryWindow {
     fn show_picker(&mut self, client: Arc<Client>, pin_for: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let profiles = self.profiles.clone();
         let view = cx.new(|cx| ProfilePicker::new(client.clone(), profiles, pin_for, window, cx));
-        self._screen = Some(cx.subscribe_in(&view, window, move |this, _, event: &PickerEvent, window, cx| {
-            match event {
+        self._screen =
+            Some(cx.subscribe_in(&view, window, move |this, _, event: &PickerEvent, window, cx| match event {
                 PickerEvent::Chosen { profile, token } => this.chosen(client.clone(), profile, token, window, cx),
                 PickerEvent::Retry => this.open_account(client.clone(), window, cx),
-                // ponytail: no server sign-out and no keyring delete yet; #35 adds them.
-                PickerEvent::SignOut => this.show_sign_in(client.server().clone(), None, window, cx),
-            }
-        }));
+                PickerEvent::SignOut => this.sign_out(window, cx),
+                PickerEvent::Back => this.back_to_pages(window, cx),
+            }));
         self.screen = Screen::Profiles(view);
         cx.notify();
     }
@@ -379,13 +407,123 @@ impl LibraryWindow {
             })
             .detach();
         }
+        let current = self.state.active().and_then(|(_, account)| account.last_profile.clone());
         match self.pin_wait.take() {
             Some(wait) if wait.profile_id == *profile.id => {
                 wait.reply.send(token.clone()).ok();
                 self.show_pages(client, wait.pages, window, cx);
             }
-            _ => self.open_profile(client, profile.clone(), token.clone(), window, cx),
+            // The sidebar menu opened the picker, and the user chose the Profile that shows.
+            _ if self.menu_back.is_some() && current.as_deref() == Some(&*profile.id) => self.back_to_pages(window, cx),
+            _ => {
+                self.menu_back = None;
+                self.stop_playback(cx).detach();
+                self.open_profile(client, profile.clone(), token.clone(), window, cx);
+            }
         }
+    }
+
+    /// Shows the pages again after Esc in the Profile picker or the Server list of the sidebar menu.
+    fn back_to_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let (Some(pages), Some(client)) = (self.menu_back.take(), self.client.clone()) {
+            self.show_pages(client, pages, window, cx);
+        }
+    }
+
+    /// Shows the Server list.
+    fn show_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (pairs, active) = (self.state.pairs(), self.state.active.clone());
+        let view = cx.new(|cx| AccountPicker::new(pairs, active, window, cx));
+        self._screen =
+            Some(cx.subscribe_in(&view, window, |this, _, choice: &AccountChoice, window, cx| match choice {
+                AccountChoice::Open(pair) => this.open_pair(pair, window, cx),
+                AccountChoice::Add => {
+                    this.leave_account(false, cx).detach();
+                    this._screen = None;
+                    this.screen = Screen::Connect;
+                    this.url.update(cx, |url, cx| url.focus(window, cx));
+                    cx.notify();
+                }
+                AccountChoice::Back if this.menu_back.is_some() => this.back_to_pages(window, cx),
+                // From the sign-in or the Connect screen: open the Active server again.
+                AccountChoice::Back => this.restore(window, cx),
+            }));
+        self.screen = Screen::Accounts(view);
+        cx.notify();
+    }
+
+    /// Makes a Server and Account pair the Active server and opens it.
+    fn open_pair(&mut self, pair: &Pair, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = (pair.server_id.clone(), pair.account_id.clone());
+        if self.menu_back.is_some() && self.state.active.as_ref() == Some(&chosen) {
+            return self.back_to_pages(window, cx);
+        }
+        self.leave_account(false, cx).detach();
+        self.state.active = Some(chosen);
+        self.save_state();
+        self.restore(window, cx);
+    }
+
+    /// Stops playback and closes the Player window. The task ends when the server has the stop report.
+    fn stop_playback(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.sign_in_waits = false;
+        self.player_error = None;
+        self.player.update(cx, |player, cx| player.quit(cx))
+    }
+
+    /// Leaves the Active server: it stops playback and drops the pages, the back history and the search and
+    /// filter state. The Artwork cache stays. When the stop report is done, the positions that the server did
+    /// not get go to `kept`. With `sign_out`, the client first sends the positions of its Profile, calls
+    /// `logout` and deletes the tokens of the Account. The task ends after that.
+    fn leave_account(&mut self, sign_out: bool, cx: &mut Context<Self>) -> Task<()> {
+        let old = self.client.take();
+        // A failed stop report or sign-out must not show the Offline banner or the sign-in screen.
+        if let Some(old) = &old {
+            old.on_trouble(|_| {});
+        }
+        let stopped = self.stop_playback(cx);
+        self.pin_wait = None;
+        self.menu_back = None;
+        self.parked = None;
+        self.probe = None;
+        self.offline = false;
+        self._troubles = None;
+        self._pin_requests = None;
+        self._pages.clear();
+        self.profiles.clear();
+        let Some(old) = old else {
+            return stopped;
+        };
+        let key = (old.server().id.clone(), self.account_id());
+        cx.spawn(async move |this, cx| {
+            stopped.await;
+            if sign_out {
+                if let Err(err) = old.sign_out().await {
+                    eprintln!("silo-omarchy: the server sign-out failed: {err}");
+                }
+                if let Err(err) = secrets::delete(&key.0, &key.1).await {
+                    eprintln!("silo-omarchy: cannot delete the tokens in the Secret Service: {err}");
+                }
+            }
+            this.update(cx, |this, _| this.kept.entry(key).or_default().extend(old.take_pending())).ok();
+        })
+    }
+
+    /// Signs the active Account out and shows its sign-in screen. The Server and the Account stay in the
+    /// state, so that the user can sign in again quickly.
+    fn sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(server) = self.client.as_ref().map(|client| client.server().clone()) else {
+            return;
+        };
+        let left = self.leave_account(true, cx);
+        self._screen = None;
+        self.screen = Screen::Message("Signing out…".into());
+        cx.notify();
+        // The sign-in screen waits for the delete, so that the delete cannot remove the tokens of a new sign-in.
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            left.await;
+            this.update_in(cx, |this, window, cx| this.show_sign_in(server, None, window, cx)).ok();
+        }));
     }
 
     /// Opens the PIN entry each time that the server answers 403 `profile_verification_required`. The client
@@ -542,6 +680,19 @@ impl LibraryWindow {
     }
 }
 
+impl LibraryWindow {
+    /// The button below the Connect and sign-in screens that opens the Server list, when there are saved
+    /// Servers.
+    fn switch_server_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        (!self.state.servers.is_empty()).then(|| {
+            div().absolute().bottom(px(24.)).child(
+                button("switch-server", "Switch server", ButtonVariant::Secondary, cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.show_accounts(window, cx))),
+            )
+        })
+    }
+}
+
 impl Render for LibraryWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.omarchy().clone();
@@ -554,8 +705,9 @@ impl Render for LibraryWindow {
             .text_color(t.foreground)
             .font_family(t.font.clone());
         let page = match &self.screen {
-            Screen::Connect => page.child(self.render_connect(window, cx)),
-            Screen::SignIn(view) => page.child(view.clone()),
+            Screen::Connect => page.child(self.render_connect(window, cx)).children(self.switch_server_button(cx)),
+            Screen::SignIn(view) => page.child(view.clone()).children(self.switch_server_button(cx)),
+            Screen::Accounts(view) => page.child(view.clone()),
             Screen::Pages(view) => page.child(view.clone()),
             Screen::Profiles(view) => page.child(view.clone()),
             Screen::Message(text) => page.child(div().max_w(px(560.)).text_color(t.secondary).child(text.clone())),

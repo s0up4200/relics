@@ -64,3 +64,14 @@ pub async fn save_pin_token(server_id: &str, account_id: &str, profile_id: &str,
     keyring.create_item("silo-omarchy PIN token", &attributes, token, true).await?;
     Ok(())
 }
+
+/// Deletes the sign-in tokens and every PIN token of the Account (#35 sign out).
+pub async fn delete(server_id: &str, account_id: &str) -> Result<()> {
+    let keyring = oo7::Keyring::new().await?;
+    keyring.unlock().await?;
+    // A search matches each item that has these attributes, so the PIN items of all Profiles go too.
+    keyring.delete(&attributes(server_id, account_id)).await?;
+    let pins = vec![("application", "silo-omarchy-pin"), ("server_id", server_id), ("account_id", account_id)];
+    keyring.delete(&pins).await?;
+    Ok(())
+}

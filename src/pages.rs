@@ -1,6 +1,7 @@
 //! The pages of the active Profile: the sidebar, the page that shows, and the back history. Esc or Backspace
 //! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows, and / opens
-//! Search. The sidebar shrinks to an icon rail when the window is narrow and on the detail page.
+//! Search. The sidebar shrinks to an icon rail when the window is narrow and on the detail page. The sidebar
+//! footer, or m, opens the menu with Switch profile, Switch server and Sign out.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,6 +39,20 @@ pub fn shortcut(key: &str, libraries: &[wire::UserLibrary]) -> Option<usize> {
         _ => None,
     }
 }
+
+/// An entry of the sidebar menu. The Library window does the switch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MenuChoice {
+    SwitchProfile,
+    SwitchServer,
+    SignOut,
+}
+
+const MENU: [(MenuChoice, &str); 3] = [
+    (MenuChoice::SwitchProfile, "Switch profile"),
+    (MenuChoice::SwitchServer, "Switch server"),
+    (MenuChoice::SignOut, "Sign out"),
+];
 
 #[derive(Clone)]
 pub enum Page {
@@ -91,12 +106,15 @@ pub struct Pages {
     search: Option<Entity<Search>>,
     /// The focused sidebar row, while the sidebar has the keyboard focus.
     sidebar: Option<usize>,
+    /// The selected entry of the sidebar menu, while the menu is open.
+    menu: Option<usize>,
     focus_handle: FocusHandle,
     _libraries: Task<()>,
     _events: Vec<Subscription>,
 }
 
 impl EventEmitter<Play> for Pages {}
+impl EventEmitter<MenuChoice> for Pages {}
 
 impl Pages {
     pub fn new(client: Arc<Client>, profile_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -111,6 +129,7 @@ impl Pages {
             library_pages: HashMap::new(),
             search: None,
             sidebar: None,
+            menu: None,
             focus_handle: cx.focus_handle(),
             _libraries: Task::ready(()),
             _events: Vec::new(),
@@ -279,9 +298,37 @@ impl Pages {
         }
     }
 
+    /// Opens or closes the sidebar menu.
+    fn toggle_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu = if self.menu.is_some() { None } else { Some(0) };
+        cx.notify();
+    }
+
+    fn choose(&mut self, choice: MenuChoice, cx: &mut Context<Self>) {
+        self.menu = None;
+        cx.emit(choice);
+        cx.notify();
+    }
+
+    /// A key while the menu is open. The menu takes each key.
+    fn menu_key(&mut self, selected: usize, key: &str, cx: &mut Context<Self>) {
+        match key {
+            "j" | "down" => self.menu = Some((selected + 1).min(MENU.len() - 1)),
+            "k" | "up" => self.menu = Some(selected.saturating_sub(1)),
+            "enter" => self.choose(MENU[selected].0, cx),
+            "escape" | "backspace" | "m" => self.menu = None,
+            _ => {}
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let key = keystroke.key.as_str();
+        if let Some(selected) = self.menu {
+            return self.menu_key(selected, key, cx);
+        }
         let m = keystroke.modifiers;
         let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt && !m.platform);
         let used = (self.sidebar.is_none() && self.page_key(key, typed, window, cx))
@@ -289,6 +336,10 @@ impl Pages {
                 (_, "/") => {
                     self.sidebar = None;
                     self.open_search(window, cx);
+                    true
+                }
+                (_, "m") => {
+                    self.toggle_menu(cx);
                     true
                 }
                 (_, key) if let Some(row) = shortcut(key, &self.libraries) => {
@@ -377,14 +428,62 @@ impl Pages {
             )
             .children(rows)
             .child(div().flex_1())
-            .children((!rail).then(|| {
-                div()
-                    .px(px(10.))
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(14.)).text_color(t.bright).child(self.profile_name.clone()))
-                    .child(div().text_size(px(11.)).text_color(t.secondary).child(self.client.server().name.clone()))
-            }))
+            .children(self.menu.map(|selected| self.menu_list(selected, cx)))
+            .child(self.footer(rail, cx))
+    }
+
+    /// The Profile and the Server of the pages. A click opens the menu.
+    fn footer(&self, rail: bool, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let initial = self.profile_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+        div()
+            .id("account-menu")
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .when(rail, |row| row.justify_center())
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(cx)))
+            .when(rail, |row| row.text_color(t.bright).child(initial))
+            .when(!rail, |row| {
+                row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div().truncate().text_size(px(14.)).text_color(t.bright).child(self.profile_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(t.secondary)
+                                .child(self.client.server().name.clone()),
+                        ),
+                )
+                .child(keycap("m", cx))
+            })
+    }
+
+    fn menu_list(&self, selected: usize, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let entries = MENU.iter().enumerate().map(|(row, &(choice, label))| {
+            div()
+                .id(("menu", row))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .truncate()
+                .border_2()
+                .border_color(if row == selected { t.accent } else { gpui::transparent_black() })
+                .on_click(cx.listener(move |this, _, _, cx| this.choose(choice, cx)))
+                .child(label)
+        });
+        div().p(px(4.)).flex().flex_col().gap(px(2.)).rounded(px(12.)).bg(t.surface).children(entries)
     }
 }
 
@@ -401,7 +500,11 @@ impl Render for Pages {
             .text_color(t.foreground)
             .font_family(t.font.clone())
             .text_size(px(14.))
-            .child(self.sidebar(sidebar_width(viewport, matches!(self.page, Page::Detail(_))) < 240., cx))
+            // The open menu widens the rail to the full sidebar, so that its entries have room.
+            .child(self.sidebar(
+                sidebar_width(viewport, matches!(self.page, Page::Detail(_))) < 240. && self.menu.is_none(),
+                cx,
+            ))
             .child(div().flex_1().min_w_0().h_full().child(self.page.clone().into_any_element()))
     }
 }

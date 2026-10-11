@@ -57,3 +57,29 @@ fn signing_in_again_keeps_one_entry_for_the_server_and_the_account() {
     assert_eq!(state.servers[0].accounts.len(), 2);
     assert_eq!(state.active().unwrap().1.username, "kim");
 }
+
+#[test]
+fn the_server_list_has_one_entry_for_each_server_and_account_pair() {
+    let mut state = State::fresh();
+    for (server, url, account, username) in [
+        ("server-1", "https://silo.test/media/", "1", "laura"),
+        ("server-2", "http://10.0.0.5:8080/", "1", "laura"),
+        ("server-1", "https://silo.test/media/", "2", "kim"),
+    ] {
+        state.remember(
+            SavedServer { id: server.into(), url: url.into(), accounts: Vec::new() },
+            SavedAccount { id: account.into(), username: username.into(), last_profile: None },
+        );
+    }
+    let pairs: Vec<_> =
+        state.pairs().into_iter().map(|p| (p.server_id, p.account_id, p.server_name, p.username)).collect();
+    let pair = |s: &str, a: &str, n: &str, u: &str| (s.to_string(), a.to_string(), n.to_string(), u.to_string());
+    assert_eq!(
+        pairs,
+        [
+            pair("server-1", "1", "silo.test", "laura"),
+            pair("server-1", "2", "silo.test", "kim"),
+            pair("server-2", "1", "10.0.0.5", "laura"),
+        ]
+    );
+}

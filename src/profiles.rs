@@ -24,6 +24,8 @@ pub enum PickerEvent {
     /// The user wants to read the Profiles again.
     Retry,
     SignOut,
+    /// Esc: the user wants the pages back, when the sidebar menu opened the picker.
+    Back,
 }
 
 pub struct ProfilePicker {
@@ -85,6 +87,7 @@ impl ProfilePicker {
         match key {
             "enter" if self.profiles.is_empty() => cx.emit(PickerEvent::Retry),
             "enter" => self.choose(window, cx),
+            "escape" => cx.emit(PickerEvent::Back),
             _ => {
                 let selected = move_choice(self.selected, key, self.profiles.len());
                 if selected == self.selected {

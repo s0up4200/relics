@@ -237,3 +237,66 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position() {
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[1]["start_position"], 1234.5);
 }
+
+#[test]
+fn sign_out_sends_the_kept_progress_and_then_ends_the_session_on_the_server() {
+    let down = Arc::new(AtomicBool::new(false));
+    let (client, seen, _) = fake({
+        let down = down.clone();
+        move |req| match req.path.as_str() {
+            _ if down.load(Ordering::SeqCst) => None,
+            "sync/progress" => ok("silo/sync_progress_ok.json"),
+            "auth/logout" => Some((204, "application/json", String::new())),
+            _ => playback(req),
+        }
+    });
+    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    down.store(true, Ordering::SeqCst);
+    block_on(client.report_progress(SESSION, &Sample { sequence: 1, position: 60.0, paused: false })).ok();
+    down.store(false, Ordering::SeqCst);
+
+    block_on(client.sign_out()).unwrap();
+    let paths: Vec<String> = seen.lock().unwrap().iter().map(|s| format!("{} {}", s.method, s.path)).collect();
+    assert_eq!(paths[paths.len() - 2..], ["POST sync/progress", "POST auth/logout"]);
+}
+
+#[test]
+fn progress_kept_across_a_server_switch_goes_out_when_the_account_is_active_again() {
+    let down = Arc::new(AtomicBool::new(true));
+    let reply = {
+        let down = down.clone();
+        move |req: &Seen| match req.path.as_str() {
+            "playback/start" | "playback/capabilities" | "catalog/items/movie:heat-1995/versions" => playback(req),
+            p if p.starts_with("markers/") => playback(req),
+            _ if down.load(Ordering::SeqCst) => None,
+            "sync/progress" => ok("silo/sync_progress_ok.json"),
+            _ => None,
+        }
+    };
+    let (old, _, _) = fake(reply.clone());
+    block_on(old.start_playback("movie:heat-1995", None)).unwrap();
+    block_on(old.report_progress(SESSION, &Sample { sequence: 1, position: 60.0, paused: false })).ok();
+    let kept = old.take_pending();
+    drop(old);
+
+    down.store(false, Ordering::SeqCst);
+    let (new, seen, _) = fake(reply);
+    new.adopt_pending(kept);
+    block_on(new.sync_progress()).unwrap();
+    let seen = seen.lock().unwrap();
+    let sync = seen.iter().find(|s| s.path == "sync/progress").expect("the kept position goes out");
+    assert_eq!(serde_json::from_str::<Value>(&sync.body).unwrap()["items"][0]["position_ms"], 60000);
+}
+
+#[test]
+fn a_failed_sign_out_does_not_show_the_offline_banner_or_the_sign_in_screen() {
+    let (client, _, refused) = fake(|req| match req.path.as_str() {
+        "auth/refresh" => problem(401, "refresh_session_revoked"),
+        _ => problem(401, "token_refresh_required"),
+    });
+    assert!(block_on(client.sign_out()).is_err());
+    let (client, _, offline) = fake(|_| None);
+    assert!(block_on(client.sign_out()).is_err());
+    assert_eq!(refused.get(), []);
+    assert_eq!(offline.get(), []);
+}

@@ -32,8 +32,8 @@ pub struct SignIn {
     password_form: bool,
     /// The device sign-in in progress.
     code: Option<DeviceCode>,
-    /// The Account signed in, but it has a temporary password.
-    password_change: bool,
+    /// The sign-in of an Account with a temporary password. Sign out ends it on the server.
+    password_change: Option<Client>,
     /// Why the user must sign in, or why the last try failed.
     message: Option<String>,
     /// Shown when the Secret Service is missing.
@@ -108,7 +108,7 @@ impl SignIn {
             provider: 0,
             password_form: true,
             code: None,
-            password_change: false,
+            password_change: None,
             message,
             keyring_note: None,
             signing_in: None,
@@ -236,16 +236,22 @@ impl SignIn {
     /// nothing in the app until the user sets a new password in the web client.
     fn signed_in(&mut self, client: Client, account: wire::Account, cx: &mut Context<Self>) {
         if account.password_change_required {
-            self.password_change = true;
+            self.password_change = Some(client);
             return;
         }
         cx.emit(SignedIn { client: Arc::new(client), account });
     }
 
-    /// Drops the session of an Account with a temporary password and shows the form again.
-    // ponytail: the app forgets the tokens but does not call logout; #35 adds the server logout.
+    /// Ends the session of an Account with a temporary password on the server and shows the form again.
     fn sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.password_change = false;
+        if let Some(client) = self.password_change.take() {
+            cx.background_spawn(async move {
+                if let Err(err) = client.sign_out().await {
+                    eprintln!("silo-omarchy: the server sign-out failed: {err}");
+                }
+            })
+            .detach();
+        }
         self.message = None;
         self.password.update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -293,7 +299,7 @@ impl Render for SignIn {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.omarchy().clone();
         let note = |text: &Option<String>, color| div().text_size(px(13.)).text_color(color).children(text.clone());
-        let body: Vec<gpui::AnyElement> = if self.password_change {
+        let body: Vec<gpui::AnyElement> = if self.password_change.is_some() {
             vec![
                 div().child("Set a new password in the Silo web client, then sign in again.").into_any_element(),
                 button("sign-out", "Sign out", ButtonVariant::Primary, cx)

@@ -31,6 +31,16 @@ pub struct SavedAccount {
     pub last_profile: Option<String>,
 }
 
+/// One Server and Account pair, as the Server list shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pair {
+    pub server_id: String,
+    pub account_id: String,
+    /// The host of the Server URL.
+    pub server_name: String,
+    pub username: String,
+}
+
 const FILE: &str = "state.json";
 
 impl State {
@@ -94,6 +104,26 @@ impl State {
         let (server_id, account_id) = self.active.as_ref()?;
         let server = self.servers.iter().find(|s| &s.id == server_id)?;
         Some((server, server.accounts.iter().find(|a| &a.id == account_id)?))
+    }
+
+    /// Each Server and Account pair, in the order the user added them. A second Account on one Server is a
+    /// separate pair.
+    pub fn pairs(&self) -> Vec<Pair> {
+        self.servers
+            .iter()
+            .flat_map(|server| {
+                let name = crate::api::Url::parse(&server.url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(String::from))
+                    .unwrap_or_else(|| server.url.clone());
+                server.accounts.iter().map(move |account| Pair {
+                    server_id: server.id.clone(),
+                    account_id: account.id.clone(),
+                    server_name: name.clone(),
+                    username: account.username.clone(),
+                })
+            })
+            .collect()
     }
 
     pub fn active_account_mut(&mut self) -> Option<&mut SavedAccount> {

@@ -717,6 +717,17 @@ impl Client {
         }
     }
 
+    // Sign out (#35).
+
+    /// Sends the kept positions of the active Profile and then ends the sign-in on the server with `logout`.
+    /// A failure does not call the `on_trouble` callback: the app signs out locally anyway.
+    pub async fn sign_out(&self) -> Result<(), Error> {
+        if let Err(err) = self.sync_progress().await {
+            eprintln!("silo-omarchy: progress sync before the sign-out failed: {err}");
+        }
+        self.call_with_retries(Method::POST, "auth/logout", None).await
+    }
+
     // Profile PIN (#23).
 
     /// Sets the PIN token of the active Profile. `set_profile` drops it.

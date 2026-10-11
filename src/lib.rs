@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod api;
 pub mod artwork;
 pub mod browse;
