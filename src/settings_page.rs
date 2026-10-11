@@ -1,0 +1,364 @@
+//! The Settings page. `,` or the Settings row at the bottom of the sidebar opens it.
+//!
+//! - Playback: the eight Server settings of the active Profile. The page reads them again each time it opens.
+//!   Each change writes at the `profile` scope at once. A failed write puts the old value back and shows one
+//!   line of error text. The app keeps no queue of failed writes.
+//! - Player: the hardware decoding Local setting.
+//! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
+//!
+//! j/k move between the rows. l, Right or Enter gives the next value, h or Left the previous one. On an
+//! Account row h/l choose Sign out or Remove, and Enter does it.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Task, Window, div, px,
+};
+use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
+use serde_json::Value;
+
+use crate::api::Client;
+use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
+use crate::state::Pair;
+
+/// An Accounts action. The Library window does it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccountAction {
+    SignOut(Pair),
+    Remove(Pair),
+    AddServer,
+}
+
+/// The choice `step` places away from the `current` value: the next one for 1, the previous one for -1. It wraps
+/// at the ends. A value that is not in the list goes to the first choice.
+pub fn step(options: &[(Value, String)], current: &Value, step: isize) -> Value {
+    let len = options.len() as isize;
+    let next = match options.iter().position(|(value, _)| value == current) {
+        Some(index) => (index as isize + step).rem_euclid(len),
+        None => 0,
+    };
+    options[next as usize].0.clone()
+}
+
+/// The row of the hardware decoding toggle. The eight Server settings come first.
+const HWDEC_ROW: usize = KEYS.len();
+/// The first Account row.
+const FIRST_PAIR: usize = HWDEC_ROW + 1;
+
+pub struct SettingsPage {
+    client: Arc<Client>,
+    pairs: Vec<Pair>,
+    /// The Active server, which the Accounts section marks.
+    active_pair: Option<(String, String)>,
+    /// The Server settings, after the page read them.
+    server: Option<ServerSettings>,
+    /// The read failed. The page shows the error with Retry.
+    load_error: Option<String>,
+    /// The last failed write, or the last Accounts action.
+    message: Option<(String, bool)>,
+    local: LocalSettings,
+    row: usize,
+    /// On an Account row: 0 is Sign out, 1 is Remove.
+    action: usize,
+    /// The page has the keyboard focus.
+    pub active: bool,
+    _load: Task<()>,
+    /// One write for each key. A new change of the key drops the old write.
+    writes: HashMap<&'static str, Task<()>>,
+}
+
+impl EventEmitter<AccountAction> for SettingsPage {}
+
+impl SettingsPage {
+    pub fn new(
+        client: Arc<Client>,
+        pairs: Vec<Pair>,
+        active_pair: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut page = Self {
+            client,
+            pairs,
+            active_pair,
+            server: None,
+            load_error: None,
+            message: None,
+            local: LocalSettings::load(&LocalSettings::dir()),
+            row: 0,
+            action: 0,
+            active: true,
+            _load: Task::ready(()),
+            writes: HashMap::new(),
+        };
+        page.load(cx);
+        page
+    }
+
+    fn load(&mut self, cx: &mut Context<Self>) {
+        self.load_error = None;
+        let client = self.client.clone();
+        self._load = cx.spawn(async move |this, cx| {
+            let result = client.load_server_settings().await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.server = Some(client.server_settings()),
+                    Err(err) => this.load_error = Some(err.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        cx.notify();
+    }
+
+    /// The row after the last Account: Add server.
+    fn add_row(&self) -> usize {
+        FIRST_PAIR + self.pairs.len()
+    }
+
+    /// Changes a Server setting by `delta` choices and writes it.
+    fn change(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
+        let Some(server) = &mut self.server else {
+            return;
+        };
+        let key = KEYS[index];
+        let old = server.value(key);
+        let new = step(&settings::options(key, &old), &old, delta);
+        server.set(key, &new);
+        self.message = None;
+        let client = self.client.clone();
+        let write = cx.spawn(async move |this, cx| {
+            let result = client.set_server_setting(key, new).await;
+            this.update(cx, |this, cx| {
+                if let Err(err) = result {
+                    if let Some(server) = &mut this.server {
+                        server.set(key, &old);
+                    }
+                    this.message = Some((format!("Could not save {}: {err}", settings::label(key)), true));
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.writes.insert(key, write);
+        cx.notify();
+    }
+
+    fn toggle_hwdec(&mut self, cx: &mut Context<Self>) {
+        let new = LocalSettings { hardware_decoding: !self.local.hardware_decoding };
+        match new.save(&LocalSettings::dir()) {
+            Ok(()) => {
+                self.local = new;
+                self.message = None;
+            }
+            Err(err) => self.message = Some((format!("Could not save hardware decoding: {err}"), true)),
+        }
+        cx.notify();
+    }
+
+    fn act(&mut self, index: usize, action: usize, cx: &mut Context<Self>) {
+        let Some(pair) = self.pairs.get(index).cloned() else {
+            return cx.emit(AccountAction::AddServer);
+        };
+        let who = format!("{} on {}", pair.username, pair.server_name);
+        if action == 0 {
+            self.message = Some((format!("Signed out {who}."), false));
+            cx.emit(AccountAction::SignOut(pair));
+        } else {
+            self.message = Some((format!("Removed {who}."), false));
+            self.pairs.remove(index);
+            self.row = self.row.min(self.add_row());
+            cx.emit(AccountAction::Remove(pair));
+        }
+        cx.notify();
+    }
+
+    /// A key while the page has the focus. Returns false for a key that the page does not use.
+    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let row = self.row;
+        match key {
+            "j" | "down" => {
+                self.row = (row + 1).min(self.add_row());
+                self.action = 0;
+            }
+            "k" | "up" => {
+                self.row = row.saturating_sub(1);
+                self.action = 0;
+            }
+            "r" if self.load_error.is_some() => self.load(cx),
+            _ if row < HWDEC_ROW => match key {
+                "l" | "right" | "enter" => self.change(row, 1, cx),
+                "h" | "left" => self.change(row, -1, cx),
+                _ => return false,
+            },
+            "l" | "right" | "enter" | "h" | "left" if row == HWDEC_ROW => self.toggle_hwdec(cx),
+            "enter" => self.act(row - FIRST_PAIR, self.action, cx),
+            "l" | "right" if row < self.add_row() => self.action = 1,
+            "h" | "left" if row < self.add_row() && self.action == 1 => self.action = 0,
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    fn header(&self, text: &'static str, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        div()
+            .pt(px(24.))
+            .pb(px(6.))
+            .text_size(px(13.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(t.secondary)
+            .child(text)
+    }
+
+    /// One row: a label on the left and a value on the right. A click acts like Enter.
+    fn row(&self, row: usize, label: SharedString, value: SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let focused = self.active && self.row == row;
+        div()
+            .id(("settings-row", row))
+            .max_w(px(720.))
+            .px(px(14.))
+            .py(px(10.))
+            .rounded(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(14.))
+            .bg(t.surface)
+            .border_2()
+            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row = row;
+                this.key("enter", cx);
+            }))
+            .child(div().flex_1().truncate().child(label))
+            .child(div().text_color(t.bright).child(value))
+    }
+
+    fn pair_row(&self, index: usize, pair: &Pair, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let row = FIRST_PAIR + index;
+        let is_active = self.active_pair == Some((pair.server_id.clone(), pair.account_id.clone()));
+        let action = |n: usize, label: &'static str| {
+            let focused = self.active && self.row == row && self.action == n;
+            div()
+                .id(("settings-action", row * 2 + n))
+                .px(px(12.))
+                .py(px(4.))
+                .rounded_full()
+                .border_2()
+                .border_color(if focused { t.accent } else { t.divider() })
+                .text_color(if n == 1 { t.danger } else { t.foreground })
+                .on_click(cx.listener(move |this, _, _, cx| this.act(index, n, cx)))
+                .child(label)
+        };
+        div()
+            .max_w(px(720.))
+            .px(px(14.))
+            .py(px(8.))
+            .rounded(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .bg(t.surface)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().text_color(t.bright).child(pair.username.clone()))
+                    .child(div().truncate().text_size(px(12.)).text_color(t.secondary).child(pair.server_name.clone())),
+            )
+            .when(is_active, |row| row.child(div().text_size(px(12.)).text_color(t.accent).child("Active")))
+            .child(action(0, "Sign out"))
+            .child(action(1, "Remove"))
+    }
+}
+
+impl Render for SettingsPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy().clone();
+        let playback: Vec<_> = match &self.server {
+            Some(server) => KEYS
+                .iter()
+                .enumerate()
+                .map(|(row, key)| {
+                    let current = server.value(key);
+                    let options = settings::options(key, &current);
+                    let value = options.into_iter().find(|(v, _)| *v == current).map(|(_, l)| l).unwrap_or_default();
+                    self.row(row, settings::label(key).into(), value.into(), cx).into_any_element()
+                })
+                .collect(),
+            None => {
+                let retry = button("settings-retry", "Retry", ButtonVariant::Secondary, &*cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
+                let failed = self.load_error.is_some();
+                vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(14.))
+                        .text_color(if failed { t.danger } else { t.secondary })
+                        .child(self.load_error.clone().unwrap_or_else(|| "Loading…".into()))
+                        .when(failed, |row| row.child(retry))
+                        .into_any_element(),
+                ]
+            }
+        };
+        let hwdec = if self.local.hardware_decoding { "On" } else { "Off" };
+        let pairs: Vec<_> = self.pairs.iter().enumerate().map(|(i, pair)| self.pair_row(i, pair, cx)).collect();
+        let add = self.add_row();
+        div()
+            .id("settings-page")
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .px(px(40.))
+            .pt(px(32.))
+            .pb(px(40.))
+            // ponytail: the page does not scroll to the focused row; it fits a normal window.
+            .overflow_y_scroll()
+            .child(div().text_size(px(28.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("Settings"))
+            .child(self.header("Playback", cx))
+            .children(playback)
+            .child(self.header("Player", cx))
+            .child(self.row(HWDEC_ROW, "Hardware decoding".into(), hwdec.into(), cx))
+            .child(self.header("Accounts", cx))
+            .children(pairs)
+            .child(self.row(add, "Add server".into(), "".into(), cx))
+            .children(self.message.clone().map(|(text, failed)| {
+                div().pt(px(12.)).text_color(if failed { t.danger } else { t.secondary }).child(text)
+            }))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .pt(px(24.))
+                    .text_size(px(12.))
+                    .text_color(t.secondary)
+                    .child(concat!("silo-omarchy ", env!("CARGO_PKG_VERSION"))),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::step;
+
+    #[test]
+    fn a_step_wraps_at_the_ends_and_an_unknown_value_goes_to_the_first_choice() {
+        let options =
+            [(json!("auto"), "Auto".to_string()), (json!("always"), String::new()), (json!("off"), String::new())];
+        assert_eq!(step(&options, &json!("auto"), 1), json!("always"));
+        assert_eq!(step(&options, &json!("off"), 1), json!("auto"));
+        assert_eq!(step(&options, &json!("auto"), -1), json!("off"));
+        assert_eq!(step(&options, &Value::Null, 1), json!("auto"));
+    }
+}

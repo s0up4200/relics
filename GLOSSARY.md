@@ -82,6 +82,10 @@ _Avoid_: premature EOF, false EOF
 A preference that Silo stores for a Profile. Every client that uses the Profile shares it.
 _Avoid_: preference, user setting
 
+**Local setting**:
+A preference that only this app on this computer has, such as hardware decoding.
+_Avoid_: config, device setting
+
 **Marker**:
 A time range in a file version that Silo labels `intro`, `credits`, `recap` or `preview`. A file version can have more than one marker of the same kind.
 

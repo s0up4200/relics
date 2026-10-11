@@ -23,8 +23,15 @@ use crate::pages::{MenuChoice, Pages};
 use crate::player::{PlaybackError, PlayerClosed, PlayerWindow};
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
+use crate::settings_page::AccountAction;
 use crate::sign_in::{SignIn, SignedIn};
 use crate::state::{Pair, SavedAccount, SavedServer, State};
+
+/// The Server of a saved Server, named by the host of its URL.
+fn server_of(saved: &SavedServer) -> Option<Server> {
+    let url = Url::parse(&saved.url).ok()?;
+    Some(Server { id: saved.id.clone(), name: url.host_str().unwrap_or_default().to_string(), url })
+}
 
 /// The wait before retry number `attempt` (from 0) while the Server is Offline: 2, 4, 8 and 16 seconds, then
 /// 30 seconds.
@@ -178,11 +185,9 @@ impl LibraryWindow {
         let Some((server, account)) = self.state.active() else {
             return;
         };
-        let Ok(url) = Url::parse(&server.url) else {
+        let Some(server) = server_of(server) else {
             return;
         };
-        let server =
-            Server { id: server.id.clone(), name: url.host_str().unwrap_or_default().to_string(), url: url.clone() };
         let account_id = account.id.clone();
         self.screen = Screen::Message(format!("Signing in to {}…", server.name));
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -367,7 +372,11 @@ impl LibraryWindow {
             }
             MenuChoice::SignOut => this.sign_out(window, cx),
         });
-        self._pages = vec![play, menu];
+        let accounts = cx.subscribe_in(&pages, window, |this, _, action: &AccountAction, window, cx| {
+            this.account_action(action, window, cx)
+        });
+        self.share_pairs(&pages, cx);
+        self._pages = vec![play, menu, accounts];
         self._screen = None;
         self.screen = Screen::Pages(pages);
         cx.notify();
@@ -437,19 +446,91 @@ impl LibraryWindow {
         self._screen =
             Some(cx.subscribe_in(&view, window, |this, _, choice: &AccountChoice, window, cx| match choice {
                 AccountChoice::Open(pair) => this.open_pair(pair, window, cx),
-                AccountChoice::Add => {
-                    this.leave_account(false, cx).detach();
-                    this._screen = None;
-                    this.screen = Screen::Connect;
-                    this.url.update(cx, |url, cx| url.focus(window, cx));
-                    cx.notify();
-                }
+                AccountChoice::Add => this.add_server(window, cx),
                 AccountChoice::Back if this.menu_back.is_some() => this.back_to_pages(window, cx),
                 // From the sign-in or the Connect screen: open the Active server again.
                 AccountChoice::Back => this.restore(window, cx),
             }));
         self.screen = Screen::Accounts(view);
         cx.notify();
+    }
+
+    /// Leaves the Active server and shows the Connect screen.
+    fn add_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_account(false, cx).detach();
+        self.show_connect(window, cx);
+    }
+
+    fn show_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._screen = None;
+        self.screen = Screen::Connect;
+        self.url.update(cx, |url, cx| url.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Gives the pages the Server and Account pairs for the Accounts section of the Settings page.
+    fn share_pairs(&self, pages: &Entity<Pages>, cx: &mut Context<Self>) {
+        let pairs = (self.state.pairs(), self.state.active.clone());
+        pages.update(cx, |pages, _| pages.pairs = pairs);
+    }
+
+    /// An action of the Accounts section of the Settings page.
+    fn account_action(&mut self, action: &AccountAction, window: &mut Window, cx: &mut Context<Self>) {
+        let is_active = |pair: &Pair| self.state.active == Some((pair.server_id.clone(), pair.account_id.clone()));
+        match action {
+            AccountAction::AddServer => self.add_server(window, cx),
+            AccountAction::SignOut(pair) if is_active(pair) => self.sign_out(window, cx),
+            AccountAction::SignOut(pair) => self.sign_out_other(pair, cx),
+            AccountAction::Remove(pair) if is_active(pair) => {
+                let left = self.leave_account(true, cx);
+                self.state.remove(&pair.server_id, &pair.account_id);
+                self.save_state();
+                self._screen = None;
+                self.screen = Screen::Message("Signing out…".into());
+                cx.notify();
+                let key = (pair.server_id.clone(), pair.account_id.clone());
+                self.task = Some(cx.spawn_in(window, async move |this, cx| {
+                    left.await;
+                    this.update_in(cx, |this, window, cx| {
+                        this.kept.remove(&key);
+                        match this.state.active {
+                            Some(_) => this.restore(window, cx),
+                            None => this.show_connect(window, cx),
+                        }
+                    })
+                    .ok();
+                }));
+            }
+            AccountAction::Remove(pair) => {
+                self.sign_out_other(pair, cx);
+                self.state.remove(&pair.server_id, &pair.account_id);
+                self.save_state();
+                self.kept.remove(&(pair.server_id.clone(), pair.account_id.clone()));
+                if let Screen::Pages(pages) = &self.screen {
+                    self.share_pairs(&pages.clone(), cx);
+                }
+            }
+        }
+    }
+
+    /// Signs out an Account that is not active: `logout` with its saved tokens, then it deletes the tokens. Its
+    /// kept positions stay until the user signs in again or removes it.
+    fn sign_out_other(&self, pair: &Pair, cx: &mut Context<Self>) {
+        let Some(server) = self.state.servers.iter().find(|s| s.id == pair.server_id).and_then(server_of) else {
+            return;
+        };
+        let (http, device, account_id) = (cx.http_client(), self.device.clone(), pair.account_id.clone());
+        cx.spawn(async move |_, _| {
+            if let Ok(Some(tokens)) = secrets::load(&server.id, &account_id).await
+                && let Err(err) = Client::new(http, server.clone(), device, tokens).sign_out().await
+            {
+                eprintln!("silo-omarchy: the server sign-out failed: {err}");
+            }
+            if let Err(err) = secrets::delete(&server.id, &account_id).await {
+                eprintln!("silo-omarchy: cannot delete the tokens in the Secret Service: {err}");
+            }
+        })
+        .detach();
     }
 
     /// Makes a Server and Account pair the Active server and opens it.

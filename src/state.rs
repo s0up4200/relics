@@ -126,6 +126,18 @@ impl State {
             .collect()
     }
 
+    /// Removes the Account, and its Server when the Server has no Accounts left. When the Account was the
+    /// active pair, the first pair left becomes active, or none.
+    pub fn remove(&mut self, server_id: &str, account_id: &str) {
+        for server in self.servers.iter_mut().filter(|s| s.id == server_id) {
+            server.accounts.retain(|a| a.id != account_id);
+        }
+        self.servers.retain(|s| !s.accounts.is_empty());
+        if self.active.as_ref().is_some_and(|(s, a)| s == server_id && a == account_id) {
+            self.active = self.pairs().into_iter().next().map(|p| (p.server_id, p.account_id));
+        }
+    }
+
     pub fn active_account_mut(&mut self) -> Option<&mut SavedAccount> {
         let (server_id, account_id) = self.active.as_ref()?;
         let server = self.servers.iter_mut().find(|s| &s.id == server_id)?;

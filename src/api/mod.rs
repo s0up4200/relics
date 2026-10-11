@@ -362,6 +362,19 @@ impl Client {
         Ok(())
     }
 
+    /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
+    /// when the write succeeds. A null value is "No preference".
+    pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
+        let profile_id = self.auth.lock().unwrap().profile_id.clone();
+        let path = format!("settings/values/{key}?scope=profile");
+        let body = serde_json::json!({ "value": value });
+        let _: wire::SettingValue = self.call(Method::PUT, &path, Some(body)).await?;
+        if self.auth.lock().unwrap().profile_id == profile_id {
+            self.server_settings.lock().unwrap().set(key, &value);
+        }
+        Ok(())
+    }
+
     pub async fn profiles(&self) -> Result<Vec<wire::Profile>, Error> {
         let profiles: wire::ProfileCollection = self.call(Method::GET, "profiles", None).await?;
         Ok(profiles.items)

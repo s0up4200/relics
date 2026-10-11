@@ -83,3 +83,25 @@ fn the_server_list_has_one_entry_for_each_server_and_account_pair() {
         ]
     );
 }
+
+#[test]
+fn remove_drops_the_account_and_a_server_with_no_accounts_left() {
+    let mut state = State::fresh();
+    for (server, account) in [("server-1", "1"), ("server-1", "2"), ("server-2", "1")] {
+        state.remember(
+            SavedServer { id: server.into(), url: "https://silo.test/".into(), accounts: Vec::new() },
+            SavedAccount { id: account.into(), username: "laura".into(), last_profile: None },
+        );
+    }
+    state.remove("server-1", "1");
+    assert_eq!(state.servers.len(), 2);
+    assert_eq!(state.active, Some(("server-2".into(), "1".into())), "another pair stays active");
+
+    state.remove("server-2", "1");
+    assert_eq!(state.servers.len(), 1, "the Server with no Accounts left goes");
+    assert_eq!(state.active, Some(("server-1".into(), "2".into())), "the first pair left becomes active");
+
+    state.remove("server-1", "2");
+    assert!(state.servers.is_empty());
+    assert_eq!(state.active, None);
+}

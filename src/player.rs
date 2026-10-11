@@ -13,9 +13,7 @@ use gpui_omarchy::ActiveTheme as _;
 use crate::api::{Client, wire};
 use crate::mpv;
 use crate::playback::{Command, Input, Session};
-
-// ponytail: a fixed value until #36 adds the hardware decoding Local setting.
-const HWDEC: &str = "auto-safe";
+use crate::settings::LocalSettings;
 
 /// What the Player window needs to play an Item.
 #[derive(Debug, Clone)]
@@ -305,7 +303,9 @@ impl PlayerWindow {
                     vec![]
                 }
             };
-            self.mpv = Some(mpv::Player::open(HWDEC, &options, move |input| {
+            // Each new mpv handle reads the hardware decoding Local setting again.
+            let hwdec = LocalSettings::load(&LocalSettings::dir()).hwdec();
+            self.mpv = Some(mpv::Player::open(hwdec, &options, move |input| {
                 tx.unbounded_send(input).ok();
             })?);
             self.mpv_id += 1;

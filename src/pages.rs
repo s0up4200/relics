@@ -1,7 +1,8 @@
 //! The pages of the active Profile: the sidebar, the page that shows, and the back history. Esc or Backspace
 //! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows, and / opens
 //! Search. The sidebar shrinks to an icon rail when the window is narrow and on the detail page. The sidebar
-//! footer, or m, opens the menu with Switch profile, Switch server and Sign out.
+//! footer, or m, opens the menu with Switch profile, Switch server and Sign out. The , key or the Settings row
+//! at the bottom of the sidebar opens the Settings page. Esc goes back from it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use crate::detail::{self, Detail};
 use crate::home::{Home, Open, Play, Rows};
 use crate::library_page::{LibraryPage, is_shows};
 use crate::search::{OpenPerson, PersonPage, Search};
+use crate::settings_page::{AccountAction, SettingsPage};
+use crate::state::Pair;
 
 /// Below this window width, the sidebar is an icon rail.
 const NARROW: f32 = 1100.;
@@ -61,6 +64,7 @@ pub enum Page {
     Detail(Entity<Detail>),
     Search(Entity<Search>),
     Person(Entity<PersonPage>),
+    Settings(Entity<SettingsPage>),
 }
 
 impl Page {
@@ -77,6 +81,10 @@ impl Page {
             }),
             Page::Search(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
             Page::Person(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
+            Page::Settings(page) => page.update(cx, |page, cx| {
+                page.active = active;
+                cx.notify();
+            }),
         }
     }
 
@@ -87,6 +95,7 @@ impl Page {
             Page::Detail(page) => page.into_any_element(),
             Page::Search(page) => page.into_any_element(),
             Page::Person(page) => page.into_any_element(),
+            Page::Settings(page) => page.into_any_element(),
         }
     }
 }
@@ -108,6 +117,8 @@ pub struct Pages {
     sidebar: Option<usize>,
     /// The selected entry of the sidebar menu, while the menu is open.
     menu: Option<usize>,
+    /// Each Server and Account pair, and the Active server, for the Accounts section of the Settings page.
+    pub pairs: (Vec<Pair>, Option<(String, String)>),
     focus_handle: FocusHandle,
     _libraries: Task<()>,
     _events: Vec<Subscription>,
@@ -115,6 +126,7 @@ pub struct Pages {
 
 impl EventEmitter<Play> for Pages {}
 impl EventEmitter<MenuChoice> for Pages {}
+impl EventEmitter<AccountAction> for Pages {}
 
 impl Pages {
     pub fn new(client: Arc<Client>, profile_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -130,6 +142,7 @@ impl Pages {
             search: None,
             sidebar: None,
             menu: None,
+            pairs: (Vec::new(), None),
             focus_handle: cx.focus_handle(),
             _libraries: Task::ready(()),
             _events: Vec::new(),
@@ -221,6 +234,15 @@ impl Pages {
         }
     }
 
+    /// Opens a new Settings page, which reads the Server settings again.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let (client, (pairs, active)) = (self.client.clone(), self.pairs.clone());
+        let page = cx.new(|cx| SettingsPage::new(client, pairs, active, cx));
+        cx.subscribe(&page, |_, _, action: &AccountAction, cx| cx.emit(action.clone())).detach();
+        self.sidebar = None;
+        self.open(Page::Settings(page), cx);
+    }
+
     /// Shows `page` and puts the page that showed on the back history.
     pub fn open(&mut self, page: Page, cx: &mut Context<Self>) {
         self.back.push(self.page.clone());
@@ -248,8 +270,17 @@ impl Pages {
         self.libraries.len() + 1
     }
 
+    /// The sidebar row of Settings, at the bottom.
+    fn settings_row(&self) -> usize {
+        self.search_row() + 1
+    }
+
     /// Opens a sidebar row (0 is Home) and clears the back history. The keyboard focus goes to the page.
+    /// Settings keeps the history, so that Esc goes back from it.
     fn open_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if row == self.settings_row() {
+            return self.open_settings(cx);
+        }
         let page = match row.checked_sub(1).and_then(|i| self.libraries.get(i)).cloned() {
             None if row == self.search_row() => Page::Search(self.search_page(window, cx)),
             None => Page::Home(self.home.clone()),
@@ -279,6 +310,7 @@ impl Pages {
         let mut pages = std::iter::once(&self.page).chain(self.back.iter().rev());
         match pages.find(|p| !matches!(p, Page::Detail(_) | Page::Person(_))) {
             Some(Page::Search(_)) => self.search_row(),
+            Some(Page::Settings(_)) => self.settings_row(),
             Some(Page::Library(page)) => {
                 let id = &page.read(cx).library.id;
                 self.libraries.iter().position(|l| l.id == *id).map_or(0, |i| i + 1)
@@ -295,6 +327,7 @@ impl Pages {
             Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Search(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
             Page::Person(page) => page.update(cx, |page, cx| page.key(key, cx)),
+            Page::Settings(page) => page.update(cx, |page, cx| page.key(key, cx)),
         }
     }
 
@@ -338,6 +371,10 @@ impl Pages {
                     self.open_search(window, cx);
                     true
                 }
+                (_, ",") => {
+                    self.open_settings(cx);
+                    true
+                }
                 (_, "m") => {
                     self.toggle_menu(cx);
                     true
@@ -356,7 +393,7 @@ impl Pages {
                     true
                 }
                 (Some(row), "j" | "down") => {
-                    self.sidebar = Some((row + 1).min(self.search_row()));
+                    self.sidebar = Some((row + 1).min(self.settings_row()));
                     true
                 }
                 (Some(row), "k" | "up") => {
@@ -385,27 +422,32 @@ impl Pages {
         let current = self.current_row(cx);
         let names = std::iter::once("Home".to_string())
             .chain(self.libraries.iter().map(|l| l.name.clone()))
-            .chain(["Search".to_string()]);
-        let rows = names.enumerate().map(|(row, name)| {
-            let key = ["1", "2", "3"].into_iter().find(|key| shortcut(key, &self.libraries) == Some(row));
-            let key = key.or((row == self.search_row()).then_some("/"));
-            let label = if rail { name.chars().next().map(String::from).unwrap_or_default() } else { name };
-            div()
-                .id(("sidebar", row))
-                .px(px(10.))
-                .py(px(8.))
-                .rounded(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .when(rail, |row| row.justify_center())
-                .when(row == current, |row| row.bg(t.selected_fill()).text_color(t.bright))
-                .border_2()
-                .border_color(if self.sidebar == Some(row) { t.accent } else { gpui::transparent_black() })
-                .on_click(cx.listener(move |this, _, window, cx| this.open_row(row, window, cx)))
-                .child(div().flex_1().truncate().child(label))
-                .children(key.filter(|_| !rail).map(|key| keycap(key, cx)))
-        });
+            .chain(["Search".to_string(), "Settings".to_string()]);
+        let mut rows: Vec<_> = names
+            .enumerate()
+            .map(|(row, name)| {
+                let key = ["1", "2", "3"].into_iter().find(|key| shortcut(key, &self.libraries) == Some(row));
+                let key = key.or((row == self.search_row()).then_some("/"));
+                let key = key.or((row == self.settings_row()).then_some(","));
+                let label = if rail { name.chars().next().map(String::from).unwrap_or_default() } else { name };
+                div()
+                    .id(("sidebar", row))
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .when(rail, |row| row.justify_center())
+                    .when(row == current, |row| row.bg(t.selected_fill()).text_color(t.bright))
+                    .border_2()
+                    .border_color(if self.sidebar == Some(row) { t.accent } else { gpui::transparent_black() })
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_row(row, window, cx)))
+                    .child(div().flex_1().truncate().child(label))
+                    .children(key.filter(|_| !rail).map(|key| keycap(key, cx)))
+            })
+            .collect();
+        let settings = rows.pop();
         div()
             .w(px(if rail { 64. } else { 240. }))
             .h_full()
@@ -428,6 +470,7 @@ impl Pages {
             )
             .children(rows)
             .child(div().flex_1())
+            .children(settings)
             .children(self.menu.map(|selected| self.menu_list(selected, cx)))
             .child(self.footer(rail, cx))
     }

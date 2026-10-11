@@ -15,5 +15,6 @@ pub mod search;
 pub mod player;
 pub mod secrets;
 pub mod settings;
+pub mod settings_page;
 pub mod sign_in;
 pub mod state;
