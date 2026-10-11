@@ -634,7 +634,8 @@ impl Client {
         }
     }
 
-    // ponytail: reads only the first page; a season with more episodes than one page loses the rest.
+    /// The episodes of a season. The server sends the whole season in one reply: `listSeasonEpisodes` has no
+    /// cursor.
     pub async fn season_episodes(&self, series_id: &str, season: i64) -> Result<Vec<wire::Episode>, Error> {
         let path = format!("catalog/series/{series_id}/seasons/{season}/episodes");
         Ok(self.call::<wire::EpisodeCollection>(Method::GET, &path, None).await?.items)

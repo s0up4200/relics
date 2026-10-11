@@ -1,6 +1,7 @@
 #!/bin/sh
 # Makes the test video of the mpv adapter tests: 6 seconds of 320x180 H.264 video
-# with an AAC tone, as one MP4 and as HLS with three 2-second segments.
+# with an AAC tone, as one MP4 and as HLS with three 2-second segments, and as one MKV
+# with more tracks.
 # The output goes to tests/media/. Commit it.
 set -eu
 out="$(dirname "$0")/../tests/media"
@@ -14,4 +15,12 @@ ffmpeg -hide_banner -loglevel error \
 ffmpeg -hide_banner -loglevel error -i "$out/sample.mp4" -c copy \
     -f hls -hls_time 2 -hls_list_size 0 -hls_playlist_type vod \
     -hls_segment_filename "$out/hls/segment%d.ts" "$out/hls/index.m3u8"
-du -ch "$out"/sample.mp4 "$out"/hls/* | tail -n 1
+
+# The direct play track test: the same video with a second audio track (jpn) and an embedded subtitle track.
+rm -f "$out"/tracks.mkv
+ffmpeg -hide_banner -loglevel error \
+    -i "$out/sample.mp4" -f lavfi -i sine=frequency=880 -i "$out/sample.vtt" -t 6 \
+    -map 0:v -map 0:a -map 1:a -map 2:s -c:v copy -c:a aac -b:a 32k -ac 1 -c:s srt \
+    -metadata:s:a:0 language=eng -metadata:s:a:1 language=jpn -metadata:s:s:0 language=eng \
+    -map_metadata -1 -fflags +bitexact "$out/tracks.mkv"
+du -ch "$out"/sample.mp4 "$out"/tracks.mkv "$out"/hls/* | tail -n 1

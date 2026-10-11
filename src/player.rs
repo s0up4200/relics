@@ -27,19 +27,22 @@ pub struct PlayItem {
     runtime: Option<f64>,
     /// The series id and the season number of an episode. The next episode lookup needs them.
     season: Option<(String, i64)>,
+    /// The Item is an episode of a series card with no season, so the player reads the season of the episode.
+    find_season: bool,
     /// Start at the beginning instead of the saved position.
     pub start_over: bool,
 }
 
 impl From<&wire::CatalogItem> for PlayItem {
     /// A series or season card plays its `play_content_id`, an episode.
-    // ponytail: a series card has no season number, so p on it plays an episode with no next episode. Play
-    // on the detail page has the season.
     fn from(item: &wire::CatalogItem) -> Self {
+        let content_id = item.play_content_id.clone().unwrap_or_else(|| item.content_id.clone());
+        let season = item.series_id.clone().zip(item.season_number);
         Self {
-            content_id: item.play_content_id.clone().unwrap_or_else(|| item.content_id.clone()),
+            find_season: season.is_none() && content_id != item.content_id,
+            content_id,
             runtime: item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0)),
-            season: item.series_id.clone().zip(item.season_number),
+            season,
             start_over: false,
         }
     }
@@ -53,12 +56,14 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 content_id: episode.clone(),
                 runtime: None,
                 season: item.play_season_number.map(|season| (item.content_id.clone(), season)),
+                find_season: item.play_season_number.is_none(),
                 start_over: false,
             },
             _ => Self {
                 content_id: item.content_id.clone(),
                 runtime: item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0)),
                 season: item.series_id.clone().zip(item.season_number),
+                find_season: false,
                 start_over: false,
             },
         }
@@ -71,6 +76,7 @@ impl PlayItem {
             content_id: episode.content_id,
             runtime: Some(episode.runtime as f64 * 60.0),
             season: Some((series_id, episode.season_number)),
+            find_season: false,
             start_over: false,
         }
     }
@@ -99,10 +105,10 @@ pub struct PlayerWindow {
     starting: Option<Task<()>>,
     /// The next episode of the Item that plays.
     next: Option<PlayItem>,
-    finding_next: Option<Task<()>>,
     /// The previous episode of the Item that plays.
     previous: Option<PlayItem>,
-    finding_previous: Option<Task<()>>,
+    /// Looks up the next and the previous episode.
+    finding: Option<Task<()>>,
     /// The MPRIS service. It runs while the Player window is open.
     mpris: Option<Rc<mpris_server::Player>>,
     _mpris: Option<Task<()>>,
@@ -139,9 +145,8 @@ impl PlayerWindow {
             mpv_id: 0,
             starting: None,
             next: None,
-            finding_next: None,
             previous: None,
-            finding_previous: None,
+            finding: None,
             mpris: None,
             _mpris: None,
             track: None,
@@ -165,8 +170,7 @@ impl PlayerWindow {
         // A new Item drops these tasks, so an older answer never reaches the new session.
         self.next = None;
         self.previous = None;
-        self.finding_next = self.find_episode(&client, &item, true, cx);
-        self.finding_previous = self.find_episode(&client, &item, false, cx);
+        self.finding = self.find_episodes(&client, &item, cx);
         (self.track, self.art, self.duration) = (None, None, None);
         self.describing = Some(self.describe(client.clone(), item.content_id.clone(), cx));
         let start = item.start_position();
@@ -181,39 +185,49 @@ impl PlayerWindow {
         }));
     }
 
-    /// Looks up the next or the previous episode of `item`, and gives it to the session when it exists.
-    fn find_episode(
-        &self,
-        client: &Arc<Client>,
-        item: &PlayItem,
-        next: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<Task<()>> {
-        let (series_id, season) = item.season.clone()?;
-        let (client, content_id) = (client.clone(), item.content_id.clone());
+    /// Looks up the next and the previous episode of `item`, and gives each one that exists to the session.
+    fn find_episodes(&self, client: &Arc<Client>, item: &PlayItem, cx: &mut Context<Self>) -> Option<Task<()>> {
+        if item.season.is_none() && !item.find_season {
+            return None;
+        }
+        let (client, content_id, season) = (client.clone(), item.content_id.clone(), item.season.clone());
         Some(cx.spawn(async move |this, cx| {
-            let found = if next {
-                client.next_episode(&series_id, season, &content_id).await
-            } else {
-                client.previous_episode(&series_id, season, &content_id).await
+            let season = match season {
+                Some(season) => Some(season),
+                None => match client.item(&content_id, artwork::Rung::Small).await {
+                    Ok(episode) => episode.series_id.zip(episode.season_number),
+                    Err(err) => {
+                        eprintln!("silo-omarchy: cannot read the season of {content_id}: {err}");
+                        None
+                    }
+                },
             };
-            match found {
-                Ok(Some(episode)) => {
-                    let episode = PlayItem::episode(series_id, episode);
-                    this.update(cx, |this, cx| {
-                        if next {
-                            this.next = Some(episode);
-                            this.step(Input::NextEpisode, cx);
-                        } else {
-                            this.previous = Some(episode);
-                            this.step(Input::PreviousEpisode, cx);
-                        }
-                    })
-                    .ok();
+            let Some((series_id, season)) = season else {
+                return;
+            };
+            let (next, previous) = futures::join!(
+                client.next_episode(&series_id, season, &content_id),
+                client.previous_episode(&series_id, season, &content_id),
+            );
+            let episode = |found: Result<Option<wire::Episode>, _>| match found {
+                Ok(found) => found.map(|episode| PlayItem::episode(series_id.clone(), episode)),
+                Err(err) => {
+                    eprintln!("silo-omarchy: cannot find the episode before or after {content_id}: {err}");
+                    None
                 }
-                Ok(None) => {}
-                Err(err) => eprintln!("silo-omarchy: cannot find the episode before or after {content_id}: {err}"),
-            }
+            };
+            let (next, previous) = (episode(next), episode(previous));
+            this.update(cx, |this, cx| {
+                if let Some(next) = next {
+                    this.next = Some(next);
+                    this.step(Input::NextEpisode, cx);
+                }
+                if let Some(previous) = previous {
+                    this.previous = Some(previous);
+                    this.step(Input::PreviousEpisode, cx);
+                }
+            })
+            .ok();
         }))
     }
 
@@ -352,9 +366,9 @@ impl PlayerWindow {
             return;
         };
         match command {
-            Command::Load { url, headers, start } => match self.open_mpv(cx) {
+            Command::Load { url, headers, start, aid } => match self.open_mpv(cx) {
                 Ok(mpv) => {
-                    if let Err(err) = mpv.load(&url, &headers, start) {
+                    if let Err(err) = mpv.load(&url, &headers, start, aid) {
                         eprintln!("silo-omarchy: mpv cannot play {url}: {err}");
                         self.step(Input::LoadFailed, cx);
                     }
@@ -393,6 +407,11 @@ impl PlayerWindow {
             Command::AddSubtitle { url, title, language } => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_subtitle(&url, &title, &language)) {
                     eprintln!("silo-omarchy: cannot add the subtitles {url}: {err}");
+                }
+            }
+            Command::SelectSubtitle(sid) => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.select_subtitle(sid)) {
+                    eprintln!("silo-omarchy: cannot show subtitle track {sid}: {err}");
                 }
             }
             Command::ShowMarkers(markers) => {
@@ -534,6 +553,24 @@ mod tests {
         assert_eq!(item.content_id, "episode:severance-s01e02");
         assert_eq!(item.season, Some(("series:severance".into(), 1)));
         assert!(!item.start_over);
+    }
+
+    #[test]
+    fn a_series_card_plays_its_episode_and_looks_up_the_season_of_it() {
+        let page: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/query_catalog_items_ok.json")).unwrap();
+        let mut card = page["items"][0].clone();
+        let series = serde_json::json!({
+            "content_id": "series:severance", "type": "series", "play_content_id": "episode:severance-s01e02",
+            "series_id": null, "season_number": null,
+        });
+        card.as_object_mut().unwrap().extend(series.as_object().unwrap().clone());
+        let card: wire::CatalogItem = serde_json::from_value(card).unwrap();
+        let item = PlayItem::from(&card);
+        assert_eq!((item.content_id.as_str(), item.season.clone()), ("episode:severance-s01e02", None));
+        assert!(item.find_season, "Next episode needs the season of the episode");
+        let movie = PlayItem::from(&detail(serde_json::json!({"content_id": "movie:heat-1995"})));
+        assert!(!movie.find_season);
     }
 
     #[test]

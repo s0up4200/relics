@@ -50,8 +50,17 @@ fn a_playable_decision_loads_the_stream_with_the_headers_at_the_plan_start() {
     let commands = session.step(Input::Started { decision: decision(|_| {}), access: access() }, at(0));
     assert_eq!(
         commands,
-        vec![Command::Load { url: format!("/api/v2/stream/{SESSION}"), headers: headers(), start: 12.5 }]
+        vec![Command::Load { url: format!("/api/v2/stream/{SESSION}"), headers: headers(), start: 12.5, aid: Some(1) }]
     );
+}
+
+#[test]
+fn direct_play_plays_the_audio_track_that_the_server_picked() {
+    let mut session = Session::new(None, ServerSettings::default());
+    let decision = decision(|body| body["playback_plan"]["selected_tracks"]["audio"]["index"] = 2.into());
+    let commands = session.step(Input::Started { decision, access: access() }, at(0));
+    // mpv counts the audio tracks from 1, the server from 0.
+    assert!(matches!(&commands[..], [Command::Load { aid: Some(3), .. }]), "{commands:?}");
 }
 
 #[test]
@@ -159,14 +168,20 @@ fn the_controller_gets_the_theme_when_it_is_ready() {
     assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme, Command::ShowMarkers(vec![])]);
 }
 
-/// Starts a session with `settings` on the fixture plan, whose audio is in `audio_language`, and loads the file.
+/// Starts a session with `settings` on the fixture plan (direct play), whose audio is in `audio_language`, and
+/// loads the file. Returns the subtitle commands.
 fn load_with(settings: ServerSettings, audio_language: &str) -> Vec<Command> {
+    load_with_delivery(settings, audio_language, "original_http")
+}
+
+fn load_with_delivery(settings: ServerSettings, audio_language: &str, delivery: &str) -> Vec<Command> {
     let mut session = Session::new(None, settings);
-    let mut decision = decision(|_| {});
+    let mut decision = decision(|body| body["playback_plan"]["delivery"] = delivery.into());
     let Decision::Playable { audio_language: language, .. } = &mut decision else { unreachable!() };
     *language = Some(audio_language.into());
     session.step(Input::Started { decision, access: access() }, at(0));
-    session.step(Input::FileLoaded, at(0)).into_iter().filter(|c| matches!(c, Command::AddSubtitle { .. })).collect()
+    let commands = session.step(Input::FileLoaded, at(0)).into_iter();
+    commands.filter(|c| matches!(c, Command::AddSubtitle { .. } | Command::SelectSubtitle(_))).collect()
 }
 
 /// The command that adds track 0 (English, external) or 1 (English signs, forced) of the fixture inventory.
@@ -194,19 +209,28 @@ fn foreign_audio_shows_the_subtitles_of_the_profile_language_when_the_file_loads
 #[test]
 fn audio_in_the_profile_language_shows_only_the_forced_track() {
     let settings = ServerSettings { audio_language: Some("en".into()), ..ServerSettings::default() };
-    assert_eq!(load_with(settings.clone(), "en"), vec![subtitle(1)]);
+    // The track is in the file that mpv plays, so mpv shows it from there: the first embedded subtitle track.
+    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(1)]);
     let settings = ServerSettings { show_forced_subtitles: false, ..settings };
     assert_eq!(load_with(settings, "en"), vec![]);
 }
 
 #[test]
-fn a_track_that_needs_a_burn_in_shows_no_subtitles() {
+fn a_stream_without_the_embedded_tracks_adds_the_sidecar_of_an_embedded_track() {
+    let settings = ServerSettings { audio_language: Some("en".into()), ..ServerSettings::default() };
+    assert_eq!(load_with_delivery(settings, "en", "server_transcode_hls"), vec![subtitle(1)]);
+}
+
+#[test]
+fn a_track_that_needs_a_burn_in_shows_from_the_file_in_direct_play_and_else_not_at_all() {
     let settings = ServerSettings {
         subtitle_mode: SubtitleMode::Always,
         subtitle_language: Some("fr".into()),
         ..ServerSettings::default()
     };
-    assert_eq!(load_with(settings, "en"), vec![]);
+    // French is the third embedded track of the fixture.
+    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(3)]);
+    assert_eq!(load_with_delivery(settings, "en", "server_transcode_hls"), vec![]);
 }
 
 // The skip state machine.
@@ -376,8 +400,9 @@ fn the_end_of_a_session_hides_its_prompt() {
 
 // Token rules and the recovery chain (#27).
 
+/// A load of `url`. The direct play stream of the fixture plays audio track 1, and a transcode has no track choice.
 fn load(url: &str, headers: Headers, start: f64) -> Command {
-    Command::Load { url: url.into(), headers, start }
+    Command::Load { url: url.into(), headers, start, aid: (url == stream()).then_some(1) }
 }
 
 fn stream() -> String {

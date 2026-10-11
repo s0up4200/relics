@@ -74,18 +74,22 @@ impl Player {
         Ok(Self { mpv, events: Some(events) })
     }
 
-    /// Opens `url` and plays it from `start` seconds, with no subtitles. mpv sends `headers`
-    /// on each media request of this file. They go in the per-file options of `loadfile`,
-    /// because mpv copies `http-header-fields` only when it opens a file.
-    pub fn load(&self, url: &str, headers: &[(String, String)], start: f64) -> Result<(), Error> {
+    /// Opens `url` and plays it from `start` seconds, with no subtitles, and with the audio track `aid` when it is
+    /// set. mpv sends `headers` on each media request of this file. They go in the per-file options of
+    /// `loadfile`, because mpv copies `http-header-fields` only when it opens a file.
+    pub fn load(&self, url: &str, headers: &[(String, String)], start: f64, aid: Option<i64>) -> Result<(), Error> {
         // A string list separates its items with commas, and a backslash escapes a comma in an item.
         let fields: Vec<String> = headers
             .iter()
             .map(|(name, value)| format!("{name}: {value}").replace('\\', "\\\\").replace(',', "\\,"))
             .collect();
         // The app picks the subtitles (`add_subtitle`), so mpv must not pick a track of the file by itself.
-        let options =
-            [option("http-header-fields", &fields.join(",")), option("start", &start.to_string()), option("sid", "no")];
+        let mut options = vec![
+            option("http-header-fields", &fields.join(",")),
+            option("start", &start.to_string()),
+            option("sid", "no"),
+        ];
+        options.extend(aid.map(|aid| option("aid", &aid.to_string())));
         self.mpv.command("loadfile", &[url, "replace", "-1", &options.join(",")])
     }
 
@@ -93,6 +97,11 @@ impl Player {
     /// the file. The download runs in the background, so a slow server does not block the caller.
     pub fn add_subtitle(&self, url: &str, title: &str, language: &str) -> Result<(), Error> {
         self.mpv.command("async", &["sub-add", url, "select", title, language])
+    }
+
+    /// Shows the subtitle track `sid` of the file that plays.
+    pub fn select_subtitle(&self, sid: i64) -> Result<(), Error> {
+        self.mpv.set_property("sid", sid)
     }
 
     /// Sends the theme colors, as `#RRGGBB`, to the Lua controller.

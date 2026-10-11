@@ -5,7 +5,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::api::types::{Decision, Marker, MarkerKind};
+use crate::api::types::{Decision, Delivery, Marker, MarkerKind};
 use crate::api::wire;
 use crate::settings::{IntroSkipMode, ServerSettings};
 
@@ -124,8 +124,9 @@ pub struct Sample {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Open `url` in mpv with these headers on each media request, at `start` seconds of player time.
-    Load { url: String, headers: Headers, start: f64 },
+    /// Open `url` in mpv with these headers on each media request, at `start` seconds of player time. `aid` is the
+    /// mpv audio track to play, when mpv must pick it.
+    Load { url: String, headers: Headers, start: f64, aid: Option<i64> },
     /// Send `updatePlaybackProgress`.
     Progress { session_id: String, sample: Sample },
     /// Send `stopPlayback`, with the final sample when the session has one.
@@ -138,6 +139,8 @@ pub enum Command {
     SendTheme,
     /// Add the subtitle file at `url` to mpv and show it.
     AddSubtitle { url: String, title: String, language: String },
+    /// Show the subtitle track of the file with this mpv track id.
+    SelectSubtitle(i64),
     /// Draw these Markers, in player time, on the seek bar.
     ShowMarkers(Vec<Marker>),
     /// Show the Skip prompt with this label. An empty label hides it.
@@ -240,6 +243,8 @@ struct Plan {
     plan_attempt_key: String,
     selected_tracks: serde_json::Value,
     url: String,
+    /// The mpv audio track to play.
+    aid: Option<i64>,
     /// Add it to a player position to get the source position.
     offset: f64,
     /// The command that shows the subtitle track of the subtitle choice, when the file loads.
@@ -461,9 +466,19 @@ impl Session {
     fn adopt(&mut self, session_id: String, attempt_id: String, plan: &wire::PlaybackPlan, markers: Vec<Marker>) {
         let tracks = &plan.subtitle.inventory;
         let chosen = subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
-        // ponytail: a track without a URL needs a burn-in replan (operation track_change), so it shows no
-        // subtitles.
+        // Direct play streams the file itself, with each of its tracks. mpv counts the tracks of a kind from 1.
+        let direct = Delivery::from(plan.delivery.clone()) == Delivery::OriginalHttp;
+        let aid = plan.selected_tracks.audio.as_ref().and_then(|audio| audio.index).filter(|_| direct).map(|i| i + 1);
         let subtitle = tracks.iter().find(|track| Some(track.combined_index) == chosen).and_then(|track| {
+            if direct && track.source == "embedded" {
+                // The file has the track, so a sidecar of it would show twice. The server lists the embedded
+                // tracks in the order of the file.
+                let before =
+                    tracks.iter().filter(|t| t.source == "embedded" && t.combined_index < track.combined_index).count();
+                return Some(Command::SelectSubtitle(before as i64 + 1));
+            }
+            // ponytail: a track without a URL needs a burn-in replan (operation track_change), so it shows no
+            // subtitles.
             Some(Command::AddSubtitle {
                 url: track.url.clone()?,
                 title: track.label.clone().unwrap_or_default(),
@@ -482,6 +497,7 @@ impl Session {
             plan_attempt_key: plan.plan_attempt_key.clone(),
             selected_tracks: serde_json::to_value(&plan.selected_tracks).unwrap_or_default(),
             url: plan.stream.url.clone(),
+            aid,
             offset,
             subtitle,
             markers,
@@ -507,7 +523,7 @@ impl Session {
         self.load_start = start;
         self.mpv_expires = access.expires;
         self.renewed = false;
-        vec![Command::Load { url: plan.url.clone(), headers: access.headers.clone(), start }]
+        vec![Command::Load { url: plan.url.clone(), headers: access.headers.clone(), start, aid: plan.aid }]
     }
 
     /// Refreshes the token in mpv when it has 10 minutes left. The reload follows the refresh.

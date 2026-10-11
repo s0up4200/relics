@@ -135,7 +135,7 @@ fn assert_each_request_has_the_header(stub: &Stub) {
 fn an_mp4_plays_from_the_start_position_with_the_header_on_each_request() {
     let stub = stub(usize::MAX);
     let (player, rx) = open();
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 3.0).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 3.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     let Input::Position(position) = wait_for(&rx, |input| matches!(input, Input::Position(_))) else { unreachable!() };
     assert!((2.5..6.0).contains(&position), "playback started at {position}");
@@ -147,7 +147,7 @@ fn an_mp4_plays_from_the_start_position_with_the_header_on_each_request() {
 fn hls_plays_with_the_header_on_the_manifest_and_each_segment() {
     let stub = stub(usize::MAX);
     let (player, rx) = open();
-    player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0).unwrap();
+    player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     wait_for(&rx, |input| matches!(input, Input::Position(p) if *p > 0.0));
     drop(player);
@@ -160,7 +160,7 @@ fn hls_plays_with_the_header_on_the_manifest_and_each_segment() {
 fn a_401_shows_as_a_load_failure() {
     let stub = stub(0);
     let (player, rx) = open();
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::LoadFailed));
     assert_each_request_has_the_header(&stub);
 }
@@ -169,7 +169,7 @@ fn a_401_shows_as_a_load_failure() {
 fn the_end_of_a_file_shows_as_end_of_file() {
     let stub = stub(usize::MAX);
     let (player, rx) = open();
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 5.0).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 5.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::EndOfFile));
     assert_eq!(player.property("eof-reached").unwrap(), "yes", "mpv keeps the last frame");
 }
@@ -179,7 +179,7 @@ fn a_401_in_the_middle_of_an_hls_stream_ends_it_before_the_duration() {
     // The manifest and the first segment load, then each request gets a 401, as when the token expires.
     let stub = stub(2);
     let (player, rx) = open();
-    player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0).unwrap();
+    player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0, None).unwrap();
     let mut position = 0.0;
     let end = wait_for(&rx, |input| {
         if let Input::Position(p) = input {
@@ -275,13 +275,13 @@ fn a_cycles_the_audio_track_only_for_the_file_that_plays() {
     let (player, rx) = open_with_controls();
     wait_for(&rx, |input| matches!(input, Input::ControlsReady));
     let url = format!("{}/sample.mp4", stub.url);
-    player.load(&url, &headers(), 0.0).unwrap();
+    player.load(&url, &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     wait_for_property(&player, "aid", "1");
     // The test video has one audio track, so the next track is none.
     player.command(&["keypress", "a"]).unwrap();
     wait_for_property(&player, "aid", "no");
-    player.load(&url, &headers(), 0.0).unwrap();
+    player.load(&url, &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     wait_for_property(&player, "aid", "1");
 }
@@ -290,7 +290,7 @@ fn a_cycles_the_audio_track_only_for_the_file_that_plays() {
 fn an_added_subtitle_shows_and_its_request_has_the_header() {
     let stub = stub(usize::MAX);
     let (player, rx) = open();
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     assert_eq!(player.property("sid").unwrap(), "no");
     player.add_subtitle(&format!("{}/sample.vtt", stub.url), "English", "eng").unwrap();
@@ -322,7 +322,7 @@ fn seek_moves_the_position_after_the_controller_gets_the_markers() {
     let stub = stub(usize::MAX);
     let (player, rx) = open_with_controls();
     wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     player.show_markers(&[Marker { kind: MarkerKind::Intro, start: -1.5, end: 2.0 }]).unwrap();
     player.seek(3.0).unwrap();
@@ -333,10 +333,23 @@ fn seek_moves_the_position_after_the_controller_gets_the_markers() {
 fn a_seek_ends_in_seeked_with_the_new_position_and_set_pause_pauses() {
     let stub = stub(usize::MAX);
     let (player, rx) = open();
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     player.seek(3.0).unwrap();
     wait_for(&rx, |input| matches!(input, Input::Seeked(position) if (*position - 3.0).abs() < 0.5));
     player.set_pause(true).unwrap();
     wait_for(&rx, |input| matches!(input, Input::Paused(true)));
+}
+
+#[test]
+fn direct_play_plays_the_chosen_audio_track_and_shows_an_embedded_subtitle_track() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open();
+    player.load(&format!("{}/tracks.mkv", stub.url), &headers(), 0.0, Some(2)).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
+    wait_for_property(&player, "current-tracks/audio/lang", "jpn");
+    assert_eq!(player.property("sid").unwrap(), "no");
+    player.select_subtitle(1).unwrap();
+    wait_for_property(&player, "current-tracks/sub/lang", "eng");
+    assert_eq!(player.property("track-list/count").unwrap(), "4", "no second copy of the subtitle track");
 }
