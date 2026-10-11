@@ -48,6 +48,8 @@ pub struct LibraryWindow {
     status: Status,
     /// The request in progress. A new request or a dropped window cancels it.
     task: Option<Task<()>>,
+    /// Reads the Server settings of the Profile that opens, then opens Home. Leaving the Account cancels it.
+    opening: Option<Task<()>>,
     _enter: Subscription,
     /// The subscription to the events of the screen view.
     _screen: Option<Subscription>,
@@ -157,6 +159,7 @@ impl LibraryWindow {
             url,
             status: Status::Idle,
             task: None,
+            opening: None,
             _enter: enter,
             _screen: None,
             player,
@@ -328,28 +331,37 @@ impl LibraryWindow {
         self.pin_wait = None;
         client.set_profile(Some(profile.id.to_string()));
         client.set_profile_token(token);
-        // Until the reply comes, playback uses the default Server settings.
-        cx.background_spawn({
-            let client = client.clone();
-            async move {
-                if let Err(err) = client.load_server_settings().await {
-                    eprintln!("silo-omarchy: cannot read the Server settings: {err}");
-                }
-                if let Err(err) = client.sync_progress().await {
-                    eprintln!("silo-omarchy: progress sync failed: {err}");
-                }
-            }
-        })
-        .detach();
         if let Some(account) = self.state.active_account_mut() {
             account.last_profile = Some(profile.id.to_string());
         }
         self.save_state();
-        let pages = match self.parked.take() {
-            Some((id, pages)) if id == *profile.id => pages,
-            _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
-        };
-        self.show_pages(client, pages, window, cx);
+        self._screen = None;
+        self.screen = Screen::Message("Loading…".into());
+        cx.notify();
+        // Home opens after the Server settings of the Profile come, so that no playback starts with the settings
+        // of the Profile before. When the read fails, playback uses the default Server settings.
+        self.opening = Some(cx.spawn_in(window, async move |this, cx| {
+            if let Err(err) = client.load_server_settings().await {
+                eprintln!("silo-omarchy: cannot read the Server settings: {err}");
+            }
+            cx.background_spawn({
+                let client = client.clone();
+                async move {
+                    if let Err(err) = client.sync_progress().await {
+                        eprintln!("silo-omarchy: progress sync failed: {err}");
+                    }
+                }
+            })
+            .detach();
+            this.update_in(cx, |this, window, cx| {
+                let pages = match this.parked.take() {
+                    Some((id, pages)) if id == *profile.id => pages,
+                    _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
+                };
+                this.show_pages(client, pages, window, cx);
+            })
+            .ok();
+        }));
     }
 
     fn show_pages(&mut self, client: Arc<Client>, pages: Entity<Pages>, window: &mut Window, cx: &mut Context<Self>) {
@@ -566,6 +578,7 @@ impl LibraryWindow {
         self.pin_wait = None;
         self.menu_back = None;
         self.parked = None;
+        self.opening = None;
         self.probe = None;
         self.offline = false;
         self._troubles = None;
