@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
-    RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Task, Window, div, px,
+    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
+    Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -274,6 +274,83 @@ impl Render for Grid {
             }))
             .children(cards)
             .children(status)
+    }
+}
+
+/// A page with a title and the grid of one catalog query: the titles of a Person, the Watchlist, the History,
+/// or the full list of a row ("View all").
+pub struct GridPage {
+    title: String,
+    grid: Entity<Grid>,
+    _events: Vec<Subscription>,
+}
+
+impl EventEmitter<Play> for GridPage {}
+impl EventEmitter<Open> for GridPage {}
+
+impl GridPage {
+    pub fn new(
+        client: Arc<Client>,
+        title: String,
+        query: wire::CatalogQuery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let grid = cx.new(|cx| Grid::new(client, query, window, cx));
+        let events = vec![
+            cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
+            cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),
+        ];
+        Self { title, grid, _events: events }
+    }
+
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.grid.update(cx, |grid, cx| {
+            grid.active = active;
+            cx.notify();
+        });
+    }
+
+    /// Handles a key. Returns false when the key leaves the grid or the grid does not use it.
+    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        matches!(self.grid.update(cx, |grid, cx| grid.key(key, cx)), Move::To(_))
+    }
+}
+
+impl Render for GridPage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy().clone();
+        let grid = self.grid.read(cx);
+        let content = if grid.is_empty() {
+            div().px(px(40.)).text_color(t.secondary).child("No titles.").into_any_element()
+        } else {
+            div().size_full().px(px(40.)).child(self.grid.clone()).into_any_element()
+        };
+        let count = grid.total().map(|total| format!("{total} titles"));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(40.))
+                    .pt(px(28.))
+                    .pb(px(18.))
+                    .flex()
+                    .items_end()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .text_size(px(34.))
+                            .font_weight(FontWeight::EXTRA_BOLD)
+                            .text_color(t.bright)
+                            .child(self.title.clone()),
+                    )
+                    .children(
+                        count.map(|count| div().pb(px(6.)).text_size(px(13.)).text_color(t.secondary).child(count)),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
 

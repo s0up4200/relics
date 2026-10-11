@@ -1,11 +1,35 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use gpui::{AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    AppContext as _, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+};
 use reqwest_client::ReqwestClient;
 use silo_omarchy::library::LibraryWindow;
 
+// The sidebar icons that the default gpui-kit bundle does not have.
+gpui_kit::assets::icon_assets!(SidebarIcons, [House, Film, Tv, Layers, Bookmark, RotateCcwClock]);
+
+/// The default gpui-kit assets and the sidebar icons.
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        match SidebarIcons.load(path)? {
+            Some(icon) => Ok(Some(icon)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let mut list = gpui_kit::assets::Assets.list(path)?;
+        list.extend(SidebarIcons.list(path)?);
+        Ok(list)
+    }
+}
+
 fn main() {
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx| {
+    gpui_kit::application().with_assets(Assets).run(|cx| {
         gpui_omarchy::init(cx);
         let user_agent = concat!("silo-omarchy/", env!("CARGO_PKG_VERSION"));
         let http = ReqwestClient::proxy_and_user_agent(gpui::http_client::read_proxy_from_env(), user_agent)

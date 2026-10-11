@@ -156,15 +156,22 @@ fn section(id: &str, title: &str, featured: bool) -> serde_json::Value {
 
 #[test]
 fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
-    let layout =
-        serde_json::json!({"sections": [section("picks", "Picks", true), section("recent", "Recently Added", false)]});
-    let mut recent = section("recent", "Recently Added", false);
+    let layout = serde_json::json!({"sections": [
+        section("picks", "Picks", true),
+        section("recently_added", "Recently Added", false),
+        section("continue_watching", "Continue Watching", false),
+    ]});
+    let mut recent = section("recently_added", "Recently Added", false);
     recent["items"] = serde_json::json!([item("Heat"), item("Ronin")]);
     recent["total_count"] = 9.into();
     let mut picks = section("picks", "Picks", true);
     picks["items"] = serde_json::json!([item("Alien")]);
     picks["total_count"] = 1.into();
-    let sections = serde_json::json!({"sections": [recent, picks]});
+    // The server has no full list of Continue watching, so it has no View all.
+    let mut watching = section("continue_watching", "Continue Watching", false);
+    watching["items"] = serde_json::json!([item("Heat"), item("Ronin")]);
+    watching["total_count"] = 9.into();
+    let sections = serde_json::json!({"sections": [recent, picks, watching]});
     let (http, _) = http(move |req| match req.path.as_str() {
         "home/layout" => json(200, layout.to_string()),
         "home/sections?image_size=medium" => json(200, sections.to_string()),
@@ -184,7 +191,14 @@ fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
             )
         })
         .collect();
-    assert_eq!(rows, [("picks", true, false, vec!["Alien"]), ("recent", false, true, vec!["Heat", "Ronin"])]);
+    assert_eq!(
+        rows,
+        [
+            ("picks", true, false, vec!["Alien"]),
+            ("recently_added", false, true, vec!["Heat", "Ronin"]),
+            ("continue_watching", false, false, vec!["Heat", "Ronin"]),
+        ]
+    );
 }
 
 fn profile(id: &str, has_pin: bool) -> wire::Profile {

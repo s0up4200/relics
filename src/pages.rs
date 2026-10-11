@@ -1,6 +1,6 @@
 //! The pages of the active Profile: the sidebar, the page that shows, and the back history. Esc or Backspace
 //! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows, and / opens
-//! Search. The sidebar shrinks to an icon rail when the window is narrow and on the detail page. The sidebar
+//! Search. The sidebar also opens the Watchlist and the History of the Profile. The sidebar shrinks to an icon rail when the window is narrow and on the detail page. The sidebar
 //! footer, or m, opens the menu with Switch profile, Switch server and Sign out. The , key or the Settings row
 //! at the bottom of the sidebar opens the Settings page. Esc goes back from it.
 
@@ -13,13 +13,15 @@ use gpui::{
     IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Task,
     Window, div, px,
 };
-use gpui_omarchy::{ActiveTheme, keycap};
+use gpui_omarchy::{ActiveTheme, IconName, icon, keycap};
 
 use crate::api::{Client, wire};
+use crate::browse;
 use crate::detail::{self, Detail};
-use crate::home::{Home, Open, Play, Rows};
+use crate::grid::GridPage;
+use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::library_page::{LibraryPage, is_shows};
-use crate::search::{OpenPerson, PersonPage, Search};
+use crate::search::{OpenPerson, Search, person_query};
 use crate::settings_page::{AccountAction, SettingsPage};
 use crate::state::Pair;
 
@@ -63,7 +65,10 @@ pub enum Page {
     Library(Entity<LibraryPage>),
     Detail(Entity<Detail>),
     Search(Entity<Search>),
-    Person(Entity<PersonPage>),
+    /// The titles of a Person, or the full list of a row.
+    Grid(Entity<GridPage>),
+    Watchlist(Entity<GridPage>),
+    History(Entity<GridPage>),
     Settings(Entity<SettingsPage>),
 }
 
@@ -80,7 +85,9 @@ impl Page {
                 cx.notify();
             }),
             Page::Search(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
-            Page::Person(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
+            Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => {
+                page.update(cx, |page, cx| page.set_active(active, cx))
+            }
             Page::Settings(page) => page.update(cx, |page, cx| {
                 page.active = active;
                 cx.notify();
@@ -94,7 +101,7 @@ impl Page {
             Page::Library(page) => page.into_any_element(),
             Page::Detail(page) => page.into_any_element(),
             Page::Search(page) => page.into_any_element(),
-            Page::Person(page) => page.into_any_element(),
+            Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => page.into_any_element(),
             Page::Settings(page) => page.into_any_element(),
         }
     }
@@ -131,6 +138,8 @@ impl EventEmitter<AccountAction> for Pages {}
 impl Pages {
     pub fn new(client: Arc<Client>, profile_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let home = cx.new(|cx| Home::new(client.clone(), Rows::Home, window, cx));
+        cx.subscribe_in(&home, window, |this, _, open: &OpenGrid, window, cx| this.open_grid(open, window, cx))
+            .detach();
         let mut pages = Self {
             client,
             profile_name,
@@ -197,12 +206,23 @@ impl Pages {
 
     /// Opens the Person grid.
     fn open_person(&mut self, person: &OpenPerson, window: &mut Window, cx: &mut Context<Self>) {
+        let open = OpenGrid { title: person.name.clone(), query: person_query(&person.id) };
+        self.open_grid(&open, window, cx);
+    }
+
+    /// Opens a page with the grid of a query, for example "View all" of a row.
+    fn open_grid(&mut self, open: &OpenGrid, window: &mut Window, cx: &mut Context<Self>) {
+        let page = self.grid_page(open, window, cx);
+        self.open(Page::Grid(page), cx);
+    }
+
+    fn grid_page(&mut self, open: &OpenGrid, window: &mut Window, cx: &mut Context<Self>) -> Entity<GridPage> {
         let client = self.client.clone();
-        let page = cx.new(|cx| PersonPage::new(client, person, window, cx));
+        let page = cx.new(|cx| GridPage::new(client, open.title.clone(), open.query.clone(), window, cx));
         // The page can live in the back history after a sidebar move, so its subscriptions go with it.
         cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
         cx.subscribe_in(&page, window, |this, _, Open(item), window, cx| this.open_item(item, window, cx)).detach();
-        self.open(Page::Person(page), cx);
+        page
     }
 
     /// The Search page, made the first time, with the keyboard focus in the field.
@@ -270,9 +290,19 @@ impl Pages {
         self.libraries.len() + 1
     }
 
+    /// The sidebar row of the Watchlist, below Search.
+    fn watchlist_row(&self) -> usize {
+        self.search_row() + 1
+    }
+
+    /// The sidebar row of the History, below the Watchlist.
+    fn history_row(&self) -> usize {
+        self.search_row() + 2
+    }
+
     /// The sidebar row of Settings, at the bottom.
     fn settings_row(&self) -> usize {
-        self.search_row() + 1
+        self.search_row() + 3
     }
 
     /// Opens a sidebar row (0 is Home) and clears the back history. The keyboard focus goes to the page.
@@ -281,8 +311,13 @@ impl Pages {
         if row == self.settings_row() {
             return self.open_settings(cx);
         }
+        let list = |title: &str, source: &str| OpenGrid { title: title.into(), query: browse::source_query(source) };
         let page = match row.checked_sub(1).and_then(|i| self.libraries.get(i)).cloned() {
             None if row == self.search_row() => Page::Search(self.search_page(window, cx)),
+            None if row == self.watchlist_row() => {
+                Page::Watchlist(self.grid_page(&list("Watchlist", "watchlist"), window, cx))
+            }
+            None if row == self.history_row() => Page::History(self.grid_page(&list("History", "history"), window, cx)),
             None => Page::Home(self.home.clone()),
             Some(library) => {
                 let id = library.id.to_string();
@@ -292,6 +327,9 @@ impl Pages {
                         let client = self.client.clone();
                         let page = cx.new(|cx| LibraryPage::new(client, library, window, cx));
                         self.listen(&page, window, cx);
+                        self._events.push(cx.subscribe_in(&page, window, |this, _, open: &OpenGrid, window, cx| {
+                            this.open_grid(open, window, cx)
+                        }));
                         self.library_pages.insert(id, page.clone());
                         page
                     }
@@ -304,12 +342,14 @@ impl Pages {
         self.show(page, cx);
     }
 
-    /// The sidebar row of the page that shows. A detail page or a Person grid has the row of the page that
-    /// opened it.
+    /// The sidebar row of the page that shows. A detail page, a Person grid or the full list of a row has the
+    /// row of the page that opened it.
     fn current_row(&self, cx: &gpui::App) -> usize {
         let mut pages = std::iter::once(&self.page).chain(self.back.iter().rev());
-        match pages.find(|p| !matches!(p, Page::Detail(_) | Page::Person(_))) {
+        match pages.find(|p| !matches!(p, Page::Detail(_) | Page::Grid(_))) {
             Some(Page::Search(_)) => self.search_row(),
+            Some(Page::Watchlist(_)) => self.watchlist_row(),
+            Some(Page::History(_)) => self.history_row(),
             Some(Page::Settings(_)) => self.settings_row(),
             Some(Page::Library(page)) => {
                 let id = &page.read(cx).library.id;
@@ -326,7 +366,9 @@ impl Pages {
             Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Search(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
-            Page::Person(page) => page.update(cx, |page, cx| page.key(key, cx)),
+            Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => {
+                page.update(cx, |page, cx| page.key(key, cx))
+            }
             Page::Settings(page) => page.update(cx, |page, cx| page.key(key, cx)),
         }
     }
@@ -420,16 +462,30 @@ impl Pages {
     fn sidebar(&self, rail: bool, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
         let current = self.current_row(cx);
-        let names = std::iter::once("Home".to_string())
-            .chain(self.libraries.iter().map(|l| l.name.clone()))
-            .chain(["Search".to_string(), "Settings".to_string()]);
+        let library = |l: &wire::UserLibrary| {
+            let icon = match l.type_.as_str() {
+                "movies" | "movie" => IconName::Film,
+                kind if is_shows(kind) => IconName::Tv,
+                _ => IconName::Layers,
+            };
+            (icon, l.name.clone())
+        };
+        let names =
+            std::iter::once((IconName::House, "Home".to_string())).chain(self.libraries.iter().map(library)).chain(
+                [
+                    (IconName::Search, "Search"),
+                    (IconName::Bookmark, "Watchlist"),
+                    (IconName::RotateCcwClock, "History"),
+                    (IconName::Settings, "Settings"),
+                ]
+                .map(|(icon, name)| (icon, name.to_string())),
+            );
         let mut rows: Vec<_> = names
             .enumerate()
-            .map(|(row, name)| {
+            .map(|(row, (icon_name, name))| {
                 let key = ["1", "2", "3"].into_iter().find(|key| shortcut(key, &self.libraries) == Some(row));
                 let key = key.or((row == self.search_row()).then_some("/"));
                 let key = key.or((row == self.settings_row()).then_some(","));
-                let label = if rail { name.chars().next().map(String::from).unwrap_or_default() } else { name };
                 div()
                     .id(("sidebar", row))
                     .px(px(10.))
@@ -443,7 +499,8 @@ impl Pages {
                     .border_2()
                     .border_color(if self.sidebar == Some(row) { t.accent } else { gpui::transparent_black() })
                     .on_click(cx.listener(move |this, _, window, cx| this.open_row(row, window, cx)))
-                    .child(div().flex_1().truncate().child(label))
+                    .child(icon(icon_name))
+                    .when(!rail, |row| row.child(div().flex_1().truncate().child(name)))
                     .children(key.filter(|_| !rail).map(|key| keycap(key, cx)))
             })
             .collect();

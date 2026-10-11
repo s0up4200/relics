@@ -19,6 +19,13 @@ pub struct Play(pub crate::player::PlayItem);
 /// The user pressed Enter on a card, or clicked it.
 pub struct Open(pub wire::CatalogItem);
 
+/// Open a page with the grid of `query`, for example "View all" of a row.
+#[derive(Clone)]
+pub struct OpenGrid {
+    pub title: String,
+    pub query: wire::CatalogQuery,
+}
+
 /// Where the rows come from.
 #[derive(Debug, Clone)]
 pub enum Rows {
@@ -51,6 +58,7 @@ pub struct Home {
 
 impl EventEmitter<Play> for Home {}
 impl EventEmitter<Open> for Home {}
+impl EventEmitter<OpenGrid> for Home {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -160,18 +168,29 @@ impl Home {
         });
     }
 
+    /// The number of focus stops in each row: the cards, and "View all" after them.
     fn row_lengths(&self) -> Vec<usize> {
-        self.sections.iter().map(|s| s.items.len()).collect()
+        self.sections.iter().map(|s| s.items.len() + usize::from(s.view_all)).collect()
+    }
+
+    /// Opens the full list of a row.
+    fn view_all(&self, row: usize, cx: &mut Context<Self>) {
+        let section = &self.sections[row];
+        let library = match &self.rows {
+            Rows::Home => None,
+            Rows::Library(id) => Some(id.as_str()),
+        };
+        cx.emit(OpenGrid { title: section.title.clone(), query: crate::browse::section_query(&section.id, library) });
     }
 
     /// Handles a key. Returns false when Home does not use it, for example h or Left in the first column.
     pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
         if let (Focus::Card { row, col }, "p" | "enter") = (self.focus, key) {
-            let item = self.sections[row].items[col].clone();
-            if key == "p" {
-                cx.emit(Play((&item).into()));
-            } else {
-                cx.emit(Open(item));
+            match (self.sections[row].items.get(col).cloned(), key) {
+                (Some(item), "p") => cx.emit(Play((&item).into())),
+                (Some(item), _) => cx.emit(Open(item)),
+                (None, "enter") => self.view_all(row, cx),
+                (None, _) => {}
             }
             return true;
         }
@@ -245,26 +264,40 @@ impl Home {
                 .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
                 .into_any_element()
         });
+        let col = section.items.len();
+        let view_all = section.view_all.then(|| {
+            let focused = self.active && self.focus == Focus::Card { row: index, col };
+            div()
+                .id(("view-all", index))
+                .w(px(width))
+                .h(px(height))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(12.))
+                .bg(t.surface)
+                .border_2()
+                .border_color(if focused { t.accent } else { gpui::transparent_black() })
+                .text_color(if focused { t.bright } else { t.secondary })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.focus = Focus::Card { row: index, col };
+                    this.view_all(index, cx);
+                }))
+                .child("View all")
+        });
         div()
             .flex()
             .flex_col()
             .gap(px(12.))
             .child(
-                div()
-                    .px(px(40.))
-                    .flex()
-                    .items_baseline()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .text_size(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.bright)
-                            .child(section.title.clone()),
-                    )
-                    .children(
-                        section.view_all.then(|| div().text_size(px(11.)).text_color(t.secondary).child("VIEW ALL")),
-                    ),
+                div().px(px(40.)).flex().items_baseline().gap(px(12.)).child(
+                    div()
+                        .text_size(px(20.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t.bright)
+                        .child(section.title.clone()),
+                ),
             )
             .child(
                 div()
@@ -274,7 +307,8 @@ impl Home {
                     .gap(px(14.))
                     .overflow_x_scroll()
                     .track_scroll(&self.row_scrolls[index])
-                    .children(cards),
+                    .children(cards)
+                    .children(view_all),
             )
             .into_any_element()
     }

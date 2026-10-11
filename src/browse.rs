@@ -6,6 +6,25 @@ use crate::api::wire;
 /// The number of Items in one page of the grid.
 pub const PAGE_SIZE: u64 = 60;
 
+/// The grid of a personal list of the Profile, in the order of the list: `watchlist` or `history`.
+pub fn source_query(source: &str) -> wire::CatalogQuery {
+    wire::CatalogQuery {
+        source: Some(source.into()),
+        limit: std::num::NonZeroU64::new(PAGE_SIZE),
+        ..Default::default()
+    }
+}
+
+/// The grid of "View all" on a Home row, or on a row of the Recommended tab of the Library `library_id`.
+pub fn section_query(section_id: &str, library_id: Option<&str>) -> wire::CatalogQuery {
+    wire::CatalogQuery {
+        scope: Some(if library_id.is_some() { "library" } else { "home" }.into()),
+        library_id: library_id.and_then(|id| id.try_into().ok()),
+        section_id: Some(section_id.into()),
+        ..source_query("section")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortField {
     #[default]

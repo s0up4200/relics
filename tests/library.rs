@@ -7,7 +7,7 @@ use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
 use serde_json::json;
 use silo_omarchy::artwork::Rung;
-use silo_omarchy::browse::{Browse, Choice, Paging, SortField, Watch};
+use silo_omarchy::browse::{self, Browse, Choice, Paging, SortField, Watch};
 
 #[test]
 fn the_sidebar_lists_only_the_video_libraries_in_the_server_order() {
@@ -259,4 +259,19 @@ fn the_grid_pages_with_the_cursor_until_the_last_page() {
     let titles: Vec<_> = paging.items.iter().map(|i| i.title.as_str()).collect();
     assert_eq!(titles, ["a", "b", "c"]);
     assert_eq!(paging.total, Some(9));
+}
+
+#[test]
+fn view_all_watchlist_and_history_list_their_catalog_source_in_the_grid() {
+    let query = |q: silo_omarchy::api::wire::CatalogQuery| serde_json::to_value(q).unwrap();
+    assert_eq!(
+        query(browse::section_query("s1", None)),
+        json!({"source": "section", "scope": "home", "section_id": "s1", "limit": 60})
+    );
+    assert_eq!(
+        query(browse::section_query("s1", Some("1"))),
+        json!({"source": "section", "scope": "library", "library_id": "1", "section_id": "s1", "limit": 60})
+    );
+    assert_eq!(query(browse::source_query("watchlist")), json!({"source": "watchlist", "limit": 60}));
+    assert_eq!(query(browse::source_query("history")), json!({"source": "history", "limit": 60}));
 }

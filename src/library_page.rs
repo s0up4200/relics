@@ -14,7 +14,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
 use crate::grid::{Grid, Move};
-use crate::home::{Home, Open, Play, Rows};
+use crate::home::{Home, Open, OpenGrid, Play, Rows};
 
 /// A Shows library: its grid lists series, or episodes in Episodes mode.
 pub fn is_shows(library_type: &str) -> bool {
@@ -76,6 +76,7 @@ pub struct LibraryPage {
 
 impl EventEmitter<Play> for LibraryPage {}
 impl EventEmitter<Open> for LibraryPage {}
+impl EventEmitter<OpenGrid> for LibraryPage {}
 
 impl LibraryPage {
     pub fn new(client: Arc<Client>, library: wire::UserLibrary, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -181,6 +182,7 @@ impl LibraryPage {
             let home = cx.new(|cx| Home::new(self.client.clone(), rows, window, cx));
             self._events.push(cx.subscribe(&home, |_, _, Play(item), cx| cx.emit(Play(item.clone()))));
             self._events.push(cx.subscribe(&home, |_, _, Open(item), cx| cx.emit(Open(item.clone()))));
+            self._events.push(cx.subscribe(&home, |_, _, open: &OpenGrid, cx| cx.emit(open.clone())));
             self.recommended = Some(home);
         }
         self.sync(cx);

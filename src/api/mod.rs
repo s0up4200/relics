@@ -200,7 +200,7 @@ pub struct HomeSection {
     /// The Library window shows a Featured section as a hero above the rows.
     pub featured: bool,
     pub items: Vec<wire::CatalogItem>,
-    /// The server has more items for the section than the row holds.
+    /// The server has more items for the section than the row holds, and "View all" opens them in a grid.
     pub view_all: bool,
 }
 
@@ -913,7 +913,12 @@ fn rows(layout: wire::SectionLayout, mut sections: Vec<wire::Section>) -> Vec<Ho
             let section = sections.iter().position(|s| s.id == entry.id).map(|i| sections.swap_remove(i));
             let (items, total) = section.map_or((Vec::new(), 0), |s| (s.items, s.total_count));
             HomeSection {
-                view_all: total > items.len() as i64,
+                // The server lists the full section only for these types, like the web client.
+                view_all: total > items.len() as i64
+                    && matches!(
+                        entry.section_type.as_str(),
+                        "collection" | "custom_filter" | "genre" | "random" | "recently_added"
+                    ),
                 id: entry.id,
                 section_type: entry.section_type,
                 title: entry.title,
