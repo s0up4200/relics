@@ -7,6 +7,7 @@ use gpui::{
 };
 use gpui_omarchy::ActiveTheme;
 
+use crate::keys::Key;
 use crate::state::Pair;
 
 pub enum AccountChoice {
@@ -48,11 +49,11 @@ impl AccountPicker {
     }
 
     fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "j" | "down" => self.selected = (self.selected + 1).min(self.pairs.len()),
-            "k" | "up" => self.selected = self.selected.saturating_sub(1),
-            "enter" => self.choose(self.selected, cx),
-            "escape" | "backspace" => cx.emit(AccountChoice::Back),
+        match Key::parse(&event.keystroke.key) {
+            Key::Down => self.selected = (self.selected + 1).min(self.pairs.len()),
+            Key::Up => self.selected = self.selected.saturating_sub(1),
+            Key::Other("enter") => self.choose(self.selected, cx),
+            Key::Other("escape" | "backspace") => cx.emit(AccountChoice::Back),
             _ => return,
         }
         cx.stop_propagation();

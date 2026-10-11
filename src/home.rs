@@ -12,6 +12,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache, Rung};
+use crate::keys::Key;
 
 /// The user pressed p on a card, or Play on the detail page.
 pub struct Play(pub crate::player::PlayItem);
@@ -71,17 +72,17 @@ pub enum Focus {
 }
 
 /// Moves the focus for an arrow or hjkl key. `rows` holds the number of cards in each row.
-pub fn move_focus(focus: Focus, key: &str, rows: &[usize]) -> Focus {
+pub fn move_focus(focus: Focus, key: Key, rows: &[usize]) -> Focus {
     let first_card_in = |mut range: Box<dyn Iterator<Item = usize>>, col: usize| {
         range.find(|&row| rows[row] > 0).map(|row| Focus::Card { row, col: col.min(rows[row] - 1) })
     };
     let moved = match (focus, key) {
-        (Focus::Outside, "l" | "right") => first_card_in(Box::new(0..rows.len()), 0),
-        (Focus::Card { col: 0, .. }, "h" | "left") => Some(Focus::Outside),
-        (Focus::Card { row, col }, "h" | "left") => Some(Focus::Card { row, col: col - 1 }),
-        (Focus::Card { row, col }, "l" | "right") if col + 1 < rows[row] => Some(Focus::Card { row, col: col + 1 }),
-        (Focus::Card { row, col }, "j" | "down") => first_card_in(Box::new(row + 1..rows.len()), col),
-        (Focus::Card { row, col }, "k" | "up") => first_card_in(Box::new((0..row).rev()), col),
+        (Focus::Outside, Key::Right) => first_card_in(Box::new(0..rows.len()), 0),
+        (Focus::Card { col: 0, .. }, Key::Left) => Some(Focus::Outside),
+        (Focus::Card { row, col }, Key::Left) => Some(Focus::Card { row, col: col - 1 }),
+        (Focus::Card { row, col }, Key::Right) if col + 1 < rows[row] => Some(Focus::Card { row, col: col + 1 }),
+        (Focus::Card { row, col }, Key::Down) => first_card_in(Box::new(row + 1..rows.len()), col),
+        (Focus::Card { row, col }, Key::Up) => first_card_in(Box::new((0..row).rev()), col),
         _ => None,
     };
     moved.unwrap_or(focus)
@@ -152,7 +153,7 @@ impl Home {
                             Focus::Outside => first_load,
                         };
                         if lost {
-                            this.focus = move_focus(Focus::Outside, "l", &rows);
+                            this.focus = move_focus(Focus::Outside, Key::Right, &rows);
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
@@ -184,9 +185,9 @@ impl Home {
     }
 
     /// Handles a key. Returns false when Home does not use it, for example h or Left in the first column.
-    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        if let (Focus::Card { row, col }, "p" | "enter") = (self.focus, key) {
-            match (self.sections[row].items.get(col).cloned(), key) {
+    pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
+        if let (Focus::Card { row, col }, Key::Other(name @ ("p" | "enter"))) = (self.focus, key) {
+            match (self.sections[row].items.get(col).cloned(), name) {
                 (Some(item), "p") => cx.emit(Play((&item).into())),
                 (Some(item), _) => cx.emit(Open(item)),
                 (None, "enter") => self.view_all(row, cx),
@@ -407,19 +408,20 @@ pub(crate) fn short_line(item: &wire::CatalogItem) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Focus, move_focus};
+    use crate::keys::Key;
 
     #[test]
     fn hjkl_and_arrows_move_between_the_sidebar_and_the_cards() {
         let rows = [3, 0, 2];
         let card = |row, col| Focus::Card { row, col };
-        assert_eq!(move_focus(Focus::Outside, "l", &rows), card(0, 0));
-        assert_eq!(move_focus(card(0, 0), "h", &rows), Focus::Outside);
-        assert_eq!(move_focus(card(0, 1), "right", &rows), card(0, 2));
-        assert_eq!(move_focus(card(0, 2), "l", &rows), card(0, 2), "the last card stays");
-        assert_eq!(move_focus(card(0, 2), "j", &rows), card(2, 1), "an empty row is skipped");
-        assert_eq!(move_focus(card(2, 1), "up", &rows), card(0, 1));
-        assert_eq!(move_focus(card(0, 1), "k", &rows), card(0, 1));
-        assert_eq!(move_focus(Focus::Outside, "j", &rows), Focus::Outside);
-        assert_eq!(move_focus(Focus::Outside, "l", &[]), Focus::Outside);
+        assert_eq!(move_focus(Focus::Outside, Key::Right, &rows), card(0, 0));
+        assert_eq!(move_focus(card(0, 0), Key::Left, &rows), Focus::Outside);
+        assert_eq!(move_focus(card(0, 1), Key::Right, &rows), card(0, 2));
+        assert_eq!(move_focus(card(0, 2), Key::Right, &rows), card(0, 2), "the last card stays");
+        assert_eq!(move_focus(card(0, 2), Key::Down, &rows), card(2, 1), "an empty row is skipped");
+        assert_eq!(move_focus(card(2, 1), Key::Up, &rows), card(0, 1));
+        assert_eq!(move_focus(card(0, 1), Key::Up, &rows), card(0, 1));
+        assert_eq!(move_focus(Focus::Outside, Key::Down, &rows), Focus::Outside);
+        assert_eq!(move_focus(Focus::Outside, Key::Right, &[]), Focus::Outside);
     }
 }

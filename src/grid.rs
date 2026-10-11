@@ -13,6 +13,7 @@ use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache, Rung};
 use crate::browse::Paging;
 use crate::home::{Open, Play, artwork_image, short_line};
+use crate::keys::Key;
 
 pub const POSTER_WIDTH: f32 = 150.;
 const POSTER_HEIGHT: f32 = 225.;
@@ -35,15 +36,15 @@ pub enum Move {
     Stay,
 }
 
-pub fn move_focus(index: usize, key: &str, len: usize, columns: usize) -> Move {
+pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
     match key {
-        "h" | "left" if index.is_multiple_of(columns) => Move::OutLeft,
-        "h" | "left" => Move::To(index - 1),
-        "l" | "right" if index % columns + 1 < columns && index + 1 < len => Move::To(index + 1),
-        "k" | "up" if index < columns => Move::OutTop,
-        "k" | "up" => Move::To(index - columns),
+        Key::Left if index.is_multiple_of(columns) => Move::OutLeft,
+        Key::Left => Move::To(index - 1),
+        Key::Right if index % columns + 1 < columns && index + 1 < len => Move::To(index + 1),
+        Key::Up if index < columns => Move::OutTop,
+        Key::Up => Move::To(index - columns),
         // Down from a column that the last row does not reach goes to the last card.
-        "j" | "down" if index / columns < (len.max(1) - 1) / columns => Move::To((index + columns).min(len - 1)),
+        Key::Down if index / columns < (len.max(1) - 1) / columns => Move::To((index + columns).min(len - 1)),
         _ => Move::Stay,
     }
 }
@@ -157,18 +158,18 @@ impl Grid {
 
     /// Handles a key. Returns `Move::OutTop` or `Move::OutLeft` when the key leaves the grid, and `Move::Stay`
     /// when the grid does not use it.
-    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> Move {
+    pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> Move {
         let items = &self.paging.items;
         let Some(item) = items.get(self.focus) else {
             return match key {
-                "k" | "up" => Move::OutTop,
-                "h" | "left" => Move::OutLeft,
+                Key::Up => Move::OutTop,
+                Key::Left => Move::OutLeft,
                 _ => Move::Stay,
             };
         };
         match key {
-            "p" => cx.emit(Play(item.into())),
-            "enter" => cx.emit(Open(item.clone())),
+            Key::Other("p") => cx.emit(Play(item.into())),
+            Key::Other("enter") => cx.emit(Open(item.clone())),
             _ => match move_focus(self.focus, key, items.len(), self.columns) {
                 Move::To(index) => {
                     self.focus = index;
@@ -312,7 +313,7 @@ impl GridPage {
     }
 
     /// Handles a key. Returns false when the key leaves the grid or the grid does not use it.
-    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+    pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
         matches!(self.grid.update(cx, |grid, cx| grid.key(key, cx)), Move::To(_))
     }
 }
@@ -357,21 +358,22 @@ impl Render for GridPage {
 #[cfg(test)]
 mod tests {
     use super::{Move, columns, move_focus};
+    use crate::keys::Key;
 
     #[test]
-    fn hjkl_and_arrows_move_in_the_grid_and_leave_it_at_the_top_and_the_left() {
+    fn the_directions_move_in_the_grid_and_leave_it_at_the_top_and_the_left() {
         // 7 cards in 3 columns: rows [0 1 2] [3 4 5] [6].
-        assert_eq!(move_focus(0, "l", 7, 3), Move::To(1));
-        assert_eq!(move_focus(2, "right", 7, 3), Move::Stay, "the end of a row stays");
-        assert_eq!(move_focus(6, "l", 7, 3), Move::Stay, "the last card stays");
-        assert_eq!(move_focus(4, "h", 7, 3), Move::To(3));
-        assert_eq!(move_focus(3, "left", 7, 3), Move::OutLeft);
-        assert_eq!(move_focus(1, "j", 7, 3), Move::To(4));
-        assert_eq!(move_focus(5, "down", 7, 3), Move::To(6), "a short last row takes the last card");
-        assert_eq!(move_focus(6, "j", 7, 3), Move::Stay);
-        assert_eq!(move_focus(4, "k", 7, 3), Move::To(1));
-        assert_eq!(move_focus(1, "up", 7, 3), Move::OutTop);
-        assert_eq!(move_focus(0, "x", 7, 3), Move::Stay);
+        assert_eq!(move_focus(0, Key::Right, 7, 3), Move::To(1));
+        assert_eq!(move_focus(2, Key::Right, 7, 3), Move::Stay, "the end of a row stays");
+        assert_eq!(move_focus(6, Key::Right, 7, 3), Move::Stay, "the last card stays");
+        assert_eq!(move_focus(4, Key::Left, 7, 3), Move::To(3));
+        assert_eq!(move_focus(3, Key::Left, 7, 3), Move::OutLeft);
+        assert_eq!(move_focus(1, Key::Down, 7, 3), Move::To(4));
+        assert_eq!(move_focus(5, Key::Down, 7, 3), Move::To(6), "a short last row takes the last card");
+        assert_eq!(move_focus(6, Key::Down, 7, 3), Move::Stay);
+        assert_eq!(move_focus(4, Key::Up, 7, 3), Move::To(1));
+        assert_eq!(move_focus(1, Key::Up, 7, 3), Move::OutTop);
+        assert_eq!(move_focus(0, Key::Other("x"), 7, 3), Move::Stay);
     }
 
     #[test]

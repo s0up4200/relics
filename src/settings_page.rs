@@ -21,6 +21,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use serde_json::Value;
 
 use crate::api::Client;
+use crate::keys::Key;
 use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
 use crate::state::Pair;
 
@@ -177,27 +178,27 @@ impl SettingsPage {
     }
 
     /// A key while the page has the focus. Returns false for a key that the page does not use.
-    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+    pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
         let row = self.row;
         match key {
-            "j" | "down" => {
+            Key::Down => {
                 self.row = (row + 1).min(self.add_row());
                 self.action = 0;
             }
-            "k" | "up" => {
+            Key::Up => {
                 self.row = row.saturating_sub(1);
                 self.action = 0;
             }
-            "r" if self.load_error.is_some() => self.load(cx),
+            Key::Other("r") if self.load_error.is_some() => self.load(cx),
             _ if row < HWDEC_ROW => match key {
-                "l" | "right" | "enter" => self.change(row, 1, cx),
-                "h" | "left" => self.change(row, -1, cx),
+                Key::Right | Key::Other("enter") => self.change(row, 1, cx),
+                Key::Left => self.change(row, -1, cx),
                 _ => return false,
             },
-            "l" | "right" | "enter" | "h" | "left" if row == HWDEC_ROW => self.toggle_hwdec(cx),
-            "enter" => self.act(row - FIRST_PAIR, self.action, cx),
-            "l" | "right" if row < self.add_row() => self.action = 1,
-            "h" | "left" if row < self.add_row() && self.action == 1 => self.action = 0,
+            Key::Right | Key::Other("enter") | Key::Left if row == HWDEC_ROW => self.toggle_hwdec(cx),
+            Key::Other("enter") => self.act(row - FIRST_PAIR, self.action, cx),
+            Key::Right if row < self.add_row() => self.action = 1,
+            Key::Left if row < self.add_row() && self.action == 1 => self.action = 0,
             _ => return false,
         }
         cx.notify();
@@ -233,7 +234,7 @@ impl SettingsPage {
             .border_color(if focused { t.accent } else { gpui::transparent_black() })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.row = row;
-                this.key("enter", cx);
+                this.key(Key::Other("enter"), cx);
             }))
             .child(div().flex_1().truncate().child(label))
             .child(div().text_color(t.bright).child(value))

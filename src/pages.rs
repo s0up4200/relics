@@ -20,6 +20,7 @@ use crate::browse;
 use crate::detail::{self, Detail};
 use crate::grid::GridPage;
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
+use crate::keys::Key;
 use crate::library_page::{LibraryPage, is_shows};
 use crate::search::{OpenPerson, Search, person_query};
 use crate::settings_page::{AccountAction, SettingsPage};
@@ -360,7 +361,7 @@ impl Pages {
     }
 
     /// Gives a key to the page. `typed` is the text that the key types, for the search field.
-    fn page_key(&mut self, key: &str, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn page_key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.page.clone() {
             Page::Home(home) => home.update(cx, |home, cx| home.key(key, cx)),
             Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
@@ -386,12 +387,12 @@ impl Pages {
     }
 
     /// A key while the menu is open. The menu takes each key.
-    fn menu_key(&mut self, selected: usize, key: &str, cx: &mut Context<Self>) {
+    fn menu_key(&mut self, selected: usize, key: Key, cx: &mut Context<Self>) {
         match key {
-            "j" | "down" => self.menu = Some((selected + 1).min(MENU.len() - 1)),
-            "k" | "up" => self.menu = Some(selected.saturating_sub(1)),
-            "enter" => self.choose(MENU[selected].0, cx),
-            "escape" | "backspace" | "m" => self.menu = None,
+            Key::Down => self.menu = Some((selected + 1).min(MENU.len() - 1)),
+            Key::Up => self.menu = Some(selected.saturating_sub(1)),
+            Key::Other("enter") => self.choose(MENU[selected].0, cx),
+            Key::Other("escape" | "backspace" | "m") => self.menu = None,
             _ => {}
         }
         cx.stop_propagation();
@@ -400,7 +401,7 @@ impl Pages {
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let key = keystroke.key.as_str();
+        let key = Key::parse(&keystroke.key);
         if let Some(selected) = self.menu {
             return self.menu_key(selected, key, cx);
         }
@@ -408,25 +409,25 @@ impl Pages {
         let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt && !m.platform);
         let used = (self.sidebar.is_none() && self.page_key(key, typed, window, cx))
             || match (self.sidebar, key) {
-                (_, "/") => {
+                (_, Key::Other("/")) => {
                     self.sidebar = None;
                     self.open_search(window, cx);
                     true
                 }
-                (_, ",") => {
+                (_, Key::Other(",")) => {
                     self.open_settings(cx);
                     true
                 }
-                (_, "m") => {
+                (_, Key::Other("m")) => {
                     self.toggle_menu(cx);
                     true
                 }
-                (_, key) if let Some(row) = shortcut(key, &self.libraries) => {
+                (_, Key::Other(key)) if let Some(row) = shortcut(key, &self.libraries) => {
                     self.open_row(row, window, cx);
                     true
                 }
-                (None, "escape" | "backspace") => self.go_back(cx),
-                (None, "h" | "left") => {
+                (None, Key::Other("escape" | "backspace")) => self.go_back(cx),
+                (None, Key::Left) => {
                     if self.libraries.is_empty() {
                         self.load_libraries(cx);
                     }
@@ -434,19 +435,19 @@ impl Pages {
                     self.page.set_active(false, cx);
                     true
                 }
-                (Some(row), "j" | "down") => {
+                (Some(row), Key::Down) => {
                     self.sidebar = Some((row + 1).min(self.settings_row()));
                     true
                 }
-                (Some(row), "k" | "up") => {
+                (Some(row), Key::Up) => {
                     self.sidebar = Some(row.saturating_sub(1));
                     true
                 }
-                (Some(row), "enter") => {
+                (Some(row), Key::Other("enter")) => {
                     self.open_row(row, window, cx);
                     true
                 }
-                (Some(_), "l" | "right" | "escape") => {
+                (Some(_), Key::Right | Key::Other("escape")) => {
                     self.sidebar = None;
                     self.page.set_active(true, cx);
                     true

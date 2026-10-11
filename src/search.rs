@@ -16,6 +16,7 @@ use crate::artwork::{self, ArtworkCache};
 use crate::browse::PAGE_SIZE;
 use crate::grid::{Grid, Move};
 use crate::home::{Open, Play, artwork_image};
+use crate::keys::Key;
 
 /// The pause after the last key before Search sends the text.
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
@@ -80,18 +81,19 @@ impl Field {
         &self.text
     }
 
-    /// Handles a key at `now`. `typed` is the text that the key types, if any.
-    pub fn key(&mut self, key: &str, typed: Option<&str>, now: Instant) -> FieldKey {
+    /// Handles a key at `now`. `typed` is the text that the key types, if any, so j types a letter and the Down
+    /// arrow moves into the results.
+    pub fn key(&mut self, key: Key, typed: Option<&str>, now: Instant) -> FieldKey {
         match key {
-            "escape" if self.text.is_empty() => FieldKey::Back,
-            "escape" => {
+            Key::Other("escape") if self.text.is_empty() => FieldKey::Back,
+            Key::Other("escape") => {
                 self.text.clear();
                 self.due = None;
                 FieldKey::Cleared
             }
-            "down" | "enter" => FieldKey::Results,
-            "backspace" if self.text.pop().is_none() => FieldKey::Stay,
-            "backspace" => {
+            Key::Other("enter") => FieldKey::Results,
+            Key::Other("backspace") if self.text.pop().is_none() => FieldKey::Stay,
+            Key::Other("backspace") => {
                 self.due = Some(now + DEBOUNCE);
                 FieldKey::Edited
             }
@@ -101,6 +103,7 @@ impl Field {
                     self.due = Some(now + DEBOUNCE);
                     FieldKey::Edited
                 }
+                None if key == Key::Down => FieldKey::Results,
                 None => FieldKey::Unused,
             },
         }
@@ -252,7 +255,7 @@ impl Search {
 
     /// Handles a key. `typed` is the text that the key types. Returns false when the page does not use the key,
     /// for example Esc in an empty field.
-    pub fn key(&mut self, key: &str, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let focus = match self.focus {
             Focus::Field => match self.field.key(key, typed, Instant::now()) {
                 FieldKey::Edited => {
@@ -278,17 +281,17 @@ impl Search {
                 FieldKey::Results | FieldKey::Stay => Focus::Field,
                 FieldKey::Back | FieldKey::Unused => return false,
             },
-            _ if key == "/" => Focus::Field,
+            _ if key == Key::Other("/") => Focus::Field,
             Focus::Person(i) => match key {
-                "enter" => {
+                Key::Other("enter") => {
                     self.open_person(i, cx);
                     return true;
                 }
-                "h" | "left" if i > 0 => Focus::Person(i - 1),
-                "l" | "right" if i + 1 < self.people.len() => Focus::Person(i + 1),
-                "l" | "right" => Focus::Person(i),
-                "j" | "down" if self.has_titles(cx) => Focus::Titles,
-                "k" | "up" => Focus::Field,
+                Key::Left if i > 0 => Focus::Person(i - 1),
+                Key::Right if i + 1 < self.people.len() => Focus::Person(i + 1),
+                Key::Right => Focus::Person(i),
+                Key::Down if self.has_titles(cx) => Focus::Titles,
+                Key::Up => Focus::Field,
                 _ => return false,
             },
             Focus::Titles => {
@@ -419,15 +422,15 @@ mod tests {
         let start = Instant::now();
         let ms = |n| start + Duration::from_millis(n);
         let mut field = Field::default();
-        assert_eq!(field.key("h", Some("H"), ms(0)), FieldKey::Edited);
-        assert_eq!(field.key("space", Some(" "), ms(50)), FieldKey::Edited);
-        assert_eq!(field.key("j", Some("j"), ms(100)), FieldKey::Edited);
-        assert_eq!(field.key("1", Some("1"), ms(150)), FieldKey::Edited);
+        assert_eq!(field.key(Key::parse("h"), Some("H"), ms(0)), FieldKey::Edited);
+        assert_eq!(field.key(Key::parse("space"), Some(" "), ms(50)), FieldKey::Edited);
+        assert_eq!(field.key(Key::parse("j"), Some("j"), ms(100)), FieldKey::Edited);
+        assert_eq!(field.key(Key::parse("1"), Some("1"), ms(150)), FieldKey::Edited);
         assert_eq!(field.text(), "H j1");
         assert_eq!(field.take_due(ms(299)), None, "the pause starts again at each key");
         assert_eq!(field.take_due(ms(350)), Some("H j1".into()));
         assert_eq!(field.take_due(ms(900)), None, "a search is sent once");
-        assert_eq!(field.key("backspace", None, ms(1000)), FieldKey::Edited);
+        assert_eq!(field.key(Key::parse("backspace"), None, ms(1000)), FieldKey::Edited);
         assert_eq!(field.take_due(ms(1200)), Some("H j".into()));
     }
 
@@ -435,22 +438,26 @@ mod tests {
     fn the_first_esc_clears_the_field_and_the_second_goes_back() {
         let now = Instant::now();
         let mut field = Field::default();
-        field.key("a", Some("a"), now);
-        assert_eq!(field.key("escape", None, now), FieldKey::Cleared);
+        field.key(Key::parse("a"), Some("a"), now);
+        assert_eq!(field.key(Key::parse("escape"), None, now), FieldKey::Cleared);
         assert_eq!(field.text(), "");
         assert_eq!(field.take_due(now + DEBOUNCE), None, "a cleared field sends nothing");
-        assert_eq!(field.key("escape", None, now), FieldKey::Back);
+        assert_eq!(field.key(Key::parse("escape"), None, now), FieldKey::Back);
     }
 
     #[test]
     fn down_or_enter_moves_into_the_results_and_other_keys_stay_out_of_the_text() {
         let now = Instant::now();
         let mut field = Field::default();
-        assert_eq!(field.key("down", None, now), FieldKey::Results);
-        assert_eq!(field.key("enter", Some("\n"), now), FieldKey::Results);
-        assert_eq!(field.key("backspace", None, now), FieldKey::Stay, "Backspace in an empty field does not go back");
-        assert_eq!(field.key("left", None, now), FieldKey::Unused);
-        assert_eq!(field.key("tab", Some("\t"), now), FieldKey::Unused);
+        assert_eq!(field.key(Key::parse("down"), None, now), FieldKey::Results);
+        assert_eq!(field.key(Key::parse("enter"), Some("\n"), now), FieldKey::Results);
+        assert_eq!(
+            field.key(Key::parse("backspace"), None, now),
+            FieldKey::Stay,
+            "Backspace in an empty field does not go back"
+        );
+        assert_eq!(field.key(Key::parse("left"), None, now), FieldKey::Unused);
+        assert_eq!(field.key(Key::parse("tab"), Some("\t"), now), FieldKey::Unused);
         assert_eq!(field.text(), "");
     }
 }

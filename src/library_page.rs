@@ -15,6 +15,7 @@ use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
+use crate::keys::Key;
 
 /// A Shows library: its grid lists series, or episodes in Episodes mode.
 pub fn is_shows(library_type: &str) -> bool {
@@ -228,14 +229,14 @@ impl LibraryPage {
     }
 
     /// Handles a key. Returns false when the page does not use it, for example h or Left at the left edge.
-    pub fn key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if let Some(Menu { kind, row }) = self.menu {
             let last = self.choices(kind).len().saturating_sub(1);
             match key {
-                "j" | "down" | "l" | "right" => self.menu = Some(Menu { kind, row: (row + 1).min(last) }),
-                "k" | "up" | "h" | "left" => self.menu = Some(Menu { kind, row: row.saturating_sub(1) }),
-                "enter" => self.choose(row, cx),
-                "escape" | "backspace" => self.menu = None,
+                Key::Down | Key::Right => self.menu = Some(Menu { kind, row: (row + 1).min(last) }),
+                Key::Up | Key::Left => self.menu = Some(Menu { kind, row: row.saturating_sub(1) }),
+                Key::Other("enter") => self.choose(row, cx),
+                Key::Other("escape" | "backspace") => self.menu = None,
                 _ => return false,
             }
             cx.notify();
@@ -244,14 +245,14 @@ impl LibraryPage {
         if self.in_bar {
             let controls = self.controls();
             match key {
-                "h" | "left" if self.bar == 0 => return false,
-                "h" | "left" => self.bar -= 1,
-                "l" | "right" => self.bar = (self.bar + 1).min(controls.len() - 1),
-                "j" | "down" => {
+                Key::Left if self.bar == 0 => return false,
+                Key::Left => self.bar -= 1,
+                Key::Right => self.bar = (self.bar + 1).min(controls.len() - 1),
+                Key::Down => {
                     self.in_bar = false;
                     self.sync(cx);
                 }
-                "enter" => self.activate(controls[self.bar].clone(), window, cx),
+                Key::Other("enter") => self.activate(controls[self.bar].clone(), window, cx),
                 _ => return false,
             }
             cx.notify();
@@ -263,13 +264,17 @@ impl LibraryPage {
                 if home.is_some_and(|home| home.update(cx, |home, cx| home.key(key, cx))) {
                     return true;
                 }
-                matches!(key, "k" | "up")
+                key == Key::Up
             }
             Tab::Library => match self.grid.update(cx, |grid, cx| grid.key(key, cx)) {
                 Move::OutTop => true,
                 Move::OutLeft => return false,
                 Move::To(_) => return true,
-                Move::Stay if key == "enter" && self.grid.read(cx).is_empty() && !self.browse.chips().is_empty() => {
+                Move::Stay
+                    if key == Key::Other("enter")
+                        && self.grid.read(cx).is_empty()
+                        && !self.browse.chips().is_empty() =>
+                {
                     self.browse.clear();
                     self.apply(cx);
                     return true;

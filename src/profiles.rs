@@ -11,6 +11,8 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, input};
 
 use crate::api::{self, Client, PinCheck, wire};
+use crate::grid::{Move, move_focus};
+use crate::keys::Key;
 
 /// The number of Profiles in each row of the picker.
 const COLUMNS: usize = 5;
@@ -42,16 +44,9 @@ pub struct ProfilePicker {
 
 impl EventEmitter<PickerEvent> for ProfilePicker {}
 
-/// Moves the selection for an arrow or hjkl key, in a grid of `len` Profiles with `COLUMNS` in each row.
-pub fn move_choice(index: usize, key: &str, len: usize) -> usize {
-    match key {
-        "h" | "left" if !index.is_multiple_of(COLUMNS) => index - 1,
-        "l" | "right" if index % COLUMNS < COLUMNS - 1 && index + 1 < len => index + 1,
-        "k" | "up" if index >= COLUMNS => index - COLUMNS,
-        "j" | "down" if index + COLUMNS < len => index + COLUMNS,
-        "j" | "down" if index / COLUMNS < (len.max(1) - 1) / COLUMNS => len - 1,
-        _ => index,
-    }
+/// Moves the selection for a direction key, in a grid of `len` Profiles with `COLUMNS` in each row.
+pub fn move_choice(index: usize, key: Key, len: usize) -> usize {
+    if let Move::To(index) = move_focus(index, key, len, COLUMNS) { index } else { index }
 }
 
 impl ProfilePicker {
@@ -74,9 +69,9 @@ impl ProfilePicker {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
+        let key = Key::parse(&event.keystroke.key);
         if self.pin.is_some() {
-            if key == "escape" {
+            if key == Key::Other("escape") {
                 self.pin = None;
                 self.message = None;
                 window.focus(&self.focus_handle, cx);
@@ -85,9 +80,9 @@ impl ProfilePicker {
             return;
         }
         match key {
-            "enter" if self.profiles.is_empty() => cx.emit(PickerEvent::Retry),
-            "enter" => self.choose(window, cx),
-            "escape" => cx.emit(PickerEvent::Back),
+            Key::Other("enter") if self.profiles.is_empty() => cx.emit(PickerEvent::Retry),
+            Key::Other("enter") => self.choose(window, cx),
+            Key::Other("escape") => cx.emit(PickerEvent::Back),
             _ => {
                 let selected = move_choice(self.selected, key, self.profiles.len());
                 if selected == self.selected {
@@ -280,20 +275,21 @@ impl Render for ProfilePicker {
 #[cfg(test)]
 mod tests {
     use super::move_choice;
+    use crate::keys::Key;
 
     #[test]
     fn hjkl_and_arrows_move_in_the_grid_of_profiles() {
         // Seven Profiles: 0-4 in the first row, 5-6 in the second.
-        assert_eq!(move_choice(0, "l", 7), 1);
-        assert_eq!(move_choice(1, "left", 7), 0);
-        assert_eq!(move_choice(0, "h", 7), 0, "the first Profile stays");
-        assert_eq!(move_choice(4, "l", 7), 4, "the end of a row stays");
-        assert_eq!(move_choice(6, "right", 7), 6, "the last Profile stays");
-        assert_eq!(move_choice(1, "j", 7), 6);
-        assert_eq!(move_choice(4, "down", 7), 6, "a short last row takes its last Profile");
-        assert_eq!(move_choice(6, "k", 7), 1);
-        assert_eq!(move_choice(2, "up", 7), 2);
-        assert_eq!(move_choice(0, "j", 3), 0, "one row stays");
-        assert_eq!(move_choice(0, "l", 0), 0);
+        assert_eq!(move_choice(0, Key::Right, 7), 1);
+        assert_eq!(move_choice(1, Key::Left, 7), 0);
+        assert_eq!(move_choice(0, Key::Left, 7), 0, "the first Profile stays");
+        assert_eq!(move_choice(4, Key::Right, 7), 4, "the end of a row stays");
+        assert_eq!(move_choice(6, Key::Right, 7), 6, "the last Profile stays");
+        assert_eq!(move_choice(1, Key::Down, 7), 6);
+        assert_eq!(move_choice(4, Key::Down, 7), 6, "a short last row takes its last Profile");
+        assert_eq!(move_choice(6, Key::Up, 7), 1);
+        assert_eq!(move_choice(2, Key::Up, 7), 2);
+        assert_eq!(move_choice(0, Key::Down, 3), 0, "one row stays");
+        assert_eq!(move_choice(0, Key::Right, 0), 0);
     }
 }

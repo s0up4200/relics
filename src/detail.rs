@@ -15,6 +15,7 @@ use crate::api::{Client, Error, wire};
 use crate::artwork::{self, ArtworkCache, Rung};
 use crate::grid::Move;
 use crate::home::{Play, artwork_image, progress, progress_bar};
+use crate::keys::Key;
 use crate::player::PlayItem;
 use crate::search::OpenPerson;
 
@@ -165,16 +166,16 @@ impl Detail {
     }
 
     /// Handles a key. Returns false when the page does not use it, for example Esc or h at the left edge.
-    pub fn key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+    pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
         let Some(item) = &self.item else {
             return false;
         };
         match (self.focus, key) {
-            (Focus::Action(i), "enter") => self.act(actions(item)[i], cx),
-            (Focus::Season(i), "enter") => self.choose_season(i, cx),
-            (Focus::Episode(i), "enter" | "p") => self.play_episode(i, cx),
-            (Focus::Cast(i), "enter") => self.open_person(i, cx),
-            (_, "p") => cx.emit(Play(item.into())),
+            (Focus::Action(i), Key::Other("enter")) => self.act(actions(item)[i], cx),
+            (Focus::Season(i), Key::Other("enter")) => self.choose_season(i, cx),
+            (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
+            (Focus::Cast(i), Key::Other("enter")) => self.open_person(i, cx),
+            (_, Key::Other("p")) => cx.emit(Play(item.into())),
             (focus, key) => match self.rows().step(focus, key) {
                 Step::To(focus) => {
                     self.focus = focus;
@@ -564,15 +565,14 @@ pub struct Rows {
 }
 
 impl Rows {
-    pub fn step(&self, focus: Focus, key: &str) -> Step {
+    pub fn step(&self, focus: Focus, key: Key) -> Step {
         let along = |i: usize, len: usize, make: fn(usize) -> Focus| match key {
-            "h" | "left" if i == 0 => Step::OutLeft,
-            "h" | "left" => Step::To(make(i - 1)),
-            "l" | "right" if i + 1 < len => Step::To(make(i + 1)),
+            Key::Left if i == 0 => Step::OutLeft,
+            Key::Left => Step::To(make(i - 1)),
+            Key::Right if i + 1 < len => Step::To(make(i + 1)),
             _ => Step::Stay,
         };
-        let down = matches!(key, "j" | "down");
-        let up = matches!(key, "k" | "up");
+        let (down, up) = (key == Key::Down, key == Key::Up);
         match focus {
             Focus::Action(_) if down && self.seasons > 0 => Step::To(Focus::Season(self.season)),
             Focus::Action(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
@@ -675,33 +675,33 @@ mod tests {
         // 3 buttons, 2 seasons with season 1 chosen, 5 episodes in 2 columns.
         let rows = Rows { actions: 3, seasons: 2, season: 1, episodes: 5, cast: 0, columns: 2 };
         let to = |focus| Step::To(focus);
-        assert_eq!(rows.step(Focus::Action(0), "l"), to(Focus::Action(1)));
-        assert_eq!(rows.step(Focus::Action(2), "right"), Step::Stay);
-        assert_eq!(rows.step(Focus::Action(0), "h"), Step::OutLeft, "h at the left goes to the sidebar");
-        assert_eq!(rows.step(Focus::Action(2), "j"), to(Focus::Season(1)), "down goes to the chosen season");
-        assert_eq!(rows.step(Focus::Season(1), "k"), to(Focus::Action(0)));
-        assert_eq!(rows.step(Focus::Season(1), "down"), to(Focus::Episode(0)));
-        assert_eq!(rows.step(Focus::Episode(1), "j"), to(Focus::Episode(3)));
-        assert_eq!(rows.step(Focus::Episode(3), "k"), to(Focus::Episode(1)));
-        assert_eq!(rows.step(Focus::Episode(1), "up"), to(Focus::Season(1)));
-        assert_eq!(rows.step(Focus::Episode(2), "h"), Step::OutLeft);
-        assert_eq!(rows.step(Focus::Action(0), "k"), Step::Stay);
+        assert_eq!(rows.step(Focus::Action(0), Key::Right), to(Focus::Action(1)));
+        assert_eq!(rows.step(Focus::Action(2), Key::Right), Step::Stay);
+        assert_eq!(rows.step(Focus::Action(0), Key::Left), Step::OutLeft, "h at the left goes to the sidebar");
+        assert_eq!(rows.step(Focus::Action(2), Key::Down), to(Focus::Season(1)), "down goes to the chosen season");
+        assert_eq!(rows.step(Focus::Season(1), Key::Up), to(Focus::Action(0)));
+        assert_eq!(rows.step(Focus::Season(1), Key::Down), to(Focus::Episode(0)));
+        assert_eq!(rows.step(Focus::Episode(1), Key::Down), to(Focus::Episode(3)));
+        assert_eq!(rows.step(Focus::Episode(3), Key::Up), to(Focus::Episode(1)));
+        assert_eq!(rows.step(Focus::Episode(1), Key::Up), to(Focus::Season(1)));
+        assert_eq!(rows.step(Focus::Episode(2), Key::Left), Step::OutLeft);
+        assert_eq!(rows.step(Focus::Action(0), Key::Up), Step::Stay);
         let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, cast: 0, columns: 4 };
-        assert_eq!(movie.step(Focus::Action(1), "j"), Step::Stay);
+        assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
         let loading = Rows { episodes: 0, ..rows };
-        assert_eq!(loading.step(Focus::Season(0), "j"), Step::Stay);
+        assert_eq!(loading.step(Focus::Season(0), Key::Down), Step::Stay);
     }
 
     #[test]
     fn hjkl_moves_between_the_buttons_and_the_cast_of_a_movie() {
         let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, cast: 3, columns: 4 };
         let to = |focus| Step::To(focus);
-        assert_eq!(movie.step(Focus::Action(1), "j"), to(Focus::Cast(0)));
-        assert_eq!(movie.step(Focus::Cast(0), "l"), to(Focus::Cast(1)));
-        assert_eq!(movie.step(Focus::Cast(2), "right"), Step::Stay);
-        assert_eq!(movie.step(Focus::Cast(0), "h"), Step::OutLeft);
-        assert_eq!(movie.step(Focus::Cast(1), "k"), to(Focus::Action(0)));
-        assert_eq!(movie.step(Focus::Cast(1), "j"), Step::Stay);
+        assert_eq!(movie.step(Focus::Action(1), Key::Down), to(Focus::Cast(0)));
+        assert_eq!(movie.step(Focus::Cast(0), Key::Right), to(Focus::Cast(1)));
+        assert_eq!(movie.step(Focus::Cast(2), Key::Right), Step::Stay);
+        assert_eq!(movie.step(Focus::Cast(0), Key::Left), Step::OutLeft);
+        assert_eq!(movie.step(Focus::Cast(1), Key::Up), to(Focus::Action(0)));
+        assert_eq!(movie.step(Focus::Cast(1), Key::Down), Step::Stay);
     }
 
     #[test]
