@@ -99,12 +99,26 @@ open_enum! {
     MarkerKind { Intro = "intro", Credits = "credits", Recap = "recap", Preview = "preview" }
 }
 
+/// A Marker: a time range in a file version, in seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    pub kind: MarkerKind,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// The answer of the server to a playback start or replan.
 #[derive(Debug, Clone)]
 pub enum Decision {
     /// The server made a plan. `Client::start_playback` makes its stream and subtitle URLs absolute, and
-    /// sets `audio_language`, the language of the audio track that the server picked.
-    Playable { session_id: String, plan: Box<super::wire::PlaybackPlan>, audio_language: Option<String> },
+    /// sets `audio_language`, the language of the audio track that the server picked, and `markers`, the
+    /// Markers of the file in source time.
+    Playable {
+        session_id: String,
+        plan: Box<super::wire::PlaybackPlan>,
+        audio_language: Option<String>,
+        markers: Vec<Marker>,
+    },
     /// The server cannot play the Item for this client. `message` is for the user.
     Unavailable { reason: String, message: String },
     /// An outcome that this version of the app does not know.
@@ -116,7 +130,7 @@ impl From<super::wire::PlaybackDecision> for Decision {
         match (decision.outcome.as_str(), decision.playback_plan, decision.terminal) {
             ("playable", Some(plan), _) => {
                 let session_id = decision.session_id.or_else(|| plan.session_id.clone()).unwrap_or_default();
-                Decision::Playable { session_id, plan: Box::new(plan), audio_language: None }
+                Decision::Playable { session_id, plan: Box::new(plan), audio_language: None, markers: Vec::new() }
             }
             ("adaptation_unavailable", _, Some(terminal)) => {
                 Decision::Unavailable { reason: terminal.reason, message: terminal.message }

@@ -3,9 +3,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use silo_omarchy::api::types::Decision;
+use silo_omarchy::api::types::{Decision, Marker, MarkerKind};
 use silo_omarchy::playback::{Command, Headers, Input, Sample, Session};
-use silo_omarchy::settings::{ServerSettings, SubtitleMode};
+use silo_omarchy::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -170,16 +170,17 @@ fn an_unplayable_item_shows_the_server_message() {
 #[test]
 fn the_controller_gets_the_theme_when_it_is_ready() {
     let mut session = playing(None);
-    assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme]);
+    assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme, Command::ShowMarkers(vec![])]);
 }
 
 /// Starts a session with `settings` on the fixture plan, whose audio is in `audio_language`, and loads the file.
 fn load_with(settings: ServerSettings, audio_language: &str) -> Vec<Command> {
     let mut session = Session::new(None, settings);
-    let Decision::Playable { session_id, plan, .. } = decision(|_| {}) else { unreachable!() };
-    let decision = Decision::Playable { session_id, plan, audio_language: Some(audio_language.into()) };
+    let mut decision = decision(|_| {});
+    let Decision::Playable { audio_language: language, .. } = &mut decision else { unreachable!() };
+    *language = Some(audio_language.into());
     session.step(Input::Started { decision, headers: headers() }, at(0));
-    session.step(Input::FileLoaded, at(0))
+    session.step(Input::FileLoaded, at(0)).into_iter().filter(|c| matches!(c, Command::AddSubtitle { .. })).collect()
 }
 
 /// The command that adds track 0 (English, external) or 1 (English signs, forced) of the fixture inventory.
@@ -220,4 +221,169 @@ fn a_track_that_needs_a_burn_in_shows_no_subtitles() {
         ..ServerSettings::default()
     };
     assert_eq!(load_with(settings, "en"), vec![]);
+}
+
+// The skip state machine.
+
+fn marker(kind: MarkerKind, start: f64, end: f64) -> Marker {
+    Marker { kind, start, end }
+}
+
+/// A session of a 1000 s file with these Markers (source time), with no position yet. The plan
+/// has a timeline offset of 100 s, so player time = source time - 100.
+fn with_markers(settings: ServerSettings, markers: Vec<Marker>) -> Session {
+    let mut session = Session::new(None, settings);
+    let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
+    let Decision::Playable { markers: m, .. } = &mut decision else { unreachable!() };
+    *m = markers;
+    session.step(Input::Started { decision, headers: headers() }, at(0));
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Duration(1000.0), at(0));
+    session
+}
+
+fn intro_with(mode: IntroSkipMode) -> Session {
+    let settings = ServerSettings { intro_skip_mode: mode, ..ServerSettings::default() };
+    with_markers(settings, vec![marker(MarkerKind::Intro, 110.0, 150.0)])
+}
+
+fn prompt(label: &str) -> Command {
+    Command::ShowPrompt(label.into())
+}
+
+#[test]
+fn the_controller_gets_the_markers_in_player_time_when_the_file_loads() {
+    let mut session = Session::new(None, ServerSettings::default());
+    let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
+    let Decision::Playable { markers, .. } = &mut decision else { unreachable!() };
+    *markers = vec![marker(MarkerKind::Intro, 110.0, 150.0), marker(MarkerKind::Credits, 1000.0, 1100.0)];
+    session.step(Input::Started { decision, headers: headers() }, at(0));
+    let commands = session.step(Input::FileLoaded, at(0));
+    let want =
+        Command::ShowMarkers(vec![marker(MarkerKind::Intro, 10.0, 50.0), marker(MarkerKind::Credits, 900.0, 1000.0)]);
+    assert!(commands.contains(&want), "{commands:?}");
+}
+
+#[test]
+fn ask_offers_skip_intro_and_the_action_seeks_to_the_intro_end() {
+    let mut session = intro_with(IntroSkipMode::Ask);
+    assert_eq!(session.step(Input::Position(9.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(10.0), at(1)), vec![prompt("Skip intro")]);
+    assert_eq!(session.step(Input::Position(11.0), at(2)), vec![], "the prompt shows once");
+    assert_eq!(session.step(Input::Action, at(3)), vec![Command::Seek(50.0), prompt("")]);
+    session.step(Input::Position(50.0), at(3));
+    assert_eq!(session.step(Input::Position(20.0), at(4)), vec![], "a skipped intro is not offered again");
+}
+
+#[test]
+fn ask_hides_the_prompt_after_five_seconds_and_offers_it_again_on_the_next_entry() {
+    let mut session = intro_with(IntroSkipMode::Ask);
+    session.step(Input::Position(10.0), at(1));
+    assert_eq!(session.step(Input::Tick, at(5)), vec![]);
+    assert_eq!(session.step(Input::Tick, at(6)), vec![prompt("")]);
+    assert_eq!(session.step(Input::Action, at(7)), vec![], "no prompt, so the action does nothing");
+    assert_eq!(session.step(Input::Position(60.0), at(8)), vec![]);
+    assert_eq!(session.step(Input::Position(30.0), at(9)), vec![prompt("Skip intro")]);
+}
+
+#[test]
+fn ask_hides_the_prompt_when_playback_leaves_the_intro() {
+    let mut session = intro_with(IntroSkipMode::Ask);
+    session.step(Input::Position(10.0), at(1));
+    assert_eq!(session.step(Input::Position(50.0), at(2)), vec![prompt("")]);
+}
+
+#[test]
+fn never_shows_no_prompt() {
+    let mut session = intro_with(IntroSkipMode::Never);
+    assert_eq!(session.step(Input::Position(10.0), at(1)), vec![]);
+}
+
+#[test]
+fn always_skips_the_intro_and_offers_watch_intro() {
+    let mut session = intro_with(IntroSkipMode::Always);
+    assert_eq!(session.step(Input::Position(10.0), at(1)), vec![Command::Seek(50.0), prompt("Watch intro")]);
+    assert_eq!(session.step(Input::Position(50.0), at(1)), vec![], "the undo prompt stays after the seek");
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(10.0), prompt("")]);
+    assert_eq!(session.step(Input::Position(10.0), at(2)), vec![], "the intro the user chose to watch plays");
+}
+
+#[test]
+fn always_does_not_skip_again_after_the_undo_prompt_times_out() {
+    let mut session = intro_with(IntroSkipMode::Always);
+    session.step(Input::Position(10.0), at(1));
+    session.step(Input::Position(50.0), at(1));
+    assert_eq!(session.step(Input::Tick, at(6)), vec![prompt("")]);
+    assert_eq!(session.step(Input::Position(20.0), at(7)), vec![]);
+}
+
+#[test]
+fn credits_and_recap_skip_only_when_the_server_settings_say_so() {
+    let markers = vec![marker(MarkerKind::Recap, 100.0, 130.0), marker(MarkerKind::Credits, 500.0, 520.0)];
+    let mut session = with_markers(ServerSettings::default(), markers.clone());
+    assert_eq!(session.step(Input::Position(0.5), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(400.0), at(1)), vec![]);
+    let settings = ServerSettings { auto_skip_credits: true, auto_skip_recap: true, ..ServerSettings::default() };
+    let mut session = with_markers(settings, markers);
+    assert_eq!(session.step(Input::Position(0.5), at(1)), vec![Command::Seek(30.0)]);
+    assert_eq!(session.step(Input::Position(400.0), at(1)), vec![Command::Seek(420.0)]);
+}
+
+#[test]
+fn a_preview_marker_does_nothing() {
+    let settings = ServerSettings { auto_skip_credits: true, auto_skip_recap: true, ..ServerSettings::default() };
+    let mut session = with_markers(settings, vec![marker(MarkerKind::Preview, 200.0, 220.0)]);
+    assert_eq!(session.step(Input::Position(105.0), at(1)), vec![]);
+}
+
+fn end_credits(settings: ServerSettings) -> Session {
+    with_markers(settings, vec![marker(MarkerKind::Credits, 1040.0, 1100.0)])
+}
+
+#[test]
+fn credits_to_the_end_of_the_file_offer_the_next_episode_when_one_exists() {
+    let mut session = end_credits(ServerSettings::default());
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![], "no next episode, no prompt");
+    let mut session = end_credits(ServerSettings::default());
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next episode")]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![prompt(""), stop(1050.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::Tick, at(30)), vec![], "the session ended");
+}
+
+#[test]
+fn auto_skip_of_credits_to_the_end_plays_the_next_episode_when_autoplay_is_on() {
+    let settings = ServerSettings { auto_skip_credits: true, ..ServerSettings::default() };
+    let mut session = end_credits(settings.clone());
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![stop(1050.0, 1), Command::PlayNext]);
+    let mut session = end_credits(ServerSettings { auto_play_next: false, ..settings });
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next episode")]);
+}
+
+#[test]
+fn a_normal_end_plays_the_next_episode_when_autoplay_is_on() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::NextEpisode, at(0));
+    session.step(Input::Position(998.0), at(1));
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(1100.0, 1), Command::PlayNext]);
+
+    let settings = ServerSettings { auto_play_next: false, ..ServerSettings::default() };
+    let mut session = with_markers(settings, vec![]);
+    session.step(Input::NextEpisode, at(0));
+    session.step(Input::Position(998.0), at(1));
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(1100.0, 1), Command::ClosePlayer]);
+
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::NextEpisode, at(0));
+    session.step(Input::Position(500.0), at(1));
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(600.0, 1), Command::ClosePlayer], "an Early end");
+}
+
+#[test]
+fn the_end_of_a_session_hides_its_prompt() {
+    let mut session = intro_with(IntroSkipMode::Ask);
+    session.step(Input::Position(10.0), at(1));
+    assert_eq!(session.step(Input::End, at(2)), vec![prompt(""), stop(110.0, 1)]);
 }

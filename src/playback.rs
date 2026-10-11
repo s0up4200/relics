@@ -5,8 +5,8 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::api::types::Decision;
-use crate::settings::ServerSettings;
+use crate::api::types::{Decision, Marker, MarkerKind};
+use crate::settings::{IntroSkipMode, ServerSettings};
 
 pub mod subtitles;
 
@@ -17,6 +17,10 @@ pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const NORMAL_END_SECONDS: f64 = 8.0;
 /// An end of file at this fraction of the duration or more is a Normal end.
 const NORMAL_END_FRACTION: f64 = 0.985;
+/// How long the Skip prompt shows.
+const PROMPT_TIME: Duration = Duration::from_secs(5);
+/// Credits that end this close to the end of the file, in seconds, run to the end of the file.
+const CREDITS_TO_END_SECONDS: f64 = 1.0;
 
 /// HTTP headers as (name, value).
 pub type Headers = Vec<(String, String)>;
@@ -49,6 +53,10 @@ pub enum Input {
     Tick,
     /// The Lua controller loaded and waits for the theme.
     ControlsReady,
+    /// The user took the Skip prompt, with a click or Enter.
+    Action,
+    /// The Item has a next episode.
+    NextEpisode,
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -75,6 +83,14 @@ pub enum Command {
     SendTheme,
     /// Add the subtitle file at `url` to mpv and show it.
     AddSubtitle { url: String, title: String, language: String },
+    /// Draw these Markers, in player time, on the seek bar.
+    ShowMarkers(Vec<Marker>),
+    /// Show the Skip prompt with this label. An empty label hides it.
+    ShowPrompt(String),
+    /// Seek to this player position.
+    Seek(f64),
+    /// Play the next episode in the same Player window. The session has already ended.
+    PlayNext,
 }
 
 pub struct Session {
@@ -90,6 +106,29 @@ pub struct Session {
     paused: bool,
     sequence: u64,
     last_report: Option<SystemTime>,
+    /// The index of the Marker that holds the position.
+    inside: Option<usize>,
+    /// The Markers that the user or an automatic skip already decided on. They do nothing more.
+    resolved: Vec<usize>,
+    prompt: Option<Prompt>,
+    has_next: bool,
+}
+
+/// The Skip prompt that shows now.
+struct Prompt {
+    action: Action,
+    until: SystemTime,
+    /// The prompt stays when the position leaves its Marker. The "Watch intro" prompt shows after the skip.
+    stays: bool,
+}
+
+enum Action {
+    /// Seek to this player position and resolve the Marker.
+    Seek {
+        to: f64,
+        marker: usize,
+    },
+    Next,
 }
 
 struct Plan {
@@ -98,6 +137,8 @@ struct Plan {
     offset: f64,
     /// The command that shows the subtitle track of the subtitle choice, when the file loads.
     subtitle: Option<Command>,
+    /// The Markers in player time.
+    markers: Vec<Marker>,
 }
 
 impl Session {
@@ -113,6 +154,10 @@ impl Session {
             paused: false,
             sequence: 0,
             last_report: None,
+            inside: None,
+            resolved: Vec::new(),
+            prompt: None,
+            has_next: false,
         }
     }
 
@@ -122,7 +167,7 @@ impl Session {
         }
         match input {
             Input::Started { decision, headers } => match decision {
-                Decision::Playable { session_id, plan, audio_language } => {
+                Decision::Playable { session_id, plan, audio_language, markers } => {
                     let load = Command::Load {
                         url: plan.stream.url.clone(),
                         headers,
@@ -139,7 +184,12 @@ impl Session {
                             language: track.language.clone().unwrap_or_default(),
                         })
                     });
-                    self.plan = Some(Plan { session_id, offset: plan.timeline.timeline_offset_seconds, subtitle });
+                    let offset = plan.timeline.timeline_offset_seconds;
+                    let markers = markers
+                        .into_iter()
+                        .map(|marker| Marker { start: marker.start - offset, end: marker.end - offset, ..marker })
+                        .collect();
+                    self.plan = Some(Plan { session_id, offset, subtitle, markers });
                     vec![load]
                 }
                 Decision::Unavailable { message, .. } => self.fail(message),
@@ -151,11 +201,12 @@ impl Session {
             Input::FileLoaded => {
                 self.loaded = true;
                 self.last_report = Some(now);
-                self.plan.as_ref().and_then(|plan| plan.subtitle.clone()).into_iter().collect()
+                let subtitle = self.plan.as_ref().and_then(|plan| plan.subtitle.clone());
+                [Some(self.show_markers()), subtitle].into_iter().flatten().collect()
             }
             Input::Position(position) if self.loaded => {
                 self.position = Some(position);
-                Vec::new()
+                self.enter(position, now)
             }
             Input::Duration(duration) if self.loaded => {
                 self.duration = Some(duration);
@@ -165,11 +216,39 @@ impl Session {
                 self.paused = paused;
                 Vec::new()
             }
-            Input::Tick => self.report(now),
-            Input::ControlsReady => vec![Command::SendTheme],
+            Input::Tick => {
+                let mut commands = Vec::new();
+                if self.prompt.as_ref().is_some_and(|prompt| now >= prompt.until) {
+                    self.prompt = None;
+                    commands.push(Command::ShowPrompt(String::new()));
+                }
+                commands.extend(self.report(now));
+                commands
+            }
+            Input::ControlsReady => vec![Command::SendTheme, self.show_markers()],
+            Input::Action => match self.prompt.take() {
+                Some(Prompt { action: Action::Seek { to, marker }, .. }) => {
+                    self.resolved.push(marker);
+                    vec![Command::Seek(to), Command::ShowPrompt(String::new())]
+                }
+                Some(prompt @ Prompt { action: Action::Next, .. }) => {
+                    // finish() hides the prompt.
+                    self.prompt = Some(prompt);
+                    self.play_next(self.source_position())
+                }
+                None => Vec::new(),
+            },
+            Input::NextEpisode => {
+                self.has_next = true;
+                Vec::new()
+            }
             Input::EndOfFile => {
-                let position = self.end_position();
-                self.finish(position, true)
+                let (position, normal) = self.end_position();
+                if normal && self.has_next && self.settings.auto_play_next {
+                    self.play_next(position)
+                } else {
+                    self.finish(position, true)
+                }
             }
             Input::LoadFailed => {
                 // ponytail: #27 replaces this with the recovery chain (refresh, reload, replan).
@@ -181,6 +260,82 @@ impl Session {
             Input::End => self.finish(self.source_position(), false),
             Input::Position(_) | Input::Duration(_) => Vec::new(),
         }
+    }
+
+    fn show_markers(&self) -> Command {
+        Command::ShowMarkers(self.plan.as_ref().map(|plan| plan.markers.clone()).unwrap_or_default())
+    }
+
+    /// The skip state machine. It acts when the position enters a Marker that is not resolved.
+    fn enter(&mut self, position: f64, now: SystemTime) -> Vec<Command> {
+        let markers = self.plan.as_ref().map_or(&[][..], |plan| &plan.markers);
+        let inside = markers.iter().position(|marker| marker.start <= position && position < marker.end);
+        if inside == self.inside {
+            return Vec::new();
+        }
+        self.inside = inside;
+        let Some(index) = inside.filter(|index| !self.resolved.contains(index)) else {
+            return self.hide_marker_prompt();
+        };
+        let Marker { kind, start, end } = markers[index].clone();
+        let mut commands = self.hide_marker_prompt();
+        let to_end = self.player_duration().is_some_and(|duration| end >= duration - CREDITS_TO_END_SECONDS);
+        let skip = Action::Seek { to: end, marker: index };
+        match kind {
+            MarkerKind::Intro => match self.settings.intro_skip_mode {
+                IntroSkipMode::Never => {}
+                IntroSkipMode::Ask => commands.push(self.show("Skip intro", skip, false, now)),
+                IntroSkipMode::Always => {
+                    self.resolved.push(index);
+                    let undo = Action::Seek { to: start, marker: index };
+                    commands.extend([Command::Seek(end), self.show("Watch intro", undo, true, now)]);
+                }
+            },
+            MarkerKind::Credits if to_end && self.has_next => {
+                if self.settings.auto_skip_credits && self.settings.auto_play_next {
+                    commands.extend(self.play_next(self.source_position()));
+                } else {
+                    commands.push(self.show("Next episode", Action::Next, false, now));
+                }
+            }
+            MarkerKind::Credits if !to_end && self.settings.auto_skip_credits => {
+                self.resolved.push(index);
+                commands.push(Command::Seek(end));
+            }
+            MarkerKind::Recap if self.settings.auto_skip_recap => {
+                self.resolved.push(index);
+                commands.push(Command::Seek(end));
+            }
+            _ => {}
+        }
+        commands
+    }
+
+    /// Hides the prompt of the Marker that the position left.
+    fn hide_marker_prompt(&mut self) -> Vec<Command> {
+        if self.prompt.as_ref().is_some_and(|prompt| !prompt.stays) {
+            self.prompt = None;
+            return vec![Command::ShowPrompt(String::new())];
+        }
+        Vec::new()
+    }
+
+    // ponytail: the prompt timer runs on during a pause. The server design freezes it; add a pause
+    // input to the timer if users miss the prompt.
+    fn show(&mut self, label: &str, action: Action, stays: bool, now: SystemTime) -> Command {
+        self.prompt = Some(Prompt { action, until: now + PROMPT_TIME, stays });
+        Command::ShowPrompt(label.into())
+    }
+
+    /// Ends the session at `position` and plays the next episode in the same Player window.
+    fn play_next(&mut self, position: Option<f64>) -> Vec<Command> {
+        let mut commands = self.finish(position, false);
+        commands.push(Command::PlayNext);
+        commands
+    }
+
+    fn player_duration(&self) -> Option<f64> {
+        self.duration.or_else(|| Some(self.runtime? - self.plan.as_ref()?.offset))
     }
 
     fn fail(&mut self, message: String) -> Vec<Command> {
@@ -204,8 +359,12 @@ impl Session {
         let Some(session_id) = self.plan.as_ref().map(|plan| plan.session_id.clone()) else {
             return Vec::new();
         };
+        let mut commands = Vec::new();
+        if self.prompt.take().is_some() {
+            commands.push(Command::ShowPrompt(String::new()));
+        }
         let sample = position.map(|position| self.sample(position));
-        let mut commands = vec![Command::Stop { session_id, sample }];
+        commands.push(Command::Stop { session_id, sample });
         if close_player {
             commands.push(Command::ClosePlayer);
         }
@@ -221,9 +380,10 @@ impl Session {
         Some(self.position? + self.plan.as_ref()?.offset)
     }
 
-    /// The final position at an end of file: the duration on a Normal end, else the last
-    /// position. An Early end never carries the duration, so it never marks the Item watched.
-    fn end_position(&self) -> Option<f64> {
+    /// The final position at an end of file, and whether the end is a Normal end. It is the
+    /// duration on a Normal end, else the last position. An Early end never carries the
+    /// duration, so it never marks the Item watched.
+    fn end_position(&self) -> (Option<f64>, bool) {
         let position = self.source_position();
         let offset = self.plan.as_ref().map_or(0.0, |plan| plan.offset);
         let duration = self.duration.map(|duration| duration + offset).or(self.runtime);
@@ -231,9 +391,9 @@ impl Session {
             (Some(position), Some(duration))
                 if duration - position <= NORMAL_END_SECONDS || position >= duration * NORMAL_END_FRACTION =>
             {
-                Some(duration)
+                (Some(duration), true)
             }
-            _ => position,
+            _ => (position, false),
         }
     }
 }

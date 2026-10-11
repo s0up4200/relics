@@ -17,6 +17,39 @@ use crate::playback::{Command, Input, Session};
 // ponytail: a fixed value until #36 adds the hardware decoding Local setting.
 const HWDEC: &str = "auto-safe";
 
+/// What the Player window needs to play an Item.
+#[derive(Debug, Clone)]
+pub struct PlayItem {
+    content_id: String,
+    /// The runtime in seconds.
+    runtime: Option<f64>,
+    /// The series id and the season number of an episode. The next episode lookup needs them.
+    season: Option<(String, i64)>,
+}
+
+impl From<&wire::CatalogItem> for PlayItem {
+    /// A series or season card plays its `play_content_id`, an episode.
+    // ponytail: a series card has no season number, so its episode has no next episode. The detail
+    // page (#30) can play the episode with `PlayItem::episode` instead.
+    fn from(item: &wire::CatalogItem) -> Self {
+        Self {
+            content_id: item.play_content_id.clone().unwrap_or_else(|| item.content_id.clone()),
+            runtime: item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0)),
+            season: item.series_id.clone().zip(item.season_number),
+        }
+    }
+}
+
+impl PlayItem {
+    pub fn episode(series_id: String, episode: wire::Episode) -> Self {
+        Self {
+            content_id: episode.content_id,
+            runtime: Some(episode.runtime as f64 * 60.0),
+            season: Some((series_id, episode.season_number)),
+        }
+    }
+}
+
 /// The text of a playback error, for the Library window.
 pub struct PlaybackError(pub String);
 
@@ -27,6 +60,9 @@ pub struct PlayerWindow {
     /// Changes when a handle opens or closes, so that the late events of a closed handle are dropped.
     mpv_id: u64,
     starting: Option<Task<()>>,
+    /// The next episode of the Item that plays.
+    next: Option<PlayItem>,
+    finding_next: Option<Task<()>>,
     /// The last stop report. Quit waits for it.
     stopping: Option<Task<()>>,
     _mpv_events: Option<Task<()>>,
@@ -51,6 +87,8 @@ impl PlayerWindow {
             mpv: None,
             mpv_id: 0,
             starting: None,
+            next: None,
+            finding_next: None,
             stopping: None,
             _mpv_events: None,
             _ticks: ticks,
@@ -59,12 +97,28 @@ impl PlayerWindow {
 
     /// Plays `item`. A new Item ends the Playback session that plays now, and plays in the
     /// same Player window. Resume is the default: the server starts at the saved position.
-    pub fn play(&mut self, client: Arc<Client>, item: &wire::CatalogItem, cx: &mut Context<Self>) {
+    pub fn play(&mut self, client: Arc<Client>, item: PlayItem, cx: &mut Context<Self>) {
         self.step(Input::End, cx);
-        let runtime = item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0));
-        self.session = Some(Session::new(runtime, client.server_settings()));
+        self.session = Some(Session::new(item.runtime, client.server_settings()));
         self.client = Some(client.clone());
-        let content_id = item.play_content_id.clone().unwrap_or_else(|| item.content_id.clone());
+        self.next = None;
+        // A new Item drops this task, so an older answer never reaches the new session.
+        self.finding_next = item.season.map(|(series_id, season)| {
+            let (client, content_id) = (client.clone(), item.content_id.clone());
+            cx.spawn(async move |this, cx| match client.next_episode(&series_id, season, &content_id).await {
+                Ok(Some(episode)) => {
+                    let next = PlayItem::episode(series_id, episode);
+                    this.update(cx, |this, cx| {
+                        this.next = Some(next);
+                        this.step(Input::NextEpisode, cx);
+                    })
+                    .ok();
+                }
+                Ok(None) => {}
+                Err(err) => eprintln!("silo-omarchy: cannot find the next episode: {err}"),
+            })
+        });
+        let content_id = item.content_id;
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
             let input = match client.start_playback(&content_id, None).await {
@@ -126,6 +180,26 @@ impl PlayerWindow {
             Command::AddSubtitle { url, title, language } => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_subtitle(&url, &title, &language)) {
                     eprintln!("silo-omarchy: cannot add the subtitles {url}: {err}");
+                }
+            }
+            Command::ShowMarkers(markers) => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.show_markers(&markers)) {
+                    eprintln!("silo-omarchy: cannot send the markers to the player: {err}");
+                }
+            }
+            Command::ShowPrompt(label) => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.show_prompt(&label)) {
+                    eprintln!("silo-omarchy: cannot send the skip prompt to the player: {err}");
+                }
+            }
+            Command::Seek(position) => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.seek(position)) {
+                    eprintln!("silo-omarchy: cannot seek to {position}: {err}");
+                }
+            }
+            Command::PlayNext => {
+                if let Some(next) = self.next.take() {
+                    self.play(client, next, cx);
                 }
             }
             Command::ClosePlayer => self.close_mpv(),

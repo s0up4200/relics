@@ -13,6 +13,7 @@ pub mod types;
 pub mod wire;
 
 pub use gpui::http_client::Url;
+use types::Marker;
 pub use types::{Decision, Problem};
 
 use crate::playback::Sample;
@@ -403,7 +404,7 @@ impl Client {
         }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
-        if let Decision::Playable { plan, audio_language, .. } = &mut decision {
+        if let Decision::Playable { plan, audio_language, markers, .. } = &mut decision {
             // The plan URLs are relative to the server origin. Join them below the base URL, which keeps a sub-path.
             let absolute = |url: &str| self.server.url.join(url.trim_start_matches('/')).map(String::from);
             plan.stream.url = absolute(&plan.stream.url).map_err(|_| Error::InvalidUrl)?;
@@ -411,8 +412,55 @@ impl Client {
                 track.url = track.url.as_deref().and_then(|url| absolute(url).ok());
             }
             *audio_language = audio_language_of(version, plan);
+            *markers = self.markers(&version.file_id).await;
         }
         Ok(decision)
+    }
+
+    /// The Markers of a file, in source time. Playback works without them, so a failure gives none.
+    async fn markers(&self, file_id: &str) -> Vec<Marker> {
+        match self.call::<wire::FileMarkers>(Method::GET, &format!("markers/files/{file_id}"), None).await {
+            Ok(markers) => markers
+                .marker_segments
+                .into_iter()
+                .map(|marker| Marker { kind: marker.kind.into(), start: marker.start_seconds, end: marker.end_seconds })
+                .collect(),
+            Err(err) => {
+                eprintln!("silo-omarchy: cannot read the markers of file {file_id}: {err}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The episode that plays after `content_id`, an episode in season `season` of the series: the next
+    /// episode of the season, else the first episode of the next season. It skips an episode with no
+    /// readable file, like the web client.
+    pub async fn next_episode(
+        &self,
+        series_id: &str,
+        season: i64,
+        content_id: &str,
+    ) -> Result<Option<wire::Episode>, Error> {
+        let playable = |episode: &wire::Episode| episode.files.iter().any(|file| file.unreadable != Some(true));
+        let episodes = self.season_episodes(series_id, season).await?;
+        let Some(index) = episodes.iter().position(|episode| episode.content_id == content_id) else {
+            return Ok(None);
+        };
+        if let Some(next) = episodes.into_iter().skip(index + 1).find(playable) {
+            return Ok(Some(next));
+        }
+        match self.season_episodes(series_id, season + 1).await {
+            Ok(episodes) => Ok(episodes.into_iter().find(playable)),
+            Err(Error::Status(404)) => Ok(None),
+            Err(Error::Problem(problem)) if problem.status == 404 => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    // ponytail: reads only the first page; a season with more episodes than one page loses the rest.
+    async fn season_episodes(&self, series_id: &str, season: i64) -> Result<Vec<wire::Episode>, Error> {
+        let path = format!("catalog/series/{series_id}/seasons/{season}/episodes");
+        Ok(self.call::<wire::EpisodeCollection>(Method::GET, &path, None).await?.items)
     }
 
     pub async fn report_progress(&self, session_id: &str, sample: &Sample) -> Result<(), Error> {

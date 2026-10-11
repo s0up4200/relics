@@ -41,6 +41,11 @@ fn fake(start: &'static str) -> (Client, Arc<Mutex<Vec<Seen>>>) {
                     (200, fixture("silo/list_catalog_item_versions_ok.json"))
                 }
                 ("GET", "playback/capabilities") => (200, fixture("silo/playback_capability_available.json")),
+                ("GET", "markers/files/120") => (200, markers()),
+                ("GET", "catalog/series/series:severance/seasons/1/episodes") => {
+                    (200, fixture("silo/list_catalog_item_episodes_ok.json"))
+                }
+                ("GET", "catalog/series/series:severance/seasons/2/episodes") => (200, season_two()),
                 ("POST", "playback/start") => (201, fixture(start)),
                 ("POST", p) if p.ends_with("/progress") => (200, fixture("silo/playback_progress_applied.json")),
                 ("DELETE", _) => (200, fixture("silo/playback_stop_completed.json")),
@@ -62,6 +67,29 @@ fn fake(start: &'static str) -> (Client, Arc<Mutex<Vec<Seen>>>) {
     let client = Client::new(http, server, device, Tokens { access_token: "tok".into(), refresh_token: "ref".into() });
     client.set_profile(Some("p-owner".into()));
     (client, seen)
+}
+
+/// The Markers of file 120: two intros (a cold open and the title sequence) and the credits.
+fn markers() -> String {
+    let mut body: Value = serde_json::from_str(&fixture("silo/get_file_markers_ok.json")).unwrap();
+    body["marker_segments"] = json!([
+        {"kind": "intro", "start_seconds": 0.0, "end_seconds": 12.0},
+        {"kind": "intro", "start_seconds": 95.0, "end_seconds": 140.5},
+        {"kind": "credits", "start_seconds": 2600.0, "end_seconds": 2700.0},
+    ]);
+    body.to_string()
+}
+
+/// Season 2 of the fixture series: episode 1 has only an unreadable file, episode 2 plays.
+fn season_two() -> String {
+    let mut body: Value = serde_json::from_str(&fixture("silo/list_catalog_item_episodes_ok.json")).unwrap();
+    for (index, episode) in body["items"].as_array_mut().unwrap().iter_mut().enumerate() {
+        let number = index + 1;
+        episode["season_number"] = json!(2);
+        episode["content_id"] = json!(format!("episode:severance-s02e0{number}"));
+        episode["files"][0]["unreadable"] = json!(number == 1);
+    }
+    body.to_string()
 }
 
 fn body_of(seen: &Arc<Mutex<Vec<Seen>>>, method: &str, suffix: &str) -> Value {
@@ -185,4 +213,42 @@ fn media_headers_carry_the_token_and_the_profile() {
     assert!(headers.contains(&("Authorization".into(), "Bearer tok".into())));
     assert!(headers.contains(&("X-Profile-Id".into(), "p-owner".into())));
     assert!(headers.contains(&("X-Silo-Device-Id".into(), "6c1f0d3e-0000-4000-8000-000000000001".into())));
+}
+
+#[test]
+fn the_decision_carries_each_marker_of_the_file() {
+    let (client, _) = fake("silo/playback_start_opaque_ids.json");
+    let Decision::Playable { markers, .. } = block_on(client.start_playback("movie:heat-1995", None)).unwrap() else {
+        panic!("not playable");
+    };
+    let marker = |kind, start, end| types::Marker { kind, start, end };
+    assert_eq!(
+        markers,
+        vec![
+            marker(types::MarkerKind::Intro, 0.0, 12.0),
+            marker(types::MarkerKind::Intro, 95.0, 140.5),
+            marker(types::MarkerKind::Credits, 2600.0, 2700.0),
+        ]
+    );
+}
+
+fn next(season: i64, content_id: &str) -> Option<String> {
+    let (client, _) = fake("silo/playback_start_opaque_ids.json");
+    block_on(client.next_episode("series:severance", season, content_id)).unwrap().map(|episode| episode.content_id)
+}
+
+#[test]
+fn the_next_episode_is_the_next_one_in_the_season() {
+    assert_eq!(next(1, "episode:severance-s01e01").as_deref(), Some("episode:severance-s01e02"));
+}
+
+#[test]
+fn after_the_last_episode_of_a_season_the_next_episode_is_the_first_playable_one_of_the_next_season() {
+    assert_eq!(next(1, "episode:severance-s01e02").as_deref(), Some("episode:severance-s02e02"));
+}
+
+#[test]
+fn the_last_episode_of_the_series_has_no_next_episode() {
+    // The server has no season 3.
+    assert_eq!(next(2, "episode:severance-s02e02"), None);
 }

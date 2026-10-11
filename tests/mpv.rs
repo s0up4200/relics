@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use silo_omarchy::api::types::{Marker, MarkerKind};
 use silo_omarchy::mpv::{Player, find_controls};
 use silo_omarchy::playback::Input;
 
@@ -270,4 +271,25 @@ fn an_added_subtitle_shows_and_its_request_has_the_header() {
     assert_eq!(player.property("current-tracks/sub/lang").unwrap(), "eng");
     assert!(stub.requests.lock().unwrap().iter().any(|r| r.path == "/sample.vtt"));
     assert_each_request_has_the_header(&stub);
+}
+
+#[test]
+fn enter_takes_the_skip_prompt() {
+    let (player, rx) = open_with_controls();
+    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
+    player.show_prompt("Skip intro").unwrap();
+    player.command(&["keypress", "ENTER"]).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::Action));
+}
+
+#[test]
+fn seek_moves_the_position_after_the_controller_gets_the_markers() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open_with_controls();
+    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
+    player.show_markers(&[Marker { kind: MarkerKind::Intro, start: -1.5, end: 2.0 }]).unwrap();
+    player.seek(3.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::Position(position) if *position >= 3.0));
 }

@@ -65,3 +65,9 @@ _Avoid_: finished, complete
 **Server setting**:
 A preference that Silo stores for a Profile. Every client that uses the Profile shares it.
 _Avoid_: preference, user setting
+
+**Marker**:
+A time range in a file version that Silo labels `intro`, `credits`, `recap` or `preview`. A file version can have more than one marker of the same kind.
+
+**Skip prompt**:
+The button that the player shows while playback is inside a marker. It offers "Skip intro", "Watch intro" (after an automatic skip), or "Next episode" (when the credits run to the end of the file). The app decides when the prompt shows. The controller only draws it.

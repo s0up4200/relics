@@ -277,7 +277,7 @@ impl LibraryWindow {
             let client = client.clone();
             move |this, _, home::Play(item), cx| {
                 this.player_error = None;
-                this.player.update(cx, |player, cx| player.play(client.clone(), item, cx));
+                this.player.update(cx, |player, cx| player.play(client.clone(), item.into(), cx));
             }
         }));
         let server = client.server().clone();

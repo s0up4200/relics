@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use libmpv2::events::{Event, PropertyData};
 use libmpv2::{Format, Mpv, mpv_end_file_reason};
 
+use crate::api::types::Marker;
 use crate::playback::Input;
 
 pub use libmpv2::Error;
@@ -94,6 +95,25 @@ impl Player {
         self.mpv.command("script-message", &["silo-theme", accent, foreground, background])
     }
 
+    /// Sends the Markers, in player time, to the Lua controller as `kind:start:end,kind:start:end`.
+    pub fn show_markers(&self, markers: &[Marker]) -> Result<(), Error> {
+        let list: Vec<String> = markers
+            .iter()
+            .map(|marker| format!("{}:{}:{}", String::from(marker.kind.clone()), marker.start, marker.end))
+            .collect();
+        self.mpv.command("script-message", &["silo-markers", &list.join(",")])
+    }
+
+    /// Shows the Skip prompt with `label`. An empty label hides it.
+    pub fn show_prompt(&self, label: &str) -> Result<(), Error> {
+        self.mpv.command("script-message", &["silo-prompt", label])
+    }
+
+    /// Seeks to `position`, in player time.
+    pub fn seek(&self, position: f64) -> Result<(), Error> {
+        self.mpv.command("seek", &[&position.to_string(), "absolute"])
+    }
+
     /// Runs one mpv input command, for example `["keypress", "a"]`. The tests use it.
     pub fn command(&self, args: &[&str]) -> Result<(), Error> {
         let (name, args) = args.split_first().expect("a command has a name");
@@ -159,6 +179,7 @@ fn read_events(mpv: &Mpv, on_input: impl Fn(Input)) {
                 _ => continue,
             },
             Some(Ok(Event::ClientMessage(message))) if message == ["silo-ready"] => Input::ControlsReady,
+            Some(Ok(Event::ClientMessage(message))) if message == ["silo-action"] => Input::Action,
             // libmpv2 turns an end of file with an error into an error event. This is how a
             // failed load, such as a 401 on the stream URL, arrives.
             Some(Err(_)) => Input::LoadFailed,
