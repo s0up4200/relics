@@ -6038,14 +6038,17 @@ dependencies = [
  "anyhow",
  "chrono",
  "futures",
+ "gethostname",
  "gpui-kit",
  "gpui-omarchy",
  "gpui-pre",
  "gpui-pre-http-client",
  "gpui-pre-reqwest-client",
  "libmpv2",
+ "oo7",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
