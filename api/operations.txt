@@ -37,3 +37,7 @@ replanPlayback
 syncProgress
 listEffectiveSettings
 updateSettingValue
+listSeriesSeasons
+listSeasonEpisodes
+addToWatchlist
+deleteWatchlistEntry

@@ -594,7 +594,7 @@ impl Client {
     }
 
     // ponytail: reads only the first page; a season with more episodes than one page loses the rest.
-    async fn season_episodes(&self, series_id: &str, season: i64) -> Result<Vec<wire::Episode>, Error> {
+    pub async fn season_episodes(&self, series_id: &str, season: i64) -> Result<Vec<wire::Episode>, Error> {
         let path = format!("catalog/series/{series_id}/seasons/{season}/episodes");
         Ok(self.call::<wire::EpisodeCollection>(Method::GET, &path, None).await?.items)
     }
@@ -819,6 +819,25 @@ impl Client {
         let path = format!("catalog/filters?library_id={library_id}&skip_technical=true");
         Ok(self.call::<wire::CatalogFilters>(Method::GET, &path, None).await?.genres)
     }
+
+    // Detail page (#30).
+
+    /// The detail of an Item. `image_size` is the rung of the Artwork ladder for the artwork URLs.
+    pub async fn item(&self, id: &str, image_size: &str) -> Result<wire::CatalogItemDetail, Error> {
+        self.call(Method::GET, &format!("catalog/items/{id}?image_size={image_size}"), None).await
+    }
+
+    /// The seasons of a series, in the server order, without artwork.
+    pub async fn seasons(&self, series_id: &str) -> Result<Vec<wire::Season>, Error> {
+        let path = format!("catalog/series/{series_id}/seasons?include_artwork=false");
+        Ok(self.call::<wire::SeasonCollection>(Method::GET, &path, None).await?.items)
+    }
+
+    /// Adds the Item to the Watchlist of the Profile, or removes it.
+    pub async fn set_watchlist(&self, item_id: &str, on: bool) -> Result<(), Error> {
+        let method = if on { Method::PUT } else { Method::DELETE };
+        self.call(method, &format!("watchlist/{item_id}"), None).await
+    }
 }
 
 /// The rows of a layout, in layout order, with the items of the matching section. A section that the
@@ -905,7 +924,9 @@ async fn send<T: DeserializeOwned>(
     let mut body = Vec::new();
     response.into_body().read_to_end(&mut body).await.map_err(|_| network())?;
     if status.is_success() {
-        serde_json::from_slice(&body).map_err(|err| Error::Decode(err.to_string()))
+        // A 204 has no body. It decodes as `null`, which is `()`.
+        serde_json::from_slice(if body.is_empty() { b"null" } else { &body })
+            .map_err(|err| Error::Decode(err.to_string()))
     } else if is_problem && let Ok(problem) = serde_json::from_slice::<Problem>(&body) {
         Err(Error::Problem(Problem { retry_after, ..problem }))
     } else {

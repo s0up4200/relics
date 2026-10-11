@@ -4327,6 +4327,40 @@ pub struct RefreshedTokens {
     #[doc = "Refresh token for the next refreshSession"]
     pub refresh_token: ::std::string::String,
 }
+#[doc = "`Season`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct Season {
+    #[doc = "Calendar date, YYYY-MM-DD"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub air_date: ::std::option::Option<::std::string::String>,
+    pub content_id: ::std::string::String,
+    pub episode_count: i64,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub is_specials: ::std::option::Option<bool>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub overview: ::std::option::Option<::std::string::String>,
+    #[doc = "The episode to play next"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub play_content_id: ::std::option::Option<::std::string::String>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_thumbhash: ::std::option::Option<::std::string::String>,
+    #[doc = "Presigned, short-lived"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_url: ::std::option::Option<::std::string::String>,
+    pub season_number: i64,
+    pub title: ::std::string::String,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub user_data: ::std::option::Option<WatchRollup>,
+}
+#[doc = "`SeasonCollection`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct SeasonCollection {
+    #[doc = "The page's items; empty, never null"]
+    pub items: ::std::vec::Vec<Season>,
+    #[doc = "Cursor state; absent for bounded unpaginated collections"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub page: ::std::option::Option<PageInfo>,
+}
 #[doc = "`Section`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct Section {

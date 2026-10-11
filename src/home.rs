@@ -13,8 +13,8 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache};
 
-/// The user pressed p on a card.
-pub struct Play(pub wire::CatalogItem);
+/// The user pressed p on a card, or Play on the detail page.
+pub struct Play(pub crate::player::PlayItem);
 
 /// The user pressed Enter on a card, or clicked it.
 pub struct Open(pub wire::CatalogItem);
@@ -169,7 +169,7 @@ impl Home {
         if let (Focus::Card { row, col }, "p" | "enter") = (self.focus, key) {
             let item = self.sections[row].items[col].clone();
             if key == "p" {
-                cx.emit(Play(item));
+                cx.emit(Play((&item).into()));
             } else {
                 cx.emit(Open(item));
             }
@@ -224,16 +224,8 @@ impl Home {
                 );
                 return art.into_any_element();
             }
-            if wide && let Some(progress) = progress(item) {
-                art = art.child(
-                    div().absolute().inset_0().flex().flex_col().justify_end().p(px(8.)).child(
-                        div()
-                            .h(px(3.))
-                            .rounded_full()
-                            .bg(gpui::hsla(0., 0., 0., 0.45))
-                            .child(div().h_full().w(gpui::relative(progress)).rounded_full().bg(t.accent)),
-                    ),
-                );
+            if wide && let Some(progress) = progress(item.position_seconds, item.duration_seconds) {
+                art = art.child(progress_bar(progress, t.accent));
             }
             div()
                 .w(px(width))
@@ -354,9 +346,20 @@ pub(crate) fn artwork_image(url: Option<String>, thumb: Option<Arc<RenderImage>>
 }
 
 /// The watched part of an Item, from 0 to 1, when the user started it.
-fn progress(item: &wire::CatalogItem) -> Option<f32> {
-    let (position, duration) = (item.position_seconds?, item.duration_seconds?);
+pub(crate) fn progress(position: Option<f64>, duration: Option<f64>) -> Option<f32> {
+    let (position, duration) = (position?, duration?);
     (position > 0. && duration > 0.).then(|| (position / duration).min(1.) as f32)
+}
+
+/// The progress bar inside the artwork of a 16:9 card.
+pub(crate) fn progress_bar(progress: f32, accent: gpui::Hsla) -> gpui::Div {
+    div().absolute().inset_0().flex().flex_col().justify_end().p(px(8.)).child(
+        div()
+            .h(px(3.))
+            .rounded_full()
+            .bg(gpui::hsla(0., 0., 0., 0.45))
+            .child(div().h_full().w(gpui::relative(progress)).rounded_full().bg(accent)),
+    )
 }
 
 /// The line below the title: the series with the season and episode, or the year.

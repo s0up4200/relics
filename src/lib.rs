@@ -1,6 +1,7 @@
 pub mod api;
 pub mod artwork;
 pub mod browse;
+pub mod detail;
 pub mod grid;
 pub mod home;
 pub mod library;

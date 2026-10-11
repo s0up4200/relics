@@ -167,7 +167,7 @@ impl Grid {
             };
         };
         match key {
-            "p" => cx.emit(Play(item.clone())),
+            "p" => cx.emit(Play(item.into())),
             "enter" => cx.emit(Open(item.clone())),
             _ => match move_focus(self.focus, key, items.len(), self.columns) {
                 Move::To(index) => {
@@ -236,7 +236,7 @@ impl Render for Grid {
         let t = cx.omarchy().clone();
         // The grid fills the page between the sidebar and the 40 px page margins.
         let viewport = window.viewport_size().width.to_f64() as f32;
-        self.columns = columns(viewport - crate::pages::sidebar_width(viewport) - 80.);
+        self.columns = columns(viewport - crate::pages::sidebar_width(viewport, false) - 80.);
         let cards: Vec<_> = self.paging.items.iter().enumerate().map(|(i, item)| self.card(i, item, cx)).collect();
         let status = match (&self.error, &self.loading) {
             (Some(error), _) => Some(

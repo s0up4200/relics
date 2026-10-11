@@ -39,6 +39,10 @@ _Avoid_: Shelf, carousel, rail
 A Home section that the server marks as featured. The Library window shows it as a hero above the other rows.
 _Avoid_: Banner
 
+**Person**:
+A cast or crew member that the Silo server knows, with the titles that they took part in.
+_Avoid_: Actor, as the general name. Actor is one role that a Person can have.
+
 **Artwork ladder**:
 The fixed set of widths at which the Silo server caches each artwork type. `image_size` picks one rung for a whole response.
 _Avoid_: Variants, resolutions

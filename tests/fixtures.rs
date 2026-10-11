@@ -50,6 +50,7 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
         ProfileVerification,
         ProgressSyncBatchResult,
         RefreshedTokens,
+        SeasonCollection,
         Section,
         SectionCollection,
         SectionLayout,

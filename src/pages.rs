@@ -1,6 +1,6 @@
 //! The pages of the active Profile: the sidebar, the page that shows, and the back history. Esc or Backspace
 //! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows. The sidebar
-//! shrinks to an icon rail when the window is narrow.
+//! shrinks to an icon rail when the window is narrow and on the detail page.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,15 +14,16 @@ use gpui::{
 use gpui_omarchy::{ActiveTheme, keycap};
 
 use crate::api::{Client, wire};
+use crate::detail::{self, Detail};
 use crate::home::{Home, Open, Play, Rows};
 use crate::library_page::{LibraryPage, is_shows};
 
 /// Below this window width, the sidebar is an icon rail.
 const NARROW: f32 = 1100.;
 
-/// The width of the sidebar in a window that is `viewport` pixels wide.
-pub fn sidebar_width(viewport: f32) -> f32 {
-    if viewport < NARROW { 64. } else { 240. }
+/// The width of the sidebar in a window that is `viewport` pixels wide, on the detail page or another page.
+pub fn sidebar_width(viewport: f32, detail: bool) -> f32 {
+    if detail || viewport < NARROW { 64. } else { 240. }
 }
 
 /// The sidebar row that a shortcut key opens: 1 is Home (row 0), 2 the first Movies library and 3 the first
@@ -41,6 +42,7 @@ pub fn shortcut(key: &str, libraries: &[wire::UserLibrary]) -> Option<usize> {
 pub enum Page {
     Home(Entity<Home>),
     Library(Entity<LibraryPage>),
+    Detail(Entity<Detail>),
 }
 
 impl Page {
@@ -51,6 +53,10 @@ impl Page {
                 cx.notify();
             }),
             Page::Library(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
+            Page::Detail(page) => page.update(cx, |page, cx| {
+                page.active = active;
+                cx.notify();
+            }),
         }
     }
 
@@ -58,6 +64,7 @@ impl Page {
         match self {
             Page::Home(home) => home.into_any_element(),
             Page::Library(page) => page.into_any_element(),
+            Page::Detail(page) => page.into_any_element(),
         }
     }
 }
@@ -130,9 +137,14 @@ impl Pages {
         self._events.push(cx.subscribe(view, |this, _, Open(item), cx| this.open_item(item, cx)));
     }
 
-    /// Opens the detail page of an Item. For an episode, the page of its series with the season.
-    // ponytail: the detail page is #30; until then Enter on a card does nothing.
-    fn open_item(&mut self, _item: &wire::CatalogItem, _cx: &mut Context<Self>) {}
+    /// Opens the detail page of an Item. For an episode or a season, the page of its series with the season.
+    fn open_item(&mut self, item: &wire::CatalogItem, cx: &mut Context<Self>) {
+        let (id, season) = detail::target(item);
+        let client = self.client.clone();
+        let page = cx.new(|cx| Detail::new(client, id, season, cx));
+        cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
+        self.open(Page::Detail(page), cx);
+    }
 
     /// Shows `page` and puts the page that showed on the back history.
     pub fn open(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -180,14 +192,15 @@ impl Pages {
         self.show(page, cx);
     }
 
-    /// The sidebar row of the page that shows.
+    /// The sidebar row of the page that shows. A detail page has the row of the page that opened it.
     fn current_row(&self, cx: &gpui::App) -> usize {
-        match &self.page {
-            Page::Library(page) => {
+        let page = std::iter::once(&self.page).chain(self.back.iter().rev()).find(|p| !matches!(p, Page::Detail(_)));
+        match page {
+            Some(Page::Library(page)) => {
                 let id = &page.read(cx).library.id;
                 self.libraries.iter().position(|l| l.id == *id).map_or(0, |i| i + 1)
             }
-            Page::Home(_) => 0,
+            _ => 0,
         }
     }
 
@@ -195,6 +208,7 @@ impl Pages {
         match self.page.clone() {
             Page::Home(home) => home.update(cx, |home, cx| home.key(key, cx)),
             Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
+            Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
         }
     }
 
@@ -309,7 +323,7 @@ impl Render for Pages {
             .text_color(t.foreground)
             .font_family(t.font.clone())
             .text_size(px(14.))
-            .child(self.sidebar(sidebar_width(viewport) < 240., cx))
+            .child(self.sidebar(sidebar_width(viewport, matches!(self.page, Page::Detail(_))) < 240., cx))
             .child(div().flex_1().min_w_0().h_full().child(self.page.clone().into_any_element()))
     }
 }
@@ -334,8 +348,9 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_window_shrinks_the_sidebar_to_the_rail() {
-        assert_eq!(sidebar_width(1400.), 240.);
-        assert_eq!(sidebar_width(960.), 64.);
+    fn a_narrow_window_and_the_detail_page_shrink_the_sidebar_to_the_rail() {
+        assert_eq!(sidebar_width(1400., false), 240.);
+        assert_eq!(sidebar_width(960., false), 64.);
+        assert_eq!(sidebar_width(1400., true), 64.);
     }
 }

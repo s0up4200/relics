@@ -25,17 +25,40 @@ pub struct PlayItem {
     runtime: Option<f64>,
     /// The series id and the season number of an episode. The next episode lookup needs them.
     season: Option<(String, i64)>,
+    /// Start at the beginning instead of the saved position.
+    pub start_over: bool,
 }
 
 impl From<&wire::CatalogItem> for PlayItem {
     /// A series or season card plays its `play_content_id`, an episode.
-    // ponytail: a series card has no season number, so its episode has no next episode. The detail
-    // page (#30) can play the episode with `PlayItem::episode` instead.
+    // ponytail: a series card has no season number, so p on it plays an episode with no next episode. Play
+    // on the detail page has the season.
     fn from(item: &wire::CatalogItem) -> Self {
         Self {
             content_id: item.play_content_id.clone().unwrap_or_else(|| item.content_id.clone()),
             runtime: item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0)),
             season: item.series_id.clone().zip(item.season_number),
+            start_over: false,
+        }
+    }
+}
+
+impl From<&wire::CatalogItemDetail> for PlayItem {
+    /// A series plays its `play_content_id`, the Next up episode, in season `play_season_number`.
+    fn from(item: &wire::CatalogItemDetail) -> Self {
+        match &item.play_content_id {
+            Some(episode) if item.type_ == "series" => Self {
+                content_id: episode.clone(),
+                runtime: None,
+                season: item.play_season_number.map(|season| (item.content_id.clone(), season)),
+                start_over: false,
+            },
+            _ => Self {
+                content_id: item.content_id.clone(),
+                runtime: item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0)),
+                season: item.series_id.clone().zip(item.season_number),
+                start_over: false,
+            },
         }
     }
 }
@@ -46,7 +69,13 @@ impl PlayItem {
             content_id: episode.content_id,
             runtime: Some(episode.runtime as f64 * 60.0),
             season: Some((series_id, episode.season_number)),
+            start_over: false,
         }
+    }
+
+    /// Where playback starts: `None` resumes at the saved position.
+    pub fn start_position(&self) -> Option<f64> {
+        self.start_over.then_some(0.)
     }
 }
 
@@ -111,6 +140,7 @@ impl PlayerWindow {
         self.client = Some(client.clone());
         self.next = None;
         // A new Item drops this task, so an older answer never reaches the new session.
+        let start = item.start_position();
         self.finding_next = item.season.map(|(series_id, season)| {
             let (client, content_id) = (client.clone(), item.content_id.clone());
             cx.spawn(async move |this, cx| match client.next_episode(&series_id, season, &content_id).await {
@@ -129,7 +159,7 @@ impl PlayerWindow {
         let content_id = item.content_id;
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
-            let input = match client.start_playback(&content_id, None).await {
+            let input = match client.start_playback(&content_id, start).await {
                 Ok(decision) => Input::Started { decision, access: client.media_access() },
                 Err(err) => Input::StartFailed(err.to_string()),
             };
@@ -302,4 +332,41 @@ fn hex(color: Hsla) -> String {
     let Rgba { r, g, b, .. } = color.into();
     let byte = |c: f32| (c * 255.0).round() as u8;
     format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlayItem;
+    use crate::api::wire;
+
+    fn detail(fields: serde_json::Value) -> wire::CatalogItemDetail {
+        let mut item: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/get_catalog_item_ok.json")).unwrap();
+        item.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(item).unwrap()
+    }
+
+    #[test]
+    fn a_series_page_plays_its_next_up_episode_with_the_season_so_that_next_episode_works() {
+        let series = detail(serde_json::json!({
+            "content_id": "series:severance", "type": "series",
+            "play_content_id": "episode:severance-s01e02", "play_season_number": 1,
+        }));
+        let item = PlayItem::from(&series);
+        assert_eq!(item.content_id, "episode:severance-s01e02");
+        assert_eq!(item.season, Some(("series:severance".into(), 1)));
+        assert!(!item.start_over);
+    }
+
+    #[test]
+    fn a_movie_page_plays_the_movie_and_start_over_starts_at_zero() {
+        let movie = detail(serde_json::json!({"content_id": "movie:heat-1995", "runtime": 170}));
+        let item = PlayItem::from(&movie);
+        assert_eq!(
+            (item.content_id.as_str(), item.runtime, item.season.clone()),
+            ("movie:heat-1995", Some(10200.), None)
+        );
+        assert_eq!(item.start_position(), None, "the server resumes at the saved position");
+        assert_eq!(PlayItem { start_over: true, ..item }.start_position(), Some(0.));
+    }
 }

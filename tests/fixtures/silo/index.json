@@ -1,6 +1,47 @@
 {
   "fixtures": [
     {
+      "name": "add_to_watchlist_not_found",
+      "operation_id": "addToWatchlist",
+      "scenario": "An item the viewer may not see cannot be added.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/watchlist/series:hidden",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 404,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "add_to_watchlist_not_found.json"
+    },
+    {
+      "name": "add_to_watchlist_profile_header_required",
+      "operation_id": "addToWatchlist",
+      "scenario": "A profile-scoped mutation called without X-Profile-Id.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/watchlist/series:new",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "add_to_watchlist_profile_header_required.json"
+    },
+    {
       "name": "authentication_required",
       "operation_id": null,
       "scenario": "An authenticated operation called without a credential.",
@@ -53,6 +94,27 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/DeviceLoginCancel",
       "body_file": "cancel_device_login_ok.json"
+    },
+    {
+      "name": "delete_watchlist_entry_locked_profile",
+      "operation_id": "deleteWatchlistEntry",
+      "scenario": "A PIN-locked profile without X-Profile-Token.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v2/watchlist/series:c",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-locked"
+        }
+      },
+      "expected_status": 403,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "delete_watchlist_entry_locked_profile.json"
     },
     {
       "name": "deprecated_problem",
@@ -925,6 +987,166 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/ProfileCollection",
       "body_file": "list_profiles_ok.json"
+    },
+    {
+      "name": "list_season_episodes_authentication_required",
+      "operation_id": "listSeasonEpisodes",
+      "scenario": "Season episodes without a credential.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons/1/episodes"
+      },
+      "expected_status": 401,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_season_episodes_authentication_required.json"
+    },
+    {
+      "name": "list_season_episodes_negative_number",
+      "operation_id": "listSeasonEpisodes",
+      "scenario": "A negative season number.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons/-1/episodes",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_season_episodes_negative_number.json"
+    },
+    {
+      "name": "list_season_episodes_ok",
+      "operation_id": "listSeasonEpisodes",
+      "scenario": "The episodes of one season of a series by number.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons/1/episodes",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/EpisodeCollection",
+      "body_file": "list_season_episodes_ok.json"
+    },
+    {
+      "name": "list_series_seasons_authentication_required",
+      "operation_id": "listSeriesSeasons",
+      "scenario": "Seasons without a credential.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons"
+      },
+      "expected_status": 401,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_series_seasons_authentication_required.json"
+    },
+    {
+      "name": "list_series_seasons_invalid_artwork",
+      "operation_id": "listSeriesSeasons",
+      "scenario": "An invalid artwork boolean is rejected.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons?include_artwork=invalid",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_series_seasons_invalid_artwork.json"
+    },
+    {
+      "name": "list_series_seasons_invalid_image_size",
+      "operation_id": "listSeriesSeasons",
+      "scenario": "An image size outside the enum.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons?image_size=huge",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_series_seasons_invalid_image_size.json"
+    },
+    {
+      "name": "list_series_seasons_ok",
+      "operation_id": "listSeriesSeasons",
+      "scenario": "The seasons of a series with the viewer's rollups.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/SeasonCollection",
+      "body_file": "list_series_seasons_ok.json"
+    },
+    {
+      "name": "list_series_seasons_without_artwork",
+      "operation_id": "listSeriesSeasons",
+      "scenario": "Text-only season rows preserve metadata and omit poster URLs and thumbhashes.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/series/series:severance/seasons?include_artwork=false",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/SeasonCollection",
+      "body_file": "list_series_seasons_without_artwork.json"
     },
     {
       "name": "login_account_required",
