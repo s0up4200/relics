@@ -10,6 +10,7 @@ pub mod mpv;
 pub mod pages;
 pub mod playback;
 pub mod profiles;
+pub mod search;
 pub mod player;
 pub mod secrets;
 pub mod settings;

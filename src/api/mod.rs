@@ -838,6 +838,16 @@ impl Client {
         let method = if on { Method::PUT } else { Method::DELETE };
         self.call(method, &format!("watchlist/{item_id}"), None).await
     }
+
+    // Search (#32).
+
+    /// The first 20 people with movie or series credits whose name matches `text`.
+    pub async fn people(&self, text: &str) -> Result<Vec<wire::Person>, Error> {
+        let mut url = Url::parse("query:").map_err(|_| Error::InvalidUrl)?;
+        url.query_pairs_mut().append_pair("q", text).append_pair("limit", "20").append_pair("media_scope", "video");
+        let path = format!("catalog/people?{}", url.query().unwrap_or_default());
+        Ok(self.call::<wire::PersonCollection>(Method::GET, &path, None).await?.items)
+    }
 }
 
 /// The rows of a layout, in layout order, with the items of the matching section. A section that the

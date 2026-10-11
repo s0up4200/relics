@@ -16,6 +16,7 @@ use crate::artwork::{self, ArtworkCache};
 use crate::grid::Move;
 use crate::home::{Play, artwork_image, progress, progress_bar};
 use crate::player::PlayItem;
+use crate::search::OpenPerson;
 
 /// The rung of the Artwork ladder of the detail page.
 const IMAGE_SIZE: &str = "large";
@@ -53,6 +54,7 @@ pub struct Detail {
 }
 
 impl EventEmitter<Play> for Detail {}
+impl EventEmitter<OpenPerson> for Detail {}
 
 impl Detail {
     pub fn new(client: Arc<Client>, id: String, season: Option<i64>, cx: &mut Context<Self>) -> Self {
@@ -158,6 +160,7 @@ impl Detail {
             actions: self.item.as_ref().map_or(0, |item| actions(item).len()),
             seasons: self.seasons.len(),
             season: self.season,
+            cast: self.item.as_ref().filter(|item| item.type_ != "series").map_or(0, |item| item.cast.len()),
             episodes: self.episodes.len(),
             columns: self.columns,
         }
@@ -172,6 +175,7 @@ impl Detail {
             (Focus::Action(i), "enter") => self.act(actions(item)[i], cx),
             (Focus::Season(i), "enter") => self.choose_season(i, cx),
             (Focus::Episode(i), "enter" | "p") => self.play_episode(i, cx),
+            (Focus::Cast(i), "enter") => self.open_person(i, cx),
             (_, "p") => cx.emit(Play(item.into())),
             (focus, key) => match self.rows().step(focus, key) {
                 Step::To(focus) => {
@@ -180,7 +184,7 @@ impl Detail {
                     // the focused card below the window.
                     self.scroll.scroll_to_item(match focus {
                         Focus::Action(_) => 0,
-                        Focus::Season(_) => 1,
+                        Focus::Season(_) | Focus::Cast(_) => 1,
                         Focus::Episode(_) => 2,
                     });
                 }
@@ -241,6 +245,16 @@ impl Detail {
         self.focus = Focus::Episode(index);
         if let Some(episode) = self.episodes.get(index) {
             cx.emit(Play(PlayItem::episode(self.id.clone(), episode.clone())));
+        }
+        cx.notify();
+    }
+
+    /// Opens the Person grid of a cast member that the server knows.
+    fn open_person(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.focus = Focus::Cast(index);
+        let credit = self.item.as_ref().and_then(|item| item.cast.get(index));
+        if let Some((id, name)) = credit.and_then(|c| Some((c.person_id.clone()?, c.name.clone()))) {
+            cx.emit(OpenPerson { id, name });
         }
         cx.notify();
     }
@@ -402,12 +416,15 @@ impl Detail {
     fn cast(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
         let cards = item.cast.iter().enumerate().map(|(i, credit)| {
+            let focused = self.active && self.focus == Focus::Cast(i);
             div()
+                .id(("detail-cast", i))
                 .w(px(110.))
                 .flex_none()
                 .flex()
                 .flex_col()
                 .gap(px(4.))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_person(i, cx)))
                 .child(
                     div()
                         .w(px(110.))
@@ -415,9 +432,17 @@ impl Detail {
                         .rounded(px(10.))
                         .overflow_hidden()
                         .bg(t.surface)
+                        .border_2()
+                        .border_color(if focused { t.accent } else { gpui::transparent_black() })
                         .child(artwork_image(self.url(&credit.photo_url), self.thumb(i + 2))),
                 )
-                .child(div().text_size(px(13.)).text_color(t.foreground).truncate().child(credit.name.clone()))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(if focused { t.bright } else { t.foreground })
+                        .truncate()
+                        .child(credit.name.clone()),
+                )
                 .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(credit.character.clone()))
         });
         div()
@@ -507,12 +532,13 @@ pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
     actions
 }
 
-/// The focused control: a hero button, a season pill or an episode card, by index.
+/// The focused control: a hero button, a season pill, an episode card or a cast card, by index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Action(usize),
     Season(usize),
     Episode(usize),
+    Cast(usize),
 }
 
 /// Where a key takes the focus.
@@ -533,6 +559,8 @@ pub struct Rows {
     /// The index of the chosen season.
     pub season: usize,
     pub episodes: usize,
+    /// The cast cards of a movie.
+    pub cast: usize,
     /// The columns of the episode grid.
     pub columns: usize,
 }
@@ -550,10 +578,13 @@ impl Rows {
         match focus {
             Focus::Action(_) if down && self.seasons > 0 => Step::To(Focus::Season(self.season)),
             Focus::Action(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
+            Focus::Action(_) if down && self.cast > 0 => Step::To(Focus::Cast(0)),
             Focus::Action(i) => along(i, self.actions, Focus::Action),
             Focus::Season(_) if up => Step::To(Focus::Action(0)),
             Focus::Season(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
             Focus::Season(i) => along(i, self.seasons, Focus::Season),
+            Focus::Cast(_) if up => Step::To(Focus::Action(0)),
+            Focus::Cast(i) => along(i, self.cast, Focus::Cast),
             Focus::Episode(i) => match crate::grid::move_focus(i, key, self.episodes, self.columns) {
                 Move::To(i) => Step::To(Focus::Episode(i)),
                 Move::OutTop if self.seasons > 0 => Step::To(Focus::Season(self.season)),
@@ -644,7 +675,7 @@ mod tests {
     #[test]
     fn hjkl_moves_between_the_buttons_the_seasons_and_the_episode_grid() {
         // 3 buttons, 2 seasons with season 1 chosen, 5 episodes in 2 columns.
-        let rows = Rows { actions: 3, seasons: 2, season: 1, episodes: 5, columns: 2 };
+        let rows = Rows { actions: 3, seasons: 2, season: 1, episodes: 5, cast: 0, columns: 2 };
         let to = |focus| Step::To(focus);
         assert_eq!(rows.step(Focus::Action(0), "l"), to(Focus::Action(1)));
         assert_eq!(rows.step(Focus::Action(2), "right"), Step::Stay);
@@ -657,10 +688,22 @@ mod tests {
         assert_eq!(rows.step(Focus::Episode(1), "up"), to(Focus::Season(1)));
         assert_eq!(rows.step(Focus::Episode(2), "h"), Step::OutLeft);
         assert_eq!(rows.step(Focus::Action(0), "k"), Step::Stay);
-        let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, columns: 4 };
+        let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, cast: 0, columns: 4 };
         assert_eq!(movie.step(Focus::Action(1), "j"), Step::Stay);
         let loading = Rows { episodes: 0, ..rows };
         assert_eq!(loading.step(Focus::Season(0), "j"), Step::Stay);
+    }
+
+    #[test]
+    fn hjkl_moves_between_the_buttons_and_the_cast_of_a_movie() {
+        let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, cast: 3, columns: 4 };
+        let to = |focus| Step::To(focus);
+        assert_eq!(movie.step(Focus::Action(1), "j"), to(Focus::Cast(0)));
+        assert_eq!(movie.step(Focus::Cast(0), "l"), to(Focus::Cast(1)));
+        assert_eq!(movie.step(Focus::Cast(2), "right"), Step::Stay);
+        assert_eq!(movie.step(Focus::Cast(0), "h"), Step::OutLeft);
+        assert_eq!(movie.step(Focus::Cast(1), "k"), to(Focus::Action(0)));
+        assert_eq!(movie.step(Focus::Cast(1), "j"), Step::Stay);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The pages of the active Profile: the sidebar, the page that shows, and the back history. Esc or Backspace
-//! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows. The sidebar
-//! shrinks to an icon rail when the window is narrow and on the detail page.
+//! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows, and / opens
+//! Search. The sidebar shrinks to an icon rail when the window is narrow and on the detail page.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use crate::api::{Client, wire};
 use crate::detail::{self, Detail};
 use crate::home::{Home, Open, Play, Rows};
 use crate::library_page::{LibraryPage, is_shows};
+use crate::search::{OpenPerson, PersonPage, Search};
 
 /// Below this window width, the sidebar is an icon rail.
 const NARROW: f32 = 1100.;
@@ -43,6 +44,8 @@ pub enum Page {
     Home(Entity<Home>),
     Library(Entity<LibraryPage>),
     Detail(Entity<Detail>),
+    Search(Entity<Search>),
+    Person(Entity<PersonPage>),
 }
 
 impl Page {
@@ -57,6 +60,8 @@ impl Page {
                 page.active = active;
                 cx.notify();
             }),
+            Page::Search(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
+            Page::Person(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
         }
     }
 
@@ -65,6 +70,8 @@ impl Page {
             Page::Home(home) => home.into_any_element(),
             Page::Library(page) => page.into_any_element(),
             Page::Detail(page) => page.into_any_element(),
+            Page::Search(page) => page.into_any_element(),
+            Page::Person(page) => page.into_any_element(),
         }
     }
 }
@@ -80,6 +87,8 @@ pub struct Pages {
     back: Vec<Page>,
     /// The page of each Library that the user opened, so that its sort and filters stay while the app runs.
     library_pages: HashMap<String, Entity<LibraryPage>>,
+    /// The Search page, so that the text and the results stay while the app runs.
+    search: Option<Entity<Search>>,
     /// The focused sidebar row, while the sidebar has the keyboard focus.
     sidebar: Option<usize>,
     focus_handle: FocusHandle,
@@ -100,12 +109,13 @@ impl Pages {
             page: Page::Home(home.clone()),
             back: Vec::new(),
             library_pages: HashMap::new(),
+            search: None,
             sidebar: None,
             focus_handle: cx.focus_handle(),
             _libraries: Task::ready(()),
             _events: Vec::new(),
         };
-        pages.listen(&home, cx);
+        pages.listen(&home, window, cx);
         pages.page.set_active(true, cx);
         pages.load_libraries(cx);
         pages.focus(window, cx);
@@ -132,18 +142,64 @@ impl Pages {
         });
     }
 
-    fn listen<T: EventEmitter<Play> + EventEmitter<Open>>(&mut self, view: &Entity<T>, cx: &mut Context<Self>) {
+    fn listen<T: EventEmitter<Play> + EventEmitter<Open>>(
+        &mut self,
+        view: &Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self._events.push(cx.subscribe(view, |_, _, Play(item), cx| cx.emit(Play(item.clone()))));
-        self._events.push(cx.subscribe(view, |this, _, Open(item), cx| this.open_item(item, cx)));
+        self._events
+            .push(cx.subscribe_in(view, window, |this, _, Open(item), window, cx| this.open_item(item, window, cx)));
     }
 
     /// Opens the detail page of an Item. For an episode or a season, the page of its series with the season.
-    fn open_item(&mut self, item: &wire::CatalogItem, cx: &mut Context<Self>) {
+    fn open_item(&mut self, item: &wire::CatalogItem, window: &mut Window, cx: &mut Context<Self>) {
         let (id, season) = detail::target(item);
         let client = self.client.clone();
         let page = cx.new(|cx| Detail::new(client, id, season, cx));
         cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
+        cx.subscribe_in(&page, window, |this, _, person, window, cx| this.open_person(person, window, cx)).detach();
         self.open(Page::Detail(page), cx);
+    }
+
+    /// Opens the Person grid.
+    fn open_person(&mut self, person: &OpenPerson, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let page = cx.new(|cx| PersonPage::new(client, person, window, cx));
+        // The page can live in the back history after a sidebar move, so its subscriptions go with it.
+        cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
+        cx.subscribe_in(&page, window, |this, _, Open(item), window, cx| this.open_item(item, window, cx)).detach();
+        self.open(Page::Person(page), cx);
+    }
+
+    /// The Search page, made the first time, with the keyboard focus in the field.
+    fn search_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Search> {
+        let search =
+            match &self.search {
+                Some(search) => search.clone(),
+                None => {
+                    let client = self.client.clone();
+                    let search = cx.new(|cx| Search::new(client, cx));
+                    self.listen(&search, window, cx);
+                    self._events.push(cx.subscribe_in(&search, window, |this, _, person, window, cx| {
+                        this.open_person(person, window, cx)
+                    }));
+                    self.search = Some(search.clone());
+                    search
+                }
+            };
+        search.update(cx, |search, cx| search.focus_field(cx));
+        search
+    }
+
+    /// Shows the Search page with the keyboard focus in the field.
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let search = self.search_page(window, cx);
+        match &self.page {
+            Page::Search(_) => self.page.set_active(true, cx),
+            _ => self.open(Page::Search(search), cx),
+        }
     }
 
     /// Shows `page` and puts the page that showed on the back history.
@@ -168,9 +224,15 @@ impl Pages {
         true
     }
 
+    /// The sidebar row of Search, below the Libraries.
+    fn search_row(&self) -> usize {
+        self.libraries.len() + 1
+    }
+
     /// Opens a sidebar row (0 is Home) and clears the back history. The keyboard focus goes to the page.
     fn open_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let page = match row.checked_sub(1).and_then(|i| self.libraries.get(i)).cloned() {
+            None if row == self.search_row() => Page::Search(self.search_page(window, cx)),
             None => Page::Home(self.home.clone()),
             Some(library) => {
                 let id = library.id.to_string();
@@ -179,7 +241,7 @@ impl Pages {
                     None => {
                         let client = self.client.clone();
                         let page = cx.new(|cx| LibraryPage::new(client, library, window, cx));
-                        self.listen(&page, cx);
+                        self.listen(&page, window, cx);
                         self.library_pages.insert(id, page.clone());
                         page
                     }
@@ -192,10 +254,12 @@ impl Pages {
         self.show(page, cx);
     }
 
-    /// The sidebar row of the page that shows. A detail page has the row of the page that opened it.
+    /// The sidebar row of the page that shows. A detail page or a Person grid has the row of the page that
+    /// opened it.
     fn current_row(&self, cx: &gpui::App) -> usize {
-        let page = std::iter::once(&self.page).chain(self.back.iter().rev()).find(|p| !matches!(p, Page::Detail(_)));
-        match page {
+        let mut pages = std::iter::once(&self.page).chain(self.back.iter().rev());
+        match pages.find(|p| !matches!(p, Page::Detail(_) | Page::Person(_))) {
+            Some(Page::Search(_)) => self.search_row(),
             Some(Page::Library(page)) => {
                 let id = &page.read(cx).library.id;
                 self.libraries.iter().position(|l| l.id == *id).map_or(0, |i| i + 1)
@@ -204,18 +268,29 @@ impl Pages {
         }
     }
 
-    fn page_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Gives a key to the page. `typed` is the text that the key types, for the search field.
+    fn page_key(&mut self, key: &str, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.page.clone() {
             Page::Home(home) => home.update(cx, |home, cx| home.key(key, cx)),
             Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
+            Page::Search(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
+            Page::Person(page) => page.update(cx, |page, cx| page.key(key, cx)),
         }
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        let used = (self.sidebar.is_none() && self.page_key(key, window, cx))
+        let keystroke = &event.keystroke;
+        let key = keystroke.key.as_str();
+        let m = keystroke.modifiers;
+        let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt && !m.platform);
+        let used = (self.sidebar.is_none() && self.page_key(key, typed, window, cx))
             || match (self.sidebar, key) {
+                (_, "/") => {
+                    self.sidebar = None;
+                    self.open_search(window, cx);
+                    true
+                }
                 (_, key) if let Some(row) = shortcut(key, &self.libraries) => {
                     self.open_row(row, window, cx);
                     true
@@ -230,7 +305,7 @@ impl Pages {
                     true
                 }
                 (Some(row), "j" | "down") => {
-                    self.sidebar = Some((row + 1).min(self.libraries.len()));
+                    self.sidebar = Some((row + 1).min(self.search_row()));
                     true
                 }
                 (Some(row), "k" | "up") => {
@@ -257,9 +332,12 @@ impl Pages {
     fn sidebar(&self, rail: bool, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
         let current = self.current_row(cx);
-        let names = std::iter::once("Home".to_string()).chain(self.libraries.iter().map(|l| l.name.clone()));
+        let names = std::iter::once("Home".to_string())
+            .chain(self.libraries.iter().map(|l| l.name.clone()))
+            .chain(["Search".to_string()]);
         let rows = names.enumerate().map(|(row, name)| {
             let key = ["1", "2", "3"].into_iter().find(|key| shortcut(key, &self.libraries) == Some(row));
+            let key = key.or((row == self.search_row()).then_some("/"));
             let label = if rail { name.chars().next().map(String::from).unwrap_or_default() } else { name };
             div()
                 .id(("sidebar", row))
