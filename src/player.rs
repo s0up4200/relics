@@ -220,7 +220,7 @@ impl PlayerWindow {
     /// Reads the title of the Item and downloads its poster to the Artwork cache, for MPRIS.
     fn describe(&self, client: Arc<Client>, content_id: String, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            let item = match client.item(&content_id, artwork::image_size(MPRIS_POSTER_WIDTH, 1.0)).await {
+            let item = match client.item(&content_id, artwork::Rung::card(MPRIS_POSTER_WIDTH, 1.0)).await {
                 Ok(item) => item,
                 Err(err) => return eprintln!("silo-omarchy: cannot read {content_id} for MPRIS: {err}"),
             };

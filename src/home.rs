@@ -11,7 +11,7 @@ use gpui::{
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, HomeSection, wire};
-use crate::artwork::{self, ArtworkCache};
+use crate::artwork::{self, ArtworkCache, Rung};
 
 /// The user pressed p on a card, or Play on the detail page.
 pub struct Play(pub crate::player::PlayItem);
@@ -44,7 +44,7 @@ pub struct Home {
     thumbs: Vec<Vec<Option<Arc<RenderImage>>>>,
     artwork: Entity<ArtworkCache>,
     /// The rung of the Artwork ladder of the loaded list.
-    image_size: &'static str,
+    image_size: Rung,
     _loading: Task<()>,
     _scale: Subscription,
 }
@@ -83,8 +83,8 @@ impl Home {
     pub fn new(client: Arc<Client>, rows: Rows, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // A larger scale loads the list again only when the rung goes up.
         let scale = cx.observe_window_bounds(window, |this, window, cx| {
-            let size = artwork::image_size(artwork::HOME_CARD_WIDTH, window.scale_factor());
-            if artwork::is_larger(size, this.image_size) {
+            let size = Rung::home(window.scale_factor());
+            if size > this.image_size {
                 this.image_size = size;
                 this.load(cx);
             }
@@ -101,7 +101,7 @@ impl Home {
             sections: Vec::new(),
             thumbs: Vec::new(),
             artwork: artwork::global(cx),
-            image_size: artwork::image_size(artwork::HOME_CARD_WIDTH, window.scale_factor()),
+            image_size: Rung::home(window.scale_factor()),
             status: Some("Loading…".into()),
             failed: false,
             focus: Focus::Outside,

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response};
-use silo_omarchy::artwork;
+use silo_omarchy::artwork::{self, Rung};
 
 fn empty_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("silo-omarchy-test-artwork-{name}-{}", std::process::id()));
@@ -114,15 +114,45 @@ fn prune_deletes_the_least_recently_used_files_and_left_over_temp_files() {
 
 #[test]
 fn home_uses_small_at_scale_1_and_medium_above_it() {
-    let card = artwork::HOME_CARD_WIDTH;
-    assert_eq!(artwork::image_size(card, 1.0), "small");
-    assert_eq!(artwork::image_size(card, 1.25), "medium");
-    assert_eq!(artwork::image_size(card, 1.5), "medium");
-    assert_eq!(artwork::image_size(card, 3.0), "large");
-    assert!(artwork::is_larger("medium", "small"));
-    assert!(artwork::is_larger("large", "medium"));
-    assert!(!artwork::is_larger("small", "medium"), "a smaller scale keeps the loaded list");
-    assert!(!artwork::is_larger("medium", "medium"));
+    assert_eq!(Rung::home(1.0), Rung::Small);
+    assert_eq!(Rung::home(1.25), Rung::Medium);
+    assert_eq!(Rung::home(2.0), Rung::Medium);
+    assert_eq!(Rung::home(3.0), Rung::Medium);
+    assert!(Rung::Medium > Rung::Small && Rung::Large > Rung::Medium, "a smaller scale keeps the loaded list");
+    assert_eq!(Rung::Medium.to_string(), "medium");
+}
+
+#[test]
+fn other_cards_follow_the_card_width_times_the_scale() {
+    assert_eq!(Rung::card(150.0, 1.0), Rung::Small);
+    assert_eq!(Rung::card(150.0, 3.0), Rung::Medium);
+    assert_eq!(Rung::card(512.0, 1.0), Rung::Large);
+}
+
+#[test]
+fn a_download_reports_the_bytes_that_it_wrote_and_prune_the_bytes_that_it_kept() {
+    let dir = empty_dir("written");
+    let (http, _) = host(vec![(200, Some("\"e1\""), "poster")]);
+    let (file, written) = block_on(artwork::download(&http, &dir, REVISIONED)).unwrap();
+    assert_eq!(written, 6);
+    assert_eq!(
+        block_on(artwork::download(&http, &dir, REVISIONED)).unwrap(),
+        (file, 0),
+        "a file on disk writes nothing"
+    );
+    assert_eq!(artwork::prune(&dir, 1000), 6);
+    assert_eq!(artwork::prune(&dir, 5), 0);
+}
+
+#[test]
+fn a_discarded_file_downloads_again() {
+    let dir = empty_dir("discard");
+    let (http, seen) = host(vec![(200, Some("\"e1\""), "broken"), (200, Some("\"e2\""), "poster")]);
+    let file = block_on(artwork::fetch(&http, &dir, REVISIONED)).unwrap();
+    artwork::discard(&file);
+    assert!(!file.exists() && !file.with_extension("etag").exists());
+    assert_eq!(std::fs::read_to_string(block_on(artwork::fetch(&http, &dir, REVISIONED)).unwrap()).unwrap(), "poster");
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
 #[test]

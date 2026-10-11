@@ -6,6 +6,7 @@ mod common;
 use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
 use serde_json::json;
+use silo_omarchy::artwork::Rung;
 use silo_omarchy::browse::{Browse, Choice, Paging, SortField, Watch};
 
 #[test]
@@ -49,7 +50,7 @@ fn the_recommended_tab_reads_the_library_layout_and_the_items_of_each_section() 
         }
         _ => not_found(),
     });
-    let rows = block_on(client.library_rows("1", "small")).unwrap();
+    let rows = block_on(client.library_rows("1", Rung::Small)).unwrap();
     let titles: Vec<_> = rows.iter().map(|r| r.title.as_str()).collect();
     assert_eq!(titles, ["Continue Watching", "Recently Added"]);
     assert_eq!(rows[0].section_type, "continue_watching");
@@ -79,7 +80,7 @@ fn the_default_grid_sorts_by_title_ascending_with_no_rules() {
         _ => not_found(),
     });
     let query = Browse::default().query("1", false);
-    let page = block_on(client.query_catalog(&query, "small")).unwrap();
+    let page = block_on(client.query_catalog(&query, Rung::Small)).unwrap();
     assert_eq!(page.items.len(), 3);
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0].method, "POST");

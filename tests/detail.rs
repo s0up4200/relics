@@ -5,6 +5,7 @@ mod common;
 
 use common::{fake, json, not_found, ok};
 use futures::executor::block_on;
+use silo_omarchy::artwork::Rung;
 
 #[test]
 fn the_detail_page_reads_the_item_with_large_artwork() {
@@ -12,7 +13,7 @@ fn the_detail_page_reads_the_item_with_large_artwork() {
         "catalog/items/movie:heat-1995?image_size=large" => ok("get_catalog_item_ok.json"),
         _ => not_found(),
     });
-    let item = block_on(client.item("movie:heat-1995", "large")).unwrap();
+    let item = block_on(client.item("movie:heat-1995", Rung::Large)).unwrap();
     assert_eq!(item.title, "Heat");
     assert_eq!(item.cast[0].name, "Al Pacino");
 }

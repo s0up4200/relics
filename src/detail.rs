@@ -12,14 +12,12 @@ use gpui::{
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, Error, wire};
-use crate::artwork::{self, ArtworkCache};
+use crate::artwork::{self, ArtworkCache, Rung};
 use crate::grid::Move;
 use crate::home::{Play, artwork_image, progress, progress_bar};
 use crate::player::PlayItem;
 use crate::search::OpenPerson;
 
-/// The rung of the Artwork ladder of the detail page.
-const IMAGE_SIZE: &str = "large";
 const EPISODE_WIDTH: f32 = 250.;
 const EPISODE_HEIGHT: f32 = 140.;
 const GAP: f32 = 14.;
@@ -94,7 +92,7 @@ impl Detail {
         let (client, id) = (self.client.clone(), self.id.clone());
         self._loading = cx.spawn(async move |this, cx| {
             let result: Result<_, Error> = async {
-                let item = client.item(&id, IMAGE_SIZE).await?;
+                let item = client.item(&id, Rung::Large).await?;
                 let seasons = if item.type_ == "series" { client.seasons(&id).await? } else { Vec::new() };
                 Ok((item, seasons))
             }

@@ -10,7 +10,7 @@ use gpui::{
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
-use crate::artwork::{self, ArtworkCache};
+use crate::artwork::{self, ArtworkCache, Rung};
 use crate::browse::Paging;
 use crate::home::{Open, Play, artwork_image, short_line};
 
@@ -62,7 +62,7 @@ pub struct Grid {
     /// The error of the last load, shown with Retry.
     error: Option<String>,
     loading: Option<Task<()>>,
-    image_size: &'static str,
+    image_size: Rung,
     scroll: ScrollHandle,
     artwork: Entity<ArtworkCache>,
 }
@@ -84,7 +84,7 @@ impl Grid {
             columns: 1,
             error: None,
             loading: None,
-            image_size: artwork::image_size(POSTER_WIDTH, window.scale_factor()),
+            image_size: Rung::card(POSTER_WIDTH, window.scale_factor()),
             scroll: ScrollHandle::new(),
             artwork: artwork::global(cx),
         };

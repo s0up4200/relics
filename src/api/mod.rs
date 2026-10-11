@@ -18,6 +18,7 @@ pub use gpui::http_client::Url;
 use types::Marker;
 pub use types::{Decision, Problem};
 
+use crate::artwork::Rung;
 use crate::playback::{Access, Replan, Sample};
 use crate::settings::{self, ServerSettings};
 
@@ -382,7 +383,7 @@ impl Client {
 
     /// The Home sections of the active Profile, in the order of the server Home layout.
     /// `image_size` is the rung of the Artwork ladder for the artwork URLs.
-    pub async fn home(&self, image_size: &str) -> Result<Vec<HomeSection>, Error> {
+    pub async fn home(&self, image_size: Rung) -> Result<Vec<HomeSection>, Error> {
         let layout: wire::SectionLayout = self.call(Method::GET, "home/layout", None).await?;
         let path = format!("home/sections?image_size={image_size}");
         let sections: wire::SectionCollection = self.call(Method::GET, &path, None).await?;
@@ -845,7 +846,7 @@ impl Client {
     }
 
     /// The rows of the Recommended tab of a Library, like the Home sections.
-    pub async fn library_rows(&self, library_id: &str, image_size: &str) -> Result<Vec<HomeSection>, Error> {
+    pub async fn library_rows(&self, library_id: &str, image_size: Rung) -> Result<Vec<HomeSection>, Error> {
         let layout: wire::SectionLayout = self.call(Method::GET, &format!("library/{library_id}/layout"), None).await?;
         let sections = futures::future::try_join_all(layout.sections.iter().map(|entry| {
             let path = format!("library/{library_id}/sections/{}/items?image_size={image_size}", entry.id);
@@ -859,7 +860,7 @@ impl Client {
     pub async fn query_catalog(
         &self,
         query: &wire::CatalogQuery,
-        image_size: &str,
+        image_size: Rung,
     ) -> Result<wire::CatalogBrowseCollection, Error> {
         let body = serde_json::to_value(query).map_err(|err| Error::Decode(err.to_string()))?;
         self.call(Method::POST, &format!("catalog/query?image_size={image_size}"), Some(body)).await
@@ -874,7 +875,7 @@ impl Client {
     // Detail page (#30).
 
     /// The detail of an Item. `image_size` is the rung of the Artwork ladder for the artwork URLs.
-    pub async fn item(&self, id: &str, image_size: &str) -> Result<wire::CatalogItemDetail, Error> {
+    pub async fn item(&self, id: &str, image_size: Rung) -> Result<wire::CatalogItemDetail, Error> {
         self.call(Method::GET, &format!("catalog/items/{id}?image_size={image_size}"), None).await
     }
 

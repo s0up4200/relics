@@ -8,6 +8,7 @@ use common::{DEVICE_ID, Reply, Seen, fixture, http, json, ok, problem, reply, se
 use futures::executor::block_on;
 use http_client::HttpClient;
 use silo_omarchy::api::{self, Client, Device, Error, Tokens, wire};
+use silo_omarchy::artwork::Rung;
 
 fn device() -> Device {
     Device { id: DEVICE_ID.into(), name: "omarchy-box".into() }
@@ -66,7 +67,7 @@ fn requests_carry_the_token_and_the_profile() {
     let profiles = block_on(client.profiles()).unwrap();
     assert_eq!(profiles[0].name, "Laura");
     client.set_profile(Some(profiles[0].id.to_string()));
-    block_on(client.home("small")).unwrap();
+    block_on(client.home(Rung::Small)).unwrap();
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0].header("Authorization"), Some("Bearer acc"));
@@ -171,7 +172,7 @@ fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
     });
     let client = signed_in(http, "acc");
     client.set_profile(Some("p-owner".into()));
-    let home = block_on(client.home("medium")).unwrap();
+    let home = block_on(client.home(Rung::Medium)).unwrap();
     let rows: Vec<_> = home
         .iter()
         .map(|s| {
