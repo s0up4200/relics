@@ -328,3 +328,15 @@ fn seek_moves_the_position_after_the_controller_gets_the_markers() {
     player.seek(3.0).unwrap();
     wait_for(&rx, |input| matches!(input, Input::Position(position) if *position >= 3.0));
 }
+
+#[test]
+fn a_seek_ends_in_seeked_with_the_new_position_and_set_pause_pauses() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
+    player.seek(3.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::Seeked(position) if (*position - 3.0).abs() < 0.5));
+    player.set_pause(true).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::Paused(true)));
+}

@@ -29,6 +29,8 @@ base64 = "0.22.1"
 thumbhash = "=0.1.0"
 # The Local settings file. The same version as gpui-omarchy, so the lock gets no new crates.
 toml = "=0.8.23"
+# MPRIS. Its zbus is already in Cargo.lock with the async-io runtime, so the app gets no second async runtime.
+mpris-server = "=0.10.0"
 
 [dev-dependencies]
 http_client = { package = "gpui-pre-http-client", version = "=0.3.7", features = ["test-support"] }

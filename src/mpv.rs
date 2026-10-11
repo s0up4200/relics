@@ -119,6 +119,11 @@ impl Player {
         self.mpv.command("seek", &[&position.to_string(), "absolute"])
     }
 
+    /// Pauses or plays the file.
+    pub fn set_pause(&self, paused: bool) -> Result<(), Error> {
+        self.mpv.set_property("pause", paused)
+    }
+
     /// Runs one mpv input command, for example `["keypress", "a"]`. The tests use it.
     pub fn command(&self, args: &[&str]) -> Result<(), Error> {
         let (name, args) = args.split_first().expect("a command has a name");
@@ -175,6 +180,11 @@ fn read_events(mpv: &Mpv, on_input: impl Fn(Input)) {
                 return;
             }
             Some(Ok(Event::FileLoaded)) => Input::FileLoaded,
+            // mpv ended a seek, or started the file. MPRIS sends `Seeked` with the new position.
+            Some(Ok(Event::PlaybackRestart)) => match mpv.get_property::<f64>("time-pos") {
+                Ok(position) => Input::Seeked(position),
+                Err(_) => continue,
+            },
             Some(Ok(Event::EndFile(mpv_end_file_reason::Eof))) => Input::EndOfFile,
             Some(Ok(Event::EndFile(mpv_end_file_reason::Error))) => Input::LoadFailed,
             Some(Ok(Event::PropertyChange { name, change, .. })) => match (name, change) {

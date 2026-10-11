@@ -312,3 +312,25 @@ fn the_last_episode_of_the_series_has_no_next_episode() {
     // The server has no season 3.
     assert_eq!(next(2, "episode:severance-s02e02"), None);
 }
+
+fn previous(season: i64, content_id: &str) -> Option<String> {
+    let (client, _) = fake("silo/playback_start_opaque_ids.json");
+    block_on(client.previous_episode("series:severance", season, content_id)).unwrap().map(|episode| episode.content_id)
+}
+
+#[test]
+fn the_previous_episode_is_the_one_before_in_the_season() {
+    assert_eq!(previous(1, "episode:severance-s01e02").as_deref(), Some("episode:severance-s01e01"));
+}
+
+#[test]
+fn before_the_first_playable_episode_of_a_season_the_previous_episode_is_the_last_one_of_the_season_before() {
+    // Episode 1 of season 2 has only an unreadable file.
+    assert_eq!(previous(2, "episode:severance-s02e02").as_deref(), Some("episode:severance-s01e02"));
+}
+
+#[test]
+fn the_first_episode_of_season_one_has_no_previous_episode() {
+    // Season 0 holds the specials, so the lookup does not go there.
+    assert_eq!(previous(1, "episode:severance-s01e01"), None);
+}

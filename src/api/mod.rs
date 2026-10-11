@@ -606,6 +606,33 @@ impl Client {
         }
     }
 
+    /// The playable episode before `content_id`: the one before it in the season, else the last one of the
+    /// season before. Season 0 holds the specials, so the lookup stops at season 1.
+    pub async fn previous_episode(
+        &self,
+        series_id: &str,
+        season: i64,
+        content_id: &str,
+    ) -> Result<Option<wire::Episode>, Error> {
+        let playable = |episode: &wire::Episode| episode.files.iter().any(|file| file.unreadable != Some(true));
+        let episodes = self.season_episodes(series_id, season).await?;
+        let Some(index) = episodes.iter().position(|episode| episode.content_id == content_id) else {
+            return Ok(None);
+        };
+        if let Some(previous) = episodes.into_iter().take(index).rfind(playable) {
+            return Ok(Some(previous));
+        }
+        if season <= 1 {
+            return Ok(None);
+        }
+        match self.season_episodes(series_id, season - 1).await {
+            Ok(episodes) => Ok(episodes.into_iter().rfind(playable)),
+            Err(Error::Status(404)) => Ok(None),
+            Err(Error::Problem(problem)) if problem.status == 404 => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     // ponytail: reads only the first page; a season with more episodes than one page loses the rest.
     pub async fn season_episodes(&self, series_id: &str, season: i64) -> Result<Vec<wire::Episode>, Error> {
         let path = format!("catalog/series/{series_id}/seasons/{season}/episodes");

@@ -82,7 +82,7 @@ pub fn global(cx: &mut App) -> Entity<ArtworkCache> {
 }
 
 /// `$XDG_CACHE_HOME/silo-omarchy/artwork/`, or `~/.cache/silo-omarchy/artwork/`.
-fn cache_dir() -> PathBuf {
+pub fn cache_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)

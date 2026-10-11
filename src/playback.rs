@@ -82,7 +82,7 @@ pub enum Input {
     EndOfFile,
     /// mpv could not open or read the file.
     LoadFailed,
-    /// The user closed the Player window or pressed q.
+    /// The user closed the Player window, pressed q, or sent the MPRIS Stop.
     Shutdown,
     /// The app ends the session: a new Item replaces it, or the Library window closes.
     End,
@@ -94,6 +94,24 @@ pub enum Input {
     Action,
     /// The Item has a next episode.
     NextEpisode,
+    /// The Item has a previous episode.
+    PreviousEpisode,
+    /// mpv ended a seek at this player position, or started the file there.
+    Seeked(f64),
+    /// MPRIS Play.
+    Play,
+    /// MPRIS Pause.
+    Pause,
+    /// MPRIS PlayPause.
+    PlayPause,
+    /// MPRIS Seek: move this many seconds from the position.
+    SeekBy(f64),
+    /// MPRIS SetPosition: go to this player position.
+    SetPosition(f64),
+    /// MPRIS Next.
+    Next,
+    /// MPRIS Previous.
+    Previous,
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -128,6 +146,10 @@ pub enum Command {
     Seek(f64),
     /// Play the next episode in the same Player window. The session has already ended.
     PlayNext,
+    /// Play the previous episode in the same Player window. The session has already ended.
+    PlayPrevious,
+    /// Set the mpv `pause` property.
+    SetPause(bool),
     /// Refresh the access token and send `Input::Refreshed`.
     Refresh,
     /// Ask the server for a new plan and send `Input::Replanned`.
@@ -177,6 +199,7 @@ pub struct Session {
     resolved: Vec<usize>,
     prompt: Option<Prompt>,
     has_next: bool,
+    has_previous: bool,
     /// The headers for the next load.
     access: Option<Access>,
     /// When the token in the file that mpv plays expires.
@@ -242,6 +265,7 @@ impl Session {
             resolved: Vec::new(),
             prompt: None,
             has_next: false,
+            has_previous: false,
             access: None,
             mpv_expires: None,
             renewed: false,
@@ -372,6 +396,29 @@ impl Session {
                 self.has_next = true;
                 Vec::new()
             }
+            Input::PreviousEpisode => {
+                self.has_previous = true;
+                Vec::new()
+            }
+            Input::Play => vec![Command::SetPause(false)],
+            Input::Pause => vec![Command::SetPause(true)],
+            Input::PlayPause => vec![Command::SetPause(!self.paused)],
+            Input::SeekBy(seconds) => match self.position {
+                Some(position) => vec![Command::Seek((position + seconds).max(0.0))],
+                None => Vec::new(),
+            },
+            // MPRIS ignores a position outside the file.
+            Input::SetPosition(position)
+                if position >= 0.0 && self.player_duration().is_none_or(|duration| position <= duration) =>
+            {
+                vec![Command::Seek(position)]
+            }
+            Input::Next if self.has_next => self.play_next(self.source_position()),
+            Input::Previous if self.has_previous => {
+                let mut commands = self.finish(self.source_position(), false);
+                commands.push(Command::PlayPrevious);
+                commands
+            }
             Input::EndOfFile => {
                 let (position, normal) = self.end_position();
                 if normal && self.has_next && self.settings.auto_play_next {
@@ -386,8 +433,28 @@ impl Session {
             Input::LoadFailed => self.recover(),
             Input::Shutdown => self.finish(self.source_position(), true),
             Input::End => self.finish(self.source_position(), false),
-            Input::Position(_) | Input::Duration(_) => Vec::new(),
+            Input::Position(_)
+            | Input::Duration(_)
+            | Input::Seeked(_)
+            | Input::SetPosition(_)
+            | Input::Next
+            | Input::Previous => Vec::new(),
         }
+    }
+
+    /// mpv is paused, as far as the session knows.
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// MPRIS `CanGoNext`: the session plays and the Item has a next episode.
+    pub fn can_go_next(&self) -> bool {
+        self.has_next && !self.ended
+    }
+
+    /// MPRIS `CanGoPrevious`: the session plays and the Item has a previous episode.
+    pub fn can_go_previous(&self) -> bool {
+        self.has_previous && !self.ended
     }
 
     /// Makes `plan` the plan of the session. `markers` are in source time.

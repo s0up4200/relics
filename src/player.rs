@@ -2,6 +2,8 @@
 //! handle, feeds the session the mpv events and a tick each second, and carries out
 //! the commands of the session. The app has at most one Player window.
 
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -9,11 +11,13 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{AppContext as _, Context, EventEmitter, Hsla, Rgba, Task};
 use gpui_omarchy::ActiveTheme as _;
+use mpris_server::PlaybackStatus;
 
 use crate::api::{Client, wire};
-use crate::mpv;
+use crate::mpris::{self, Track};
 use crate::playback::{Command, Input, Session};
 use crate::settings::LocalSettings;
+use crate::{artwork, mpv};
 
 /// What the Player window needs to play an Item.
 #[derive(Debug, Clone)]
@@ -77,6 +81,9 @@ impl PlayItem {
     }
 }
 
+/// The width of the poster that MPRIS shows, in pixels.
+const MPRIS_POSTER_WIDTH: f32 = 512.0;
+
 /// The text of a playback error, for the Library window.
 pub struct PlaybackError(pub String);
 
@@ -93,6 +100,17 @@ pub struct PlayerWindow {
     /// The next episode of the Item that plays.
     next: Option<PlayItem>,
     finding_next: Option<Task<()>>,
+    /// The previous episode of the Item that plays.
+    previous: Option<PlayItem>,
+    finding_previous: Option<Task<()>>,
+    /// The MPRIS service. It runs while the Player window is open.
+    mpris: Option<Rc<mpris_server::Player>>,
+    _mpris: Option<Task<()>>,
+    /// What MPRIS shows about the Item that plays, and the poster file.
+    track: Option<Track>,
+    art: Option<PathBuf>,
+    duration: Option<f64>,
+    describing: Option<Task<()>>,
     /// The last stop report. Quit waits for it.
     stopping: Option<Task<()>>,
     /// Changes with each new Item, so that the answer of a refresh or replan of an older session is dropped.
@@ -122,6 +140,14 @@ impl PlayerWindow {
             starting: None,
             next: None,
             finding_next: None,
+            previous: None,
+            finding_previous: None,
+            mpris: None,
+            _mpris: None,
+            track: None,
+            art: None,
+            duration: None,
+            describing: None,
             stopping: None,
             generation: 0,
             _mpv_events: None,
@@ -136,24 +162,14 @@ impl PlayerWindow {
         self.generation += 1;
         self.session = Some(Session::new(item.runtime, client.server_settings()));
         self.client = Some(client.clone());
+        // A new Item drops these tasks, so an older answer never reaches the new session.
         self.next = None;
-        // A new Item drops this task, so an older answer never reaches the new session.
+        self.previous = None;
+        self.finding_next = self.find_episode(&client, &item, true, cx);
+        self.finding_previous = self.find_episode(&client, &item, false, cx);
+        (self.track, self.art, self.duration) = (None, None, None);
+        self.describing = Some(self.describe(client.clone(), item.content_id.clone(), cx));
         let start = item.start_position();
-        self.finding_next = item.season.map(|(series_id, season)| {
-            let (client, content_id) = (client.clone(), item.content_id.clone());
-            cx.spawn(async move |this, cx| match client.next_episode(&series_id, season, &content_id).await {
-                Ok(Some(episode)) => {
-                    let next = PlayItem::episode(series_id, episode);
-                    this.update(cx, |this, cx| {
-                        this.next = Some(next);
-                        this.step(Input::NextEpisode, cx);
-                    })
-                    .ok();
-                }
-                Ok(None) => {}
-                Err(err) => eprintln!("silo-omarchy: cannot find the next episode: {err}"),
-            })
-        });
         let content_id = item.content_id;
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
@@ -163,6 +179,130 @@ impl PlayerWindow {
             };
             this.update(cx, |this, cx| this.step(input, cx)).ok();
         }));
+    }
+
+    /// Looks up the next or the previous episode of `item`, and gives it to the session when it exists.
+    fn find_episode(
+        &self,
+        client: &Arc<Client>,
+        item: &PlayItem,
+        next: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<()>> {
+        let (series_id, season) = item.season.clone()?;
+        let (client, content_id) = (client.clone(), item.content_id.clone());
+        Some(cx.spawn(async move |this, cx| {
+            let found = if next {
+                client.next_episode(&series_id, season, &content_id).await
+            } else {
+                client.previous_episode(&series_id, season, &content_id).await
+            };
+            match found {
+                Ok(Some(episode)) => {
+                    let episode = PlayItem::episode(series_id, episode);
+                    this.update(cx, |this, cx| {
+                        if next {
+                            this.next = Some(episode);
+                            this.step(Input::NextEpisode, cx);
+                        } else {
+                            this.previous = Some(episode);
+                            this.step(Input::PreviousEpisode, cx);
+                        }
+                    })
+                    .ok();
+                }
+                Ok(None) => {}
+                Err(err) => eprintln!("silo-omarchy: cannot find the episode before or after {content_id}: {err}"),
+            }
+        }))
+    }
+
+    /// Reads the title of the Item and downloads its poster to the Artwork cache, for MPRIS.
+    fn describe(&self, client: Arc<Client>, content_id: String, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let item = match client.item(&content_id, artwork::image_size(MPRIS_POSTER_WIDTH, 1.0)).await {
+                Ok(item) => item,
+                Err(err) => return eprintln!("silo-omarchy: cannot read {content_id} for MPRIS: {err}"),
+            };
+            let poster = item.poster_url.as_deref().filter(|url| !url.is_empty());
+            let poster = poster.and_then(|url| client.server().url.join(url).ok()).map(String::from);
+            let track = Track::from(&item);
+            if this
+                .update(cx, |this, cx| {
+                    this.track = Some(track);
+                    this.sync_mpris(cx);
+                })
+                .is_err()
+            {
+                return;
+            }
+            let Some(url) = poster else {
+                return;
+            };
+            let http = cx.update(|cx| cx.http_client());
+            let file = cx.background_spawn(async move { artwork::fetch(&http, &artwork::cache_dir(), &url).await });
+            match file.await {
+                Ok(file) => {
+                    this.update(cx, |this, cx| {
+                        this.art = Some(file);
+                        this.sync_mpris(cx);
+                    })
+                    .ok();
+                }
+                Err(err) => eprintln!("silo-omarchy: cannot download the poster for MPRIS: {err}"),
+            }
+        })
+    }
+
+    /// Takes the MPRIS bus name, and sends the MPRIS controls to the session until the Player window closes.
+    fn start_mpris(&mut self, cx: &mut Context<Self>) {
+        let (tx, mut rx) = mpsc::unbounded();
+        self._mpris = Some(cx.spawn(async move |this, cx| {
+            let player = match mpris::start(move |input| drop(tx.unbounded_send(input))).await {
+                Ok(player) => Rc::new(player),
+                Err(err) => return eprintln!("silo-omarchy: the media keys do not work: {err}"),
+            };
+            let run = player.run();
+            if this
+                .update(cx, |this, cx| {
+                    this.mpris = Some(player);
+                    this.sync_mpris(cx);
+                })
+                .is_err()
+            {
+                return;
+            }
+            let controls = async {
+                while let Some(input) = rx.next().await {
+                    if this.update(cx, |this, cx| this.step(input, cx)).is_err() {
+                        return;
+                    }
+                }
+            };
+            futures::future::join(run, controls).await;
+        }));
+    }
+
+    /// Sends the state of the session and the metadata to MPRIS. Each setter sends a change only.
+    fn sync_mpris(&self, cx: &mut Context<Self>) {
+        let (Some(player), Some(session)) = (self.mpris.clone(), &self.session) else {
+            return;
+        };
+        let status = if session.paused() { PlaybackStatus::Paused } else { PlaybackStatus::Playing };
+        let (next, previous) = (session.can_go_next(), session.can_go_previous());
+        let metadata = mpris::metadata(self.track.as_ref(), self.duration, self.art.as_deref());
+        cx.spawn(async move |_, _| {
+            let result = async {
+                player.set_playback_status(status).await?;
+                player.set_can_go_next(next).await?;
+                player.set_can_go_previous(previous).await?;
+                player.set_metadata(metadata).await
+            };
+            if let Err(err) = result.await {
+                eprintln!("silo-omarchy: cannot update MPRIS: {err}");
+            }
+        })
+        .detach();
     }
 
     /// Ends the Playback session and closes the Player window. The task ends when the
@@ -175,11 +315,35 @@ impl PlayerWindow {
     }
 
     fn step(&mut self, input: Input, cx: &mut Context<Self>) {
+        // MPRIS reads the position when it needs it. The other inputs can change what MPRIS shows.
+        let sync = match input {
+            Input::Position(position) => {
+                if let Some(player) = &self.mpris {
+                    player.set_position(mpris::time(position));
+                }
+                false
+            }
+            Input::Seeked(position) => {
+                if let Some(player) = self.mpris.clone() {
+                    player.set_position(mpris::time(position));
+                    cx.spawn(async move |_, _| player.seeked(mpris::time(position)).await.ok()).detach();
+                }
+                false
+            }
+            Input::Duration(duration) => {
+                self.duration = Some(duration);
+                true
+            }
+            _ => true,
+        };
         let Some(session) = &mut self.session else {
             return;
         };
         for command in session.step(input, SystemTime::now()) {
             self.execute(command, cx);
+        }
+        if sync {
+            self.sync_mpris(cx);
         }
     }
 
@@ -251,6 +415,16 @@ impl PlayerWindow {
                     self.play(client, next, cx);
                 }
             }
+            Command::PlayPrevious => {
+                if let Some(previous) = self.previous.take() {
+                    self.play(client, previous, cx);
+                }
+            }
+            Command::SetPause(paused) => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.set_pause(paused)) {
+                    eprintln!("silo-omarchy: cannot pause or play: {err}");
+                }
+            }
             Command::ClosePlayer => self.close_mpv(cx),
             Command::ShowError(text) => cx.emit(PlaybackError(text)),
             Command::SendTheme => {
@@ -285,6 +459,9 @@ impl PlayerWindow {
     }
 
     fn close_mpv(&mut self, cx: &mut Context<Self>) {
+        // Dropping the MPRIS player and its task gives up the bus name.
+        self.mpris = None;
+        self._mpris = None;
         if self.mpv.take().is_some() {
             cx.emit(PlayerClosed);
         }
@@ -309,6 +486,7 @@ impl PlayerWindow {
                 tx.unbounded_send(input).ok();
             })?);
             self.mpv_id += 1;
+            self.start_mpris(cx);
             let id = self.mpv_id;
             self._mpv_events = Some(cx.spawn(async move |this, cx| {
                 while let Some(input) = rx.next().await {

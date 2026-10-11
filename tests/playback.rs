@@ -541,3 +541,51 @@ fn the_chain_starts_over_once_the_reloaded_stream_plays() {
     session.step(Input::Position(3700.0), at(104));
     assert_eq!(session.step(Input::EndOfFile, at(105)), vec![Command::Refresh]);
 }
+
+// MPRIS controls. MPRIS Stop is `Input::Shutdown`, the same input as q.
+
+#[test]
+fn mpris_play_pause_and_play_pause_set_pause() {
+    let mut session = playing(None);
+    assert_eq!(session.step(Input::Pause, at(1)), vec![Command::SetPause(true)]);
+    assert_eq!(session.step(Input::Play, at(1)), vec![Command::SetPause(false)]);
+    assert_eq!(session.step(Input::PlayPause, at(1)), vec![Command::SetPause(true)], "mpv plays");
+    session.step(Input::Paused(true), at(2));
+    assert!(session.paused());
+    assert_eq!(session.step(Input::PlayPause, at(3)), vec![Command::SetPause(false)], "mpv is paused");
+}
+
+#[test]
+fn mpris_seek_moves_from_the_position_and_set_position_goes_to_a_position_in_the_file() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::Position(300.0), at(1));
+    assert_eq!(session.step(Input::SeekBy(30.0), at(2)), vec![Command::Seek(330.0)]);
+    assert_eq!(session.step(Input::SeekBy(-500.0), at(2)), vec![Command::Seek(0.0)], "not before the start");
+    assert_eq!(session.step(Input::SetPosition(42.0), at(3)), vec![Command::Seek(42.0)]);
+    assert_eq!(session.step(Input::SetPosition(1001.0), at(3)), vec![], "past the end of the file");
+    assert_eq!(session.step(Input::SetPosition(-1.0), at(3)), vec![]);
+}
+
+#[test]
+fn mpris_next_plays_the_next_episode_only_when_it_exists() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::Position(300.0), at(1));
+    assert!(!session.can_go_next());
+    assert_eq!(session.step(Input::Next, at(2)), vec![]);
+    session.step(Input::NextEpisode, at(2));
+    assert!(session.can_go_next());
+    assert_eq!(session.step(Input::Next, at(3)), vec![stop(400.0, 1), Command::PlayNext]);
+    assert!(!session.can_go_next(), "the session ended");
+}
+
+#[test]
+fn mpris_previous_plays_the_previous_episode_only_when_it_exists() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::Position(300.0), at(1));
+    assert!(!session.can_go_previous());
+    assert_eq!(session.step(Input::Previous, at(2)), vec![]);
+    session.step(Input::PreviousEpisode, at(2));
+    assert!(session.can_go_previous());
+    assert_eq!(session.step(Input::Previous, at(3)), vec![stop(400.0, 1), Command::PlayPrevious]);
+    assert!(!session.can_go_previous(), "the session ended");
+}
