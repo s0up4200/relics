@@ -53,6 +53,9 @@ impl PlayItem {
 /// The text of a playback error, for the Library window.
 pub struct PlaybackError(pub String);
 
+/// The Player window closed.
+pub struct PlayerClosed;
+
 pub struct PlayerWindow {
     client: Option<Arc<Client>>,
     session: Option<Session>,
@@ -72,6 +75,7 @@ pub struct PlayerWindow {
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
+impl EventEmitter<PlayerClosed> for PlayerWindow {}
 
 impl PlayerWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -138,7 +142,7 @@ impl PlayerWindow {
     pub fn quit(&mut self, cx: &mut Context<Self>) -> Task<()> {
         self.starting = None;
         self.step(Input::End, cx);
-        self.close_mpv();
+        self.close_mpv(cx);
         self.stopping.take().unwrap_or_else(|| Task::ready(()))
     }
 
@@ -176,7 +180,7 @@ impl PlayerWindow {
                 let decision = client.replan(&replan).await;
                 Input::Replanned(decision.inspect_err(|err| eprintln!("silo-omarchy: replan failed: {err}")).ok())
             }),
-            // ponytail: a failed report is lost; #33 keeps it and sends it with syncProgress.
+            // The client keeps the position of a failed report and sends it with syncProgress later.
             Command::Progress { session_id, sample } => cx
                 .background_spawn(async move {
                     if let Err(err) = client.report_progress(&session_id, &sample).await {
@@ -219,7 +223,7 @@ impl PlayerWindow {
                     self.play(client, next, cx);
                 }
             }
-            Command::ClosePlayer => self.close_mpv(),
+            Command::ClosePlayer => self.close_mpv(cx),
             Command::ShowError(text) => cx.emit(PlaybackError(text)),
             Command::SendTheme => {
                 let theme = cx.omarchy();
@@ -247,8 +251,15 @@ impl PlayerWindow {
         .detach();
     }
 
-    fn close_mpv(&mut self) {
-        self.mpv = None;
+    /// The Player window is open.
+    pub fn is_open(&self) -> bool {
+        self.mpv.is_some()
+    }
+
+    fn close_mpv(&mut self, cx: &mut Context<Self>) {
+        if self.mpv.take().is_some() {
+            cx.emit(PlayerClosed);
+        }
         self.mpv_id += 1;
     }
 

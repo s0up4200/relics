@@ -8,13 +8,10 @@ use gpui::{
     IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, RenderImage, Resource, ScrollHandle,
     StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription, Task, Window, div, img, px,
 };
-use gpui_omarchy::ActiveTheme;
+use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
-use crate::api::{Client, Error, HomeSection, wire};
+use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache};
-
-/// A request failed because the server refused the refresh token.
-pub struct SignedOut;
 
 /// The user pressed p on a card.
 pub struct Play(pub wire::CatalogItem);
@@ -25,6 +22,8 @@ pub struct Home {
     /// The sections in display order: the Featured sections first, then the others in layout order.
     sections: Vec<HomeSection>,
     status: Option<String>,
+    /// The last load failed. The page shows Retry next to the error.
+    failed: bool,
     focus: Focus,
     focus_handle: FocusHandle,
     page_scroll: ScrollHandle,
@@ -38,7 +37,6 @@ pub struct Home {
     _scale: Subscription,
 }
 
-impl EventEmitter<SignedOut> for Home {}
 impl EventEmitter<Play> for Home {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +88,7 @@ impl Home {
             artwork: artwork::global(cx),
             image_size: artwork::image_size(artwork::HOME_CARD_WIDTH, window.scale_factor()),
             status: Some("Loading…".into()),
+            failed: false,
             focus: Focus::Sidebar,
             focus_handle,
             page_scroll: ScrollHandle::new(),
@@ -120,6 +119,7 @@ impl Home {
                         this.row_scrolls.resize_with(sections.len(), ScrollHandle::new);
                         this.sections = sections;
                         this.status = None;
+                        this.failed = false;
                         let rows = this.row_lengths();
                         let lost = match this.focus {
                             Focus::Card { row, col } => rows.get(row).is_none_or(|&cards| col >= cards),
@@ -130,8 +130,11 @@ impl Home {
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
-                    Err(Error::SignedOut) => cx.emit(SignedOut),
-                    Err(err) => this.status = Some(err.to_string()),
+                    // The page keeps what it shows. The Library window shows Offline or the sign-in screen.
+                    Err(err) => {
+                        this.status = Some(err.to_string());
+                        this.failed = true;
+                    }
                 }
                 cx.notify();
             })
@@ -334,9 +337,18 @@ impl Render for Home {
                     .overflow_y_scroll()
                     .track_scroll(&self.page_scroll)
                     .children(rows)
-                    .children(
-                        self.status.clone().map(|status| div().px(px(40.)).text_color(t.secondary).child(status)),
-                    ),
+                    .children(self.status.clone().map(|status| {
+                        let retry = button("home-retry", "Retry", ButtonVariant::Secondary, cx)
+                            .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
+                        div()
+                            .px(px(40.))
+                            .flex()
+                            .items_center()
+                            .gap(px(14.))
+                            .text_color(if self.failed { t.danger } else { t.secondary })
+                            .child(status)
+                            .children(self.failed.then_some(retry))
+                    })),
             )
     }
 }

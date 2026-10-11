@@ -1,6 +1,7 @@
 //! The Silo API client. It sends each request through the GPUI `HttpClient`, so the
 //! app adds no second async runtime, and tests can give it a fake client.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -66,6 +67,30 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// The Server did not answer, or answered 503. The app keeps the tokens and retries.
+    pub fn is_offline(&self) -> bool {
+        matches!(self, Error::Network(_)) || self.status() == Some(503)
+    }
+
+    fn status(&self) -> Option<u16> {
+        match self {
+            Error::Status(status) => Some(*status),
+            Error::Problem(problem) => Some(problem.status),
+            _ => None,
+        }
+    }
+}
+
+/// A failure that concerns the whole Account, not only the request that got it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trouble {
+    /// The Server does not answer, or answers 503.
+    Offline,
+    /// The server refused the refresh token.
+    SignedOut,
+}
 
 /// Connects to the Silo server at the URL that the user typed. A URL without a
 /// scheme tries `https://` first and `http://` when https gets no reply.
@@ -198,6 +223,20 @@ pub struct Client {
     server_settings: Mutex<ServerSettings>,
     /// The `client_features` of the last start request. A replan sends the same list.
     features: Mutex<Vec<&'static str>>,
+    on_trouble: Mutex<Box<dyn Fn(Trouble) + Send + Sync>>,
+    /// The Item of each Playback session that this client started: its content id and duration in seconds.
+    // ponytail: never pruned; one small entry for each Item played in this run.
+    sessions: Mutex<HashMap<String, (String, i64)>>,
+    /// The last position of each Item whose report failed, keyed by Profile id and content id.
+    pending: Mutex<HashMap<(String, String), Pending>>,
+}
+
+/// A position that the server did not get. `sync_progress` sends it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    position_ms: i64,
+    duration_ms: i64,
+    at: chrono::DateTime<chrono::Utc>,
 }
 
 type SaveTokens = Box<dyn Fn(&Tokens) + Send + Sync>;
@@ -227,7 +266,35 @@ impl Client {
             installation_id: Mutex::default(),
             server_settings: Mutex::default(),
             features: Mutex::default(),
+            on_trouble: Mutex::new(Box::new(|_| {})),
+            sessions: Mutex::default(),
+            pending: Mutex::default(),
         }
+    }
+
+    /// Calls `tell` each time that a request finds the Server Offline or the sign-in refused.
+    pub fn on_trouble(&self, tell: impl Fn(Trouble) + Send + Sync + 'static) {
+        *self.on_trouble.lock().unwrap() = Box::new(tell);
+    }
+
+    /// Reads `system/info`, which needs no sign-in, to find out whether the Server answers again.
+    pub async fn probe(&self) -> Result<(), Error> {
+        let headers = device_headers(&self.device);
+        let _: wire::SystemInfo = send(&self.http, &self.server, Method::GET, "system/info", &headers, None).await?;
+        Ok(())
+    }
+
+    /// Tells the `on_trouble` callback when `result` failed Offline or signed out.
+    fn tell<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        let trouble = match &result {
+            Err(Error::SignedOut) => Some(Trouble::SignedOut),
+            Err(err) if err.is_offline() => Some(Trouble::Offline),
+            _ => None,
+        };
+        if let Some(trouble) = trouble {
+            (self.on_trouble.lock().unwrap())(trouble);
+        }
+        result
     }
 
     /// Calls `save` each time that a refresh gives new tokens, so that the caller can keep them.
@@ -326,6 +393,16 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
+        let result = self.call_with_retries(method, path, body).await;
+        self.tell(result)
+    }
+
+    async fn call_with_retries<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, Error> {
         let (headers, used) = self.headers();
         let mut result = send(&self.http, &self.server, method.clone(), path, &headers, body.clone()).await;
         if matches!(&result, Err(err) if is_unauthorized(err)) {
@@ -366,8 +443,9 @@ impl Client {
         let headers = device_headers(&self.device);
         let fresh: wire::RefreshedTokens =
             send(&self.http, &self.server, Method::POST, "auth/refresh", &headers, Some(body)).await.map_err(
+                // A network failure and a 503 stay as they are: they are Offline, not a refused sign-in.
                 |err| {
-                    if is_unauthorized(&err) { Error::SignedOut } else { err }
+                    if matches!(err.status(), Some(400 | 401 | 403)) { Error::SignedOut } else { err }
                 },
             )?;
         let tokens = Tokens { access_token: fresh.access_token, refresh_token: fresh.refresh_token };
@@ -390,7 +468,8 @@ impl Client {
     /// new media headers.
     pub async fn refresh_access(&self) -> Result<Access, Error> {
         let stale = self.tokens().access_token;
-        self.refresh(&stale).await?;
+        let refreshed = self.refresh(&stale).await;
+        self.tell(refreshed)?;
         Ok(self.media_access())
     }
 
@@ -416,7 +495,20 @@ impl Client {
         });
         body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         let path = format!("playback/{}/replan", replan.session_id);
-        let decision: wire::PlaybackDecision = self.call(Method::POST, &path, Some(body)).await?;
+        let decision: wire::PlaybackDecision = match self.call(Method::POST, &path, Some(body)).await {
+            // The server ended the Playback session, for example after 45 s with no report. A new start
+            // request at the position gives a new session.
+            Err(Error::Problem(problem))
+                if matches!(problem.code(), "playback_session_ended" | "playback_session_not_found") =>
+            {
+                let content_id = self.sessions.lock().unwrap().get(&replan.session_id).map(|(id, _)| id.clone());
+                let Some(content_id) = content_id else {
+                    return Err(Error::Problem(problem));
+                };
+                return self.start_playback(&content_id, Some(replan.position.max(0.0))).await;
+            }
+            result => result?,
+        };
         let mut decision = Decision::from(decision);
         if let Decision::Playable { plan, .. } = &mut decision {
             self.absolute_urls(plan)?;
@@ -462,7 +554,8 @@ impl Client {
         }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
-        if let Decision::Playable { plan, audio_language, markers, attempt_id, .. } = &mut decision {
+        if let Decision::Playable { session_id, plan, audio_language, markers, attempt_id } = &mut decision {
+            self.sessions.lock().unwrap().insert(session_id.clone(), (content_id.to_string(), version.duration));
             self.absolute_urls(plan)?;
             *attempt_id = attempt;
             *audio_language = audio_language_of(version, plan);
@@ -524,9 +617,8 @@ impl Client {
             "position": sample.position,
             "is_paused": sample.paused,
         });
-        let _: wire::PlaybackMutation =
-            self.call(Method::POST, &format!("playback/{session_id}/progress"), Some(body)).await?;
-        Ok(())
+        let result = self.call(Method::POST, &format!("playback/{session_id}/progress"), Some(body)).await;
+        self.keep_on_failure(session_id, Some(sample), result).await
     }
 
     /// Stops the Playback session. The server writes `sample` as the final position.
@@ -540,9 +632,100 @@ impl Client {
             body["position"] = sample.position.into();
             body["is_paused"] = sample.paused.into();
         }
-        let _: wire::PlaybackMutation =
-            self.call(Method::DELETE, &format!("playback/{session_id}"), Some(body)).await?;
+        let result = self.call(Method::DELETE, &format!("playback/{session_id}"), Some(body)).await;
+        self.keep_on_failure(session_id, sample, result).await
+    }
+
+    /// Keeps the position of a report that failed, so that `sync_progress` sends it later. A report that
+    /// worked drops the kept position of its Item. When the server answered but refused the report, for
+    /// example because the session ended, the position goes with `syncProgress` at once.
+    async fn keep_on_failure(
+        &self,
+        session_id: &str,
+        sample: Option<&Sample>,
+        result: Result<wire::PlaybackMutation, Error>,
+    ) -> Result<(), Error> {
+        let item = self.sessions.lock().unwrap().get(session_id).cloned();
+        let (Some((content_id, duration)), Some(sample)) = (item, sample) else {
+            return result.map(drop);
+        };
+        let key = (self.auth.lock().unwrap().profile_id.clone().unwrap_or_default(), content_id);
+        let Err(err) = result else {
+            self.pending.lock().unwrap().remove(&key);
+            return Ok(());
+        };
+        let pending = Pending {
+            position_ms: (sample.position.max(0.0) * 1000.0).round() as i64,
+            duration_ms: duration.max(0) * 1000,
+            at: chrono::Utc::now(),
+        };
+        self.pending.lock().unwrap().insert(key, pending);
+        if !err.is_offline() && !matches!(err, Error::SignedOut) {
+            self.sync_progress().await.inspect_err(|err| eprintln!("silo-omarchy: progress sync failed: {err}")).ok();
+        }
+        Err(err)
+    }
+
+    /// Sends the kept positions of the active Profile with `syncProgress`. A position that the server got,
+    /// or refused for good, is dropped. The positions of the other Profiles wait until their Profile is active.
+    pub async fn sync_progress(&self) -> Result<(), Error> {
+        let profile_id = self.auth.lock().unwrap().profile_id.clone().unwrap_or_default();
+        // The server takes at most 100 items in one request.
+        let sent: Vec<((String, String), Pending)> = self
+            .pending
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((profile, _), _)| *profile == profile_id)
+            .take(100)
+            .map(|(key, pending)| (key.clone(), pending.clone()))
+            .collect();
+        if sent.is_empty() {
+            return Ok(());
+        }
+        let items: Vec<_> = sent
+            .iter()
+            .map(|((_, content_id), pending)| {
+                serde_json::json!({
+                    "media_item_id": content_id,
+                    "position_ms": pending.position_ms,
+                    "duration_ms": pending.duration_ms,
+                    "updated_at": pending.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "items": items });
+        let result: wire::ProgressSyncBatchResult = self.call(Method::POST, "sync/progress", Some(body)).await?;
+        for item in result.items {
+            if let wire::ProgressSyncBatchResultItemsItem::Failure(failure) = item {
+                eprintln!(
+                    "silo-omarchy: the server refused the progress of {}: {:?}",
+                    *failure.media_item_id, failure.failure
+                );
+            }
+        }
+        let mut pending = self.pending.lock().unwrap();
+        for (key, kept) in sent {
+            // A newer position that came in while the request ran stays.
+            if pending.get(&key) == Some(&kept) {
+                pending.remove(&key);
+            }
+        }
         Ok(())
+    }
+
+    /// Takes the kept positions, so that a new client of the same Account can send them.
+    pub fn take_pending(&self) -> HashMap<(String, String), Pending> {
+        std::mem::take(&mut self.pending.lock().unwrap())
+    }
+
+    /// Adds the kept positions of an older client of the same Account. A position that this client has is
+    /// newer, so it stays.
+    pub fn adopt_pending(&self, older: HashMap<(String, String), Pending>) {
+        let mut pending = self.pending.lock().unwrap();
+        for (key, kept) in older {
+            pending.entry(key).or_insert(kept);
+        }
     }
 
     // Profile PIN (#23).

@@ -75,3 +75,7 @@ A time range in a file version that Silo labels `intro`, `credits`, `recap` or `
 
 **Skip prompt**:
 The button that the player shows while playback is inside a marker. It offers "Skip intro", "Watch intro" (after an automatic skip), or "Next episode" (when the credits run to the end of the file). The app decides when the prompt shows. The controller only draws it.
+
+**Offline**:
+The app state when the active Server does not answer, or answers 503. The app keeps its tokens and retries. It never signs the user out.
+_Avoid_: disconnected, down

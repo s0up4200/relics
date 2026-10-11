@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, StreamExt as _};
@@ -13,13 +14,19 @@ use gpui::{
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
-use crate::api::{self, Client, Device, Error, Server, Url, wire};
+use crate::api::{self, Client, Device, Error, Server, Trouble, Url, wire};
 use crate::home::{self, Home};
-use crate::player::{PlaybackError, PlayerWindow};
+use crate::player::{PlaybackError, PlayerClosed, PlayerWindow};
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
 use crate::sign_in::{SignIn, SignedIn};
 use crate::state::{SavedAccount, SavedServer, State};
+
+/// The wait before retry number `attempt` (from 0) while the Server is Offline: 2, 4, 8 and 16 seconds, then
+/// 30 seconds.
+pub fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(if attempt < 4 { 2 << attempt } else { 30 })
+}
 
 pub struct LibraryWindow {
     state: State,
@@ -37,6 +44,16 @@ pub struct LibraryWindow {
     /// The last playback error, shown at the bottom of the window.
     player_error: Option<String>,
     _player: Subscription,
+    _player_closed: Subscription,
+    /// The client of the active Account.
+    client: Option<Arc<Client>>,
+    /// The Server does not answer. The window shows the Offline banner.
+    offline: bool,
+    /// Probes the Server while it is Offline.
+    probe: Option<Task<()>>,
+    /// The server refused the sign-in during playback. The sign-in screen shows when the player closes.
+    sign_in_waits: bool,
+    _troubles: Option<Task<()>>,
     /// The subscription to the Play events of Home.
     _play: Option<Subscription>,
     /// The Profiles of the active Account.
@@ -61,6 +78,8 @@ enum Screen {
     Profiles(Entity<ProfilePicker>),
     /// A full-window message, for example while the app restores the sign-in.
     Message(String),
+    /// The Server did not answer when the app opened the Account. The value is the text.
+    Unreachable(String),
 }
 
 enum Status {
@@ -90,6 +109,11 @@ impl LibraryWindow {
             this.player_error = Some(text.clone());
             cx.notify();
         });
+        let player_closed = cx.subscribe_in(&player, window, |this, _, _: &PlayerClosed, window, cx| {
+            if std::mem::take(&mut this.sign_in_waits) {
+                this.signed_out(window, cx);
+            }
+        });
         // Closing the Library window sends the stop report, closes the player and quits.
         window.on_window_should_close(cx, {
             let player = player.clone();
@@ -116,6 +140,12 @@ impl LibraryWindow {
             player,
             player_error: None,
             _player: player_events,
+            _player_closed: player_closed,
+            client: None,
+            offline: false,
+            probe: None,
+            sign_in_waits: false,
+            _troubles: None,
             _play: None,
             profiles: Vec::new(),
             pin_wait: None,
@@ -183,6 +213,13 @@ impl LibraryWindow {
 
     fn signed_in(&mut self, event: &SignedIn, window: &mut Window, cx: &mut Context<Self>) {
         let server = event.client.server();
+        // After a refused refresh, the new client sends the positions that the old client kept.
+        if let Some(old) = self.client.take()
+            && old.server().id == server.id
+            && self.account_id() == *event.account.id
+        {
+            event.client.adopt_pending(old.take_pending());
+        }
         self.state.remember(
             SavedServer { id: server.id.clone(), url: server.url.to_string(), accounts: Vec::new() },
             SavedAccount {
@@ -209,6 +246,8 @@ impl LibraryWindow {
             executor.spawn(async move { secrets::save(&server_id, &account_id, &tokens).await.ok() }).detach();
         });
         self.listen_for_pin(&client, window, cx);
+        self.listen_for_trouble(&client, window, cx);
+        self.client = Some(client.clone());
         self.screen = Screen::Message("Loading Profiles…".into());
         cx.notify();
         let last = self.state.active().and_then(|(_, account)| account.last_profile.clone());
@@ -230,8 +269,11 @@ impl LibraryWindow {
                         None => this.show_picker(client, None, window, cx),
                     }
                 }
-                Err(Error::SignedOut) => {
-                    this.show_sign_in(client.server().clone(), Some(Error::SignedOut.to_string()), window, cx)
+                // The trouble listener shows the sign-in screen and probes the Server.
+                Err(Error::SignedOut) => {}
+                Err(err) if err.is_offline() => {
+                    this.screen = Screen::Unreachable(format!("Can't reach {}", client.server().name));
+                    cx.notify();
                 }
                 Err(err) => {
                     this.screen = Screen::Message(err.to_string());
@@ -261,6 +303,9 @@ impl LibraryWindow {
                 if let Err(err) = client.load_server_settings().await {
                     eprintln!("silo-omarchy: cannot read the Server settings: {err}");
                 }
+                if let Err(err) = client.sync_progress().await {
+                    eprintln!("silo-omarchy: progress sync failed: {err}");
+                }
             }
         })
         .detach();
@@ -269,10 +314,10 @@ impl LibraryWindow {
         }
         self.save_state();
         let home = cx.new(|cx| Home::new(client.clone(), profile.name.clone(), window, cx));
-        self.show_home(client, home, window, cx);
+        self.show_home(client, home, cx);
     }
 
-    fn show_home(&mut self, client: Arc<Client>, home: Entity<Home>, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_home(&mut self, client: Arc<Client>, home: Entity<Home>, cx: &mut Context<Self>) {
         self._play = Some(cx.subscribe(&home, {
             let client = client.clone();
             move |this, _, home::Play(item), cx| {
@@ -280,10 +325,7 @@ impl LibraryWindow {
                 this.player.update(cx, |player, cx| player.play(client.clone(), item.into(), cx));
             }
         }));
-        let server = client.server().clone();
-        self._screen = Some(cx.subscribe_in(&home, window, move |this, _, _: &home::SignedOut, window, cx| {
-            this.show_sign_in(server.clone(), Some(Error::SignedOut.to_string()), window, cx);
-        }));
+        self._screen = None;
         self.screen = Screen::Home(home);
         cx.notify();
     }
@@ -326,7 +368,7 @@ impl LibraryWindow {
         match self.pin_wait.take() {
             Some(wait) if wait.profile_id == *profile.id => {
                 wait.reply.send(token.clone()).ok();
-                self.show_home(client, wait.home, window, cx);
+                self.show_home(client, wait.home, cx);
             }
             _ => self.open_profile(client, profile.clone(), token.clone(), window, cx),
         }
@@ -355,6 +397,93 @@ impl LibraryWindow {
                 .ok();
             }
         }));
+    }
+
+    /// Shows the Offline banner, or the sign-in screen, when a request of the client finds the Server
+    /// Offline or the sign-in refused.
+    fn listen_for_trouble(&mut self, client: &Arc<Client>, window: &mut Window, cx: &mut Context<Self>) {
+        let (troubles, mut told) = mpsc::unbounded();
+        client.on_trouble(move |trouble| {
+            troubles.unbounded_send(trouble).ok();
+        });
+        self._troubles = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some(trouble) = told.next().await {
+                let handled = this.update_in(cx, |this, window, cx| match trouble {
+                    Trouble::Offline => this.probe_until_online(window, cx),
+                    Trouble::SignedOut if this.player.read(cx).is_open() => this.sign_in_waits = true,
+                    Trouble::SignedOut => this.signed_out(window, cx),
+                });
+                if handled.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Shows the sign-in screen with the username filled in, unless it shows already.
+    fn signed_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(client) = &self.client else {
+            return;
+        };
+        if !matches!(self.screen, Screen::SignIn(_)) {
+            self.show_sign_in(client.server().clone(), Some(Error::SignedOut.to_string()), window, cx);
+        }
+    }
+
+    /// Probes `system/info` with the retry delays until the Server answers. Then it sends the kept progress,
+    /// and opens the Account again when the Server did not answer at launch.
+    fn probe_until_online(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.probe.is_some() {
+            return;
+        }
+        self.offline = true;
+        cx.notify();
+        self.probe = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut attempt = 0;
+            loop {
+                cx.background_executor().timer(retry_delay(attempt)).await;
+                if client.probe().await.is_ok() {
+                    break;
+                }
+                attempt = attempt.saturating_add(1);
+            }
+            cx.background_spawn({
+                let client = client.clone();
+                async move {
+                    client
+                        .sync_progress()
+                        .await
+                        .inspect_err(|err| eprintln!("silo-omarchy: progress sync failed: {err}"))
+                        .ok()
+                }
+            })
+            .detach();
+            this.update_in(cx, |this, window, cx| {
+                this.offline = false;
+                // This task ends here, so it must not drop itself.
+                if let Some(probe) = this.probe.take() {
+                    probe.detach();
+                }
+                if matches!(this.screen, Screen::Unreachable(_)) {
+                    this.open_account(client, window, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Retry on the "Can't reach" screen: opens the Account again now. A failure starts the retries again.
+    fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.probe = None;
+        self.offline = false;
+        self.open_account(client, window, cx);
     }
 
     fn account_id(&self) -> String {
@@ -410,7 +539,32 @@ impl Render for LibraryWindow {
             Screen::Home(view) => page.child(view.clone()),
             Screen::Profiles(view) => page.child(view.clone()),
             Screen::Message(text) => page.child(div().max_w(px(560.)).text_color(t.secondary).child(text.clone())),
+            Screen::Unreachable(text) => page.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(div().text_size(px(20.)).text_color(t.bright).child(text.clone()))
+                    .child(div().text_color(t.secondary).child("silo-omarchy retries by itself."))
+                    .child(
+                        button("retry", "Retry", ButtonVariant::Primary, cx)
+                            .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))),
+                    ),
+            ),
         };
+        let banner = self.offline && !matches!(self.screen, Screen::Unreachable(_));
+        let page = page.children(banner.then(|| {
+            div()
+                .absolute()
+                .top(px(16.))
+                .px(px(16.))
+                .py(px(8.))
+                .rounded_full()
+                .bg(t.surface)
+                .text_color(t.warning)
+                .child("Offline, retrying")
+        }));
         page.children(self.player_error.clone().map(|text| {
             div()
                 .absolute()
