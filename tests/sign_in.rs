@@ -80,7 +80,7 @@ fn password_sign_in_sends_the_device_headers_and_returns_the_account() {
         "api/v2/auth/login" => ok("login_ok.json"),
         _ => (404, "text/plain", String::new()),
     });
-    let (client, account) = block_on(Client::login(http, server(), device(), "laura", "pw")).unwrap();
+    let (client, account) = block_on(Client::login(http, server(), device(), "laura", "pw", None)).unwrap();
     assert_eq!(account.username, "laura");
     assert_eq!(*account.id, "1");
     assert_eq!(client.tokens().access_token, "acc");
@@ -102,7 +102,7 @@ fn password_sign_in_sends_the_device_headers_and_returns_the_account() {
 #[test]
 fn wrong_credentials_show_the_server_detail() {
     let (http, _) = fake(|_| problem(401, "login_invalid_credentials.json"));
-    let err = block_on(Client::login(http, server(), device(), "laura", "nope")).err().unwrap();
+    let err = block_on(Client::login(http, server(), device(), "laura", "nope", None)).err().unwrap();
     let Error::Problem(problem) = &err else { panic!("{err:?}") };
     assert_eq!(err.to_string(), problem.detail);
 }
@@ -254,4 +254,95 @@ fn only_a_single_profile_without_a_pin_opens_without_the_picker() {
     assert_eq!(id(&[profile("a", true)]), None);
     assert_eq!(id(&[profile("a", false), profile("b", false)]), None);
     assert_eq!(id(&[]), None);
+}
+
+#[test]
+fn a_chosen_provider_goes_with_the_password() {
+    let (http, seen) = fake(|_| ok("login_ok.json"));
+    block_on(Client::login(http, server(), device(), "laura", "pw", Some("ldap"))).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&seen.lock().unwrap()[0].body).unwrap(),
+        serde_json::json!({"username": "laura", "password": "pw", "provider": "ldap"})
+    );
+}
+
+#[test]
+fn only_providers_that_take_a_password_are_offered() {
+    let mut list: serde_json::Value = serde_json::from_str(&fixture("list_auth_providers_ok.json")).unwrap();
+    let only_local = list.to_string();
+    list["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"id": "ldap", "display_name": "Directory", "mode": "credentials", "default": false}));
+    let with_ldap = list.to_string();
+    let ids = |body: String| {
+        let (http, seen) = fake(move |_| (200, "application/json", body.clone()));
+        let providers = block_on(api::password_providers(&http, &server(), &device())).unwrap();
+        assert_eq!(seen.lock().unwrap()[0].path, "api/v2/auth/providers");
+        providers.into_iter().map(|p| p.id).collect::<Vec<_>>()
+    };
+    assert_eq!(ids(only_local), ["local"]);
+    assert_eq!(ids(with_ldap), ["local", "ldap"]);
+}
+
+#[test]
+fn device_sign_in_starts_with_the_device_name_and_shows_the_code_in_two_groups() {
+    let (http, seen) = fake(|_| (201, "application/json", fixture("start_device_login_ok.json")));
+    let start = block_on(api::start_device_login(&http, &server(), &device())).unwrap();
+    assert_eq!(start.device_code, "dev-1");
+    assert_eq!(api::user_code(&start.user_code), "4821 7730");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "api/v2/auth/device/start"));
+    assert_eq!(seen[0].header("X-Silo-Device-Id"), Some("6c1f0d3e-0000-4000-8000-000000000001"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap(),
+        serde_json::json!({"device_name": "omarchy-box", "device_platform": "linux"})
+    );
+}
+
+fn poll(reply: Reply) -> (Result<api::DeviceLogin, Error>, Vec<Seen>) {
+    let (http, seen) = fake(move |_| reply.clone());
+    let result = block_on(api::poll_device_login(http, server(), device(), "dev-1"));
+    let seen = seen.lock().unwrap().clone();
+    (result, seen)
+}
+
+fn poll_status(status: &str) -> Reply {
+    let mut body: serde_json::Value = serde_json::from_str(&fixture("poll_device_login_opened.json")).unwrap();
+    body["status"] = status.into();
+    body["opened"] = false.into();
+    (200, "application/json", body.to_string())
+}
+
+#[test]
+fn device_poll_waits_for_the_approval_and_then_signs_in() {
+    let (result, seen) = poll(ok("poll_device_login_opened.json"));
+    assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "api/v2/auth/device/poll"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap(),
+        serde_json::json!({"device_code": "dev-1"})
+    );
+    let Ok(api::DeviceLogin::Waiting { opened, poll_after }) = result else { panic!("not waiting") };
+    assert!(opened);
+    assert_eq!(poll_after, std::time::Duration::from_secs(5));
+
+    let Ok(api::DeviceLogin::SignedIn(client, account)) = poll(ok("poll_device_login_ok.json")).0 else {
+        panic!("not signed in")
+    };
+    assert_eq!(account.username, "laura");
+    assert_eq!(client.tokens(), Tokens { access_token: "acc".into(), refresh_token: "ref".into() });
+}
+
+#[test]
+fn a_denied_or_dead_code_ends_device_sign_in() {
+    let ended = |status: &str| match poll(poll_status(status)).0 {
+        Ok(api::DeviceLogin::Ended(message)) => message,
+        _ => panic!("{status} did not end"),
+    };
+    assert_eq!(ended("denied"), "Approval was denied. Start a new code to try again.");
+    for status in ["expired", "consumed", "canceled"] {
+        assert_eq!(ended(status), "This code is no longer valid. Start a new one.");
+    }
+    assert!(matches!(poll(poll_status("pending")).0, Ok(api::DeviceLogin::Waiting { opened: false, .. })));
 }

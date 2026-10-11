@@ -226,15 +226,20 @@ impl Client {
         *self.on_tokens.lock().unwrap() = Box::new(save);
     }
 
-    /// Signs in with a username and password.
+    /// Signs in with a username and password. With no `provider`, the server picks the
+    /// provider from the Account.
     pub async fn login(
         http: Arc<dyn HttpClient>,
         server: Server,
         device: Device,
         username: &str,
         password: &str,
+        provider: Option<&str>,
     ) -> Result<(Self, wire::Account), Error> {
-        let body = serde_json::json!({ "username": username, "password": password });
+        let mut body = serde_json::json!({ "username": username, "password": password });
+        if let Some(provider) = provider {
+            body["provider"] = provider.into();
+        }
         let headers = device_headers(&device);
         let pair: wire::TokenPair = send(&http, &server, Method::POST, "auth/login", &headers, Some(body)).await?;
         let tokens = Tokens { access_token: pair.access_token, refresh_token: pair.refresh_token };
@@ -588,4 +593,79 @@ fn start_request(file_id: &str, installation_id: &str, profile_id: &str, feature
             },
         },
     })
+}
+
+// Sign-in with a provider choice and device sign-in (#34).
+
+/// The providers that take a username and password, in the server order. The
+/// sign-in screen shows a choice only when there is more than one.
+pub async fn password_providers(
+    http: &Arc<dyn HttpClient>,
+    server: &Server,
+    device: &Device,
+) -> Result<Vec<wire::AuthProvider>, Error> {
+    let list: wire::AuthProviderCollection =
+        send(http, server, Method::GET, "auth/providers", &device_headers(device), None).await?;
+    Ok(list.items.into_iter().filter(|p| p.mode == "credentials").collect())
+}
+
+/// Starts device sign-in. The user approves the code of the reply on another device.
+pub async fn start_device_login(
+    http: &Arc<dyn HttpClient>,
+    server: &Server,
+    device: &Device,
+) -> Result<wire::DeviceLoginStart, Error> {
+    let body = serde_json::json!({ "device_name": device.name, "device_platform": "linux" });
+    send(http, server, Method::POST, "auth/device/start", &device_headers(device), Some(body)).await
+}
+
+/// The state of a device sign-in after one poll.
+pub enum DeviceLogin {
+    /// Poll again after `poll_after`. `opened` is true when the approver opened the code.
+    Waiting {
+        opened: bool,
+        poll_after: std::time::Duration,
+    },
+    SignedIn(Box<Client>, wire::Account),
+    /// The code cannot sign in any more. The value tells the user why.
+    Ended(&'static str),
+}
+
+/// Asks the server once whether the user approved the device sign-in.
+pub async fn poll_device_login(
+    http: Arc<dyn HttpClient>,
+    server: Server,
+    device: Device,
+    device_code: &str,
+) -> Result<DeviceLogin, Error> {
+    let body = serde_json::json!({ "device_code": device_code });
+    let poll: wire::DeviceLoginPoll =
+        send(&http, &server, Method::POST, "auth/device/poll", &device_headers(&device), Some(body)).await?;
+    Ok(match (types::DeviceLoginStatus::from(poll.status), poll.tokens) {
+        (types::DeviceLoginStatus::Approved, Some(pair)) => {
+            let tokens = Tokens { access_token: pair.access_token, refresh_token: pair.refresh_token };
+            DeviceLogin::SignedIn(Box::new(Client::new(http, server, device, tokens)), pair.user)
+        }
+        (types::DeviceLoginStatus::Denied, _) => {
+            DeviceLogin::Ended("Approval was denied. Start a new code to try again.")
+        }
+        (
+            types::DeviceLoginStatus::Expired | types::DeviceLoginStatus::Consumed | types::DeviceLoginStatus::Canceled,
+            _,
+        ) => DeviceLogin::Ended("This code is no longer valid. Start a new one."),
+        // Pending, or a status that this version does not know: wait, like the web client.
+        _ => DeviceLogin::Waiting {
+            opened: poll.opened,
+            poll_after: std::time::Duration::from_secs(poll.poll_after.max(1) as u64),
+        },
+    })
+}
+
+/// The device sign-in code as the user reads it: eight digits in two groups of four.
+pub fn user_code(code: &str) -> String {
+    let code: String = code.chars().filter(char::is_ascii_alphanumeric).collect();
+    match code.split_at_checked(4) {
+        Some((first, rest)) if !rest.is_empty() => format!("{first} {rest}"),
+        _ => code,
+    }
 }
