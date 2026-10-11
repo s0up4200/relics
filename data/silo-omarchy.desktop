@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Silo
+GenericName=Media Player
+Comment=Watch the library of your Silo server
+Exec=silo-omarchy
+Icon=multimedia-video-player
+Terminal=false
+Categories=AudioVideo;Video;Player;
+StartupWMClass=silo-omarchy
