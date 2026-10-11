@@ -254,6 +254,16 @@ impl LibraryWindow {
         self.pin_wait = None;
         client.set_profile(Some(profile.id.to_string()));
         client.set_profile_token(token);
+        // Until the reply comes, playback uses the default Server settings.
+        cx.background_spawn({
+            let client = client.clone();
+            async move {
+                if let Err(err) = client.load_server_settings().await {
+                    eprintln!("silo-omarchy: cannot read the Server settings: {err}");
+                }
+            }
+        })
+        .detach();
         if let Some(account) = self.state.active_account_mut() {
             account.last_profile = Some(profile.id.to_string());
         }

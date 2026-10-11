@@ -96,13 +96,29 @@ fn resume_leaves_out_the_start_position_and_start_over_sends_zero() {
 #[test]
 fn a_direct_play_decision_has_an_absolute_stream_url_below_the_base_url() {
     let (client, _) = fake("silo/playback_start_opaque_ids.json");
-    let Decision::Playable { session_id, plan } = block_on(client.start_playback("movie:heat-1995", None)).unwrap()
+    let Decision::Playable { session_id, plan, .. } = block_on(client.start_playback("movie:heat-1995", None)).unwrap()
     else {
         panic!("not playable");
     };
     assert_eq!(session_id, SESSION);
     assert_eq!(types::Delivery::from(plan.delivery), types::Delivery::OriginalHttp);
     assert_eq!(plan.stream.url, format!("https://silo.test/media/api/v2/stream/{SESSION}"));
+}
+
+#[test]
+fn the_server_picks_the_audio_track_and_the_decision_carries_its_language() {
+    let (client, seen) = fake("silo/playback_start_opaque_ids.json");
+    let Decision::Playable { audio_language, plan, .. } =
+        block_on(client.start_playback("movie:heat-1995", None)).unwrap()
+    else {
+        panic!("not playable");
+    };
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!((body.get("audio_track_id"), body.get("audio_track_index")), (None, None));
+    // The version has no audio track list, so the language is the effective audio language of the version.
+    assert_eq!(audio_language.as_deref(), Some("en"));
+    let url = plan.subtitle.inventory[0].url.as_deref().unwrap();
+    assert!(url.starts_with(&format!("https://silo.test/media/api/v2/stream/{SESSION}/subtitles/0.vtt?")), "{url}");
 }
 
 #[test]

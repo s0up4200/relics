@@ -257,3 +257,17 @@ fn a_cycles_the_audio_track_only_for_the_file_that_plays() {
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     wait_for_property(&player, "aid", "1");
 }
+
+#[test]
+fn an_added_subtitle_shows_and_its_request_has_the_header() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0).unwrap();
+    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
+    assert_eq!(player.property("sid").unwrap(), "no");
+    player.add_subtitle(&format!("{}/sample.vtt", stub.url), "English", "eng").unwrap();
+    wait_for_property(&player, "sid", "1");
+    assert_eq!(player.property("current-tracks/sub/lang").unwrap(), "eng");
+    assert!(stub.requests.lock().unwrap().iter().any(|r| r.path == "/sample.vtt"));
+    assert_each_request_has_the_header(&stub);
+}

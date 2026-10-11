@@ -7,5 +7,6 @@ pub mod playback;
 pub mod profiles;
 pub mod player;
 pub mod secrets;
+pub mod settings;
 pub mod sign_in;
 pub mod state;

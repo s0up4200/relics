@@ -61,3 +61,7 @@ _Avoid_: stream, play
 **Normal end**:
 An end of file that mpv reports within 8 s of the Item's duration or at 98.5% of it or more. Only a Normal end lets the stop report carry the full duration.
 _Avoid_: finished, complete
+
+**Server setting**:
+A preference that Silo stores for a Profile. Every client that uses the Profile shares it.
+_Avoid_: preference, user setting

@@ -62,7 +62,7 @@ impl PlayerWindow {
     pub fn play(&mut self, client: Arc<Client>, item: &wire::CatalogItem, cx: &mut Context<Self>) {
         self.step(Input::End, cx);
         let runtime = item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0));
-        self.session = Some(Session::new(runtime));
+        self.session = Some(Session::new(runtime, client.server_settings()));
         self.client = Some(client.clone());
         let content_id = item.play_content_id.clone().unwrap_or_else(|| item.content_id.clone());
         // A new Item drops this task, so the reply of an older start never reaches the new session.
@@ -121,6 +121,11 @@ impl PlayerWindow {
                 });
                 if let Some(older) = self.stopping.replace(stop) {
                     older.detach();
+                }
+            }
+            Command::AddSubtitle { url, title, language } => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_subtitle(&url, &title, &language)) {
+                    eprintln!("silo-omarchy: cannot add the subtitles {url}: {err}");
                 }
             }
             Command::ClosePlayer => self.close_mpv(),

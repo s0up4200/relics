@@ -68,17 +68,25 @@ impl Player {
         Ok(Self { mpv, events: Some(events) })
     }
 
-    /// Opens `url` and plays it from `start` seconds. mpv sends `headers` on each media
-    /// request of this file. They go in the per-file options of `loadfile`, because mpv
-    /// copies `http-header-fields` only when it opens a file.
+    /// Opens `url` and plays it from `start` seconds, with no subtitles. mpv sends `headers`
+    /// on each media request of this file. They go in the per-file options of `loadfile`,
+    /// because mpv copies `http-header-fields` only when it opens a file.
     pub fn load(&self, url: &str, headers: &[(String, String)], start: f64) -> Result<(), Error> {
         // A string list separates its items with commas, and a backslash escapes a comma in an item.
         let fields: Vec<String> = headers
             .iter()
             .map(|(name, value)| format!("{name}: {value}").replace('\\', "\\\\").replace(',', "\\,"))
             .collect();
-        let options = [option("http-header-fields", &fields.join(",")), option("start", &start.to_string())];
+        // The app picks the subtitles (`add_subtitle`), so mpv must not pick a track of the file by itself.
+        let options =
+            [option("http-header-fields", &fields.join(",")), option("start", &start.to_string()), option("sid", "no")];
         self.mpv.command("loadfile", &[url, "replace", "-1", &options.join(",")])
+    }
+
+    /// Adds the subtitle file at `url` to the file that plays, and shows it. mpv sends the headers of
+    /// the file. The download runs in the background, so a slow server does not block the caller.
+    pub fn add_subtitle(&self, url: &str, title: &str, language: &str) -> Result<(), Error> {
+        self.mpv.command("async", &["sub-add", url, "select", title, language])
     }
 
     /// Sends the theme colors, as `#RRGGBB`, to the Lua controller.

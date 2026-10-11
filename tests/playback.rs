@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use silo_omarchy::api::types::Decision;
 use silo_omarchy::playback::{Command, Headers, Input, Sample, Session};
+use silo_omarchy::settings::{ServerSettings, SubtitleMode};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -26,7 +27,7 @@ fn headers() -> Headers {
 
 /// A session whose file is loaded at time 0. `runtime` is the Item runtime in seconds.
 fn playing(runtime: Option<f64>) -> Session {
-    let mut session = Session::new(runtime);
+    let mut session = Session::new(runtime, ServerSettings::default());
     session.step(Input::Started { decision: decision(|_| {}), headers: headers() }, at(0));
     session.step(Input::FileLoaded, at(0));
     session
@@ -38,7 +39,7 @@ fn stop(position: f64, sequence: u64) -> Command {
 
 #[test]
 fn a_playable_decision_loads_the_stream_with_the_headers_at_the_plan_start() {
-    let mut session = Session::new(None);
+    let mut session = Session::new(None, ServerSettings::default());
     let commands = session.step(Input::Started { decision: decision(|_| {}), headers: headers() }, at(0));
     assert_eq!(
         commands,
@@ -72,7 +73,7 @@ fn progress_goes_to_the_server_every_ten_seconds() {
 
 #[test]
 fn no_progress_goes_before_the_file_is_loaded() {
-    let mut session = Session::new(None);
+    let mut session = Session::new(None, ServerSettings::default());
     session.step(Input::Started { decision: decision(|_| {}), headers: headers() }, at(0));
     // A position from the file that this Item replaced.
     session.step(Input::Position(900.0), at(1));
@@ -81,7 +82,7 @@ fn no_progress_goes_before_the_file_is_loaded() {
 
 #[test]
 fn the_position_in_a_report_is_the_source_position() {
-    let mut session = Session::new(None);
+    let mut session = Session::new(None, ServerSettings::default());
     let decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 600.into());
     session.step(Input::Started { decision, headers: headers() }, at(0));
     session.step(Input::FileLoaded, at(0));
@@ -153,14 +154,14 @@ fn a_load_failure_sends_the_stop_report_and_shows_an_error() {
 
 #[test]
 fn an_unplayable_item_shows_the_server_message() {
-    let mut session = Session::new(None);
+    let mut session = Session::new(None, ServerSettings::default());
     let decision =
         Decision::Unavailable { reason: "transcoding_disabled".into(), message: "Transcoding is off".into() };
     assert_eq!(
         session.step(Input::Started { decision, headers: headers() }, at(0)),
         vec![Command::ShowError("Transcoding is off".into()), Command::ClosePlayer]
     );
-    let mut session = Session::new(None);
+    let mut session = Session::new(None, ServerSettings::default());
     let commands =
         session.step(Input::Started { decision: Decision::Unknown("queued".into()), headers: headers() }, at(0));
     assert!(matches!(&commands[..], [Command::ShowError(text), Command::ClosePlayer] if text.contains("queued")));
@@ -170,4 +171,53 @@ fn an_unplayable_item_shows_the_server_message() {
 fn the_controller_gets_the_theme_when_it_is_ready() {
     let mut session = playing(None);
     assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme]);
+}
+
+/// Starts a session with `settings` on the fixture plan, whose audio is in `audio_language`, and loads the file.
+fn load_with(settings: ServerSettings, audio_language: &str) -> Vec<Command> {
+    let mut session = Session::new(None, settings);
+    let Decision::Playable { session_id, plan, .. } = decision(|_| {}) else { unreachable!() };
+    let decision = Decision::Playable { session_id, plan, audio_language: Some(audio_language.into()) };
+    session.step(Input::Started { decision, headers: headers() }, at(0));
+    session.step(Input::FileLoaded, at(0))
+}
+
+/// The command that adds track 0 (English, external) or 1 (English signs, forced) of the fixture inventory.
+fn subtitle(index: usize) -> Command {
+    let (path, title) = [
+        (
+            "0.vtt?file_id=42&external_subtitle_key=f903db1c5624c46c4a2c20f2fd8cd247fc0d46e6471c91d4ddb651ae4e039448",
+            "English",
+        ),
+        ("1.ass?file_id=42&embedded_stream_index=0", "English (Signs)"),
+    ][index];
+    Command::AddSubtitle {
+        url: format!("/api/v2/stream/{SESSION}/subtitles/{path}"),
+        title: title.into(),
+        language: "eng".into(),
+    }
+}
+
+#[test]
+fn foreign_audio_shows_the_subtitles_of_the_profile_language_when_the_file_loads() {
+    // With no languages set, the profile language is English.
+    assert_eq!(load_with(ServerSettings::default(), "ja"), vec![subtitle(0)]);
+}
+
+#[test]
+fn audio_in_the_profile_language_shows_only_the_forced_track() {
+    let settings = ServerSettings { audio_language: Some("en".into()), ..ServerSettings::default() };
+    assert_eq!(load_with(settings.clone(), "en"), vec![subtitle(1)]);
+    let settings = ServerSettings { show_forced_subtitles: false, ..settings };
+    assert_eq!(load_with(settings, "en"), vec![]);
+}
+
+#[test]
+fn a_track_that_needs_a_burn_in_shows_no_subtitles() {
+    let settings = ServerSettings {
+        subtitle_mode: SubtitleMode::Always,
+        subtitle_language: Some("fr".into()),
+        ..ServerSettings::default()
+    };
+    assert_eq!(load_with(settings, "en"), vec![]);
 }

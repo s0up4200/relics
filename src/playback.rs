@@ -6,6 +6,9 @@
 use std::time::{Duration, SystemTime};
 
 use crate::api::types::Decision;
+use crate::settings::ServerSettings;
+
+pub mod subtitles;
 
 /// The time between two progress reports while the file is open, playing or paused.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -70,11 +73,15 @@ pub enum Command {
     ShowError(String),
     /// Send the theme colors to the Lua controller.
     SendTheme,
+    /// Add the subtitle file at `url` to mpv and show it.
+    AddSubtitle { url: String, title: String, language: String },
 }
 
 pub struct Session {
     /// The Item runtime in seconds. The end rule uses it when mpv has no duration.
     runtime: Option<f64>,
+    /// The Server settings of the Profile when the session started.
+    settings: ServerSettings,
     plan: Option<Plan>,
     ended: bool,
     loaded: bool,
@@ -89,12 +96,15 @@ struct Plan {
     session_id: String,
     /// Add it to a player position to get the source position.
     offset: f64,
+    /// The command that shows the subtitle track of the subtitle choice, when the file loads.
+    subtitle: Option<Command>,
 }
 
 impl Session {
-    pub fn new(runtime: Option<f64>) -> Self {
+    pub fn new(runtime: Option<f64>, settings: ServerSettings) -> Self {
         Self {
             runtime,
+            settings,
             plan: None,
             ended: false,
             loaded: false,
@@ -112,13 +122,24 @@ impl Session {
         }
         match input {
             Input::Started { decision, headers } => match decision {
-                Decision::Playable { session_id, plan } => {
+                Decision::Playable { session_id, plan, audio_language } => {
                     let load = Command::Load {
                         url: plan.stream.url.clone(),
                         headers,
                         start: plan.timeline.player_start_seconds,
                     };
-                    self.plan = Some(Plan { session_id, offset: plan.timeline.timeline_offset_seconds });
+                    let tracks = &plan.subtitle.inventory;
+                    let chosen = subtitles::choose(tracks, &self.settings, audio_language.as_deref());
+                    // ponytail: a track without a URL needs a burn-in replan, so it shows no subtitles until #27
+                    // adds replan.
+                    let subtitle = tracks.iter().find(|track| Some(track.combined_index) == chosen).and_then(|track| {
+                        Some(Command::AddSubtitle {
+                            url: track.url.clone()?,
+                            title: track.label.clone().unwrap_or_default(),
+                            language: track.language.clone().unwrap_or_default(),
+                        })
+                    });
+                    self.plan = Some(Plan { session_id, offset: plan.timeline.timeline_offset_seconds, subtitle });
                     vec![load]
                 }
                 Decision::Unavailable { message, .. } => self.fail(message),
@@ -130,7 +151,7 @@ impl Session {
             Input::FileLoaded => {
                 self.loaded = true;
                 self.last_report = Some(now);
-                Vec::new()
+                self.plan.as_ref().and_then(|plan| plan.subtitle.clone()).into_iter().collect()
             }
             Input::Position(position) if self.loaded => {
                 self.position = Some(position);

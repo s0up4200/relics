@@ -16,6 +16,7 @@ pub use gpui::http_client::Url;
 pub use types::{Decision, Problem};
 
 use crate::playback::Sample;
+use crate::settings::{self, ServerSettings};
 
 /// A Silo server that the user added. The app knows it by `id`, the stable id that
 /// the server reports, not by its URL.
@@ -191,6 +192,8 @@ pub struct Client {
     on_pin_required: Mutex<AskPin>,
     /// The id of the server installation from the playback capabilities. Progress and stop send it.
     installation_id: Mutex<String>,
+    /// The Server settings of the active Profile.
+    server_settings: Mutex<ServerSettings>,
 }
 
 type SaveTokens = Box<dyn Fn(&Tokens) + Send + Sync>;
@@ -218,6 +221,7 @@ impl Client {
             unlocking: futures::lock::Mutex::new(()),
             on_pin_required: Mutex::new(Box::new(|_| Box::pin(async { None }))),
             installation_id: Mutex::default(),
+            server_settings: Mutex::default(),
         }
     }
 
@@ -254,11 +258,31 @@ impl Client {
         self.auth.lock().unwrap().tokens.clone()
     }
 
-    /// Sets the Profile that the next requests act for. It drops the PIN token of the old Profile.
+    /// Sets the Profile that the next requests act for. It drops the PIN token and the Server settings of the
+    /// old Profile.
     pub fn set_profile(&self, profile_id: Option<String>) {
         let mut auth = self.auth.lock().unwrap();
         auth.profile_id = profile_id;
         auth.profile_token = None;
+        *self.server_settings.lock().unwrap() = ServerSettings::default();
+    }
+
+    /// The Server settings of the active Profile, or the defaults until `load_server_settings` has read them.
+    pub fn server_settings(&self) -> ServerSettings {
+        self.server_settings.lock().unwrap().clone()
+    }
+
+    /// Reads the Server settings of the active Profile from the server and keeps them in memory.
+    pub async fn load_server_settings(&self) -> Result<(), Error> {
+        let profile_id = self.auth.lock().unwrap().profile_id.clone();
+        let query = settings::KEYS.map(|key| format!("keys={key}")).join("&");
+        let values: wire::EffectiveSettingCollection =
+            self.call(Method::GET, &format!("settings/values/effective?{query}"), None).await?;
+        // The user can switch to another Profile while the request runs.
+        if self.auth.lock().unwrap().profile_id == profile_id {
+            *self.server_settings.lock().unwrap() = ServerSettings::from_effective(&values.items);
+        }
+        Ok(())
     }
 
     pub async fn profiles(&self) -> Result<Vec<wire::Profile>, Error> {
@@ -379,10 +403,14 @@ impl Client {
         }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
-        if let Decision::Playable { plan, .. } = &mut decision {
-            // The plan URL is relative to the server origin. Join it below the base URL, which keeps a sub-path.
-            let url = self.server.url.join(plan.stream.url.trim_start_matches('/')).map_err(|_| Error::InvalidUrl)?;
-            plan.stream.url = url.to_string();
+        if let Decision::Playable { plan, audio_language, .. } = &mut decision {
+            // The plan URLs are relative to the server origin. Join them below the base URL, which keeps a sub-path.
+            let absolute = |url: &str| self.server.url.join(url.trim_start_matches('/')).map(String::from);
+            plan.stream.url = absolute(&plan.stream.url).map_err(|_| Error::InvalidUrl)?;
+            for track in &mut plan.subtitle.inventory {
+                track.url = track.url.as_deref().and_then(|url| absolute(url).ok());
+            }
+            *audio_language = audio_language_of(version, plan);
         }
         Ok(decision)
     }
@@ -470,6 +498,14 @@ impl Client {
         auth.profile_token = Some(token);
         true
     }
+}
+
+/// The language of the audio track that the server picked for the plan: the language of the track, else
+/// the effective audio language of the version, which the server resolves from the same Profile preference.
+fn audio_language_of(version: &wire::FileVersion, plan: &wire::PlaybackPlan) -> Option<String> {
+    let index = plan.selected_tracks.audio.as_ref().and_then(|audio| audio.index)?;
+    let track = usize::try_from(index).ok().and_then(|i| version.audio_tracks.get(i));
+    track.and_then(|track| track.language.clone()).or_else(|| version.effective_audio_language.clone())
 }
 
 fn is_unauthorized(err: &Error) -> bool {
