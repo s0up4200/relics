@@ -63,7 +63,7 @@ fn the_server_list_has_one_entry_for_each_server_and_account_pair() {
     let mut state = State::fresh();
     for (server, url, account, username) in [
         ("server-1", "https://silo.test/media/", "1", "laura"),
-        ("server-2", "http://10.0.0.5:8080/", "1", "laura"),
+        ("server-2", "http://127.0.0.1:8080/", "1", "laura"),
         ("server-1", "https://silo.test/media/", "2", "kim"),
     ] {
         state.remember(
@@ -79,7 +79,7 @@ fn the_server_list_has_one_entry_for_each_server_and_account_pair() {
         [
             pair("server-1", "1", "silo.test", "laura"),
             pair("server-1", "2", "silo.test", "kim"),
-            pair("server-2", "1", "10.0.0.5", "laura"),
+            pair("server-2", "1", "127.0.0.1", "laura"),
         ]
     );
 }

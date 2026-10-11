@@ -5,57 +5,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::AsyncReadExt as _;
+mod common;
+
+use common::{Log, Reply, Seen, fixture, json, ok, reply};
 use futures::executor::block_on;
-use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response, Url};
 use serde_json::{Value, json};
-use silo_omarchy::api::{Client, Decision, Device, Error, Server, Tokens, Trouble};
+use silo_omarchy::api::{Client, Decision, Error, Trouble};
 use silo_omarchy::library::retry_delay;
 use silo_omarchy::playback::{Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
-fn fixture(path: &str) -> String {
-    std::fs::read_to_string(format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
-}
-
-#[derive(Debug, Clone)]
-struct Seen {
-    method: String,
-    path: String,
-    body: String,
-}
-
-type Reply = Option<(u16, &'static str, String)>;
-
-/// A fake Silo server at `https://silo.test/`. `reply` gets each request and returns the reply, or `None`
-/// for no reply (a network failure).
-fn fake(reply: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> (Client, Arc<Mutex<Vec<Seen>>>, Troubles) {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let log = seen.clone();
-    let reply = Arc::new(reply);
-    let http: Arc<dyn HttpClient> = FakeHttpClient::create(move |req| {
-        let (log, reply) = (log.clone(), reply.clone());
-        async move {
-            let method = req.method().to_string();
-            let path = req.uri().to_string().strip_prefix("https://silo.test/api/v2/").unwrap().to_string();
-            let mut body = String::new();
-            req.into_body().read_to_string(&mut body).await?;
-            let request = Seen { method, path, body };
-            log.lock().unwrap().push(request.clone());
-            let (status, content_type, body) = reply(&request).ok_or_else(|| anyhow::anyhow!("no route to host"))?;
-            Ok(Response::builder()
-                .status(status)
-                .header("Content-Type", content_type)
-                .body(AsyncBody::from(body))
-                .unwrap())
-        }
-    });
-    let server =
-        Server { id: "server-1".into(), name: "silo.test".into(), url: Url::parse("https://silo.test/").unwrap() };
-    let device = Device { id: "6c1f0d3e-0000-4000-8000-000000000001".into(), name: "omarchy-box".into() };
-    let client = Client::new(http, server, device, Tokens { access_token: "acc".into(), refresh_token: "ref".into() });
-    client.set_profile(Some("p-owner".into()));
+/// A fake Silo server at `https://silo.test/`, a client of it, and the troubles that the client tells.
+fn fake(reply: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> (Client, Log, Troubles) {
+    let (client, seen) = common::fake(reply);
     let troubles = Troubles::default();
     let log = troubles.clone();
     client.on_trouble(move |trouble| log.0.lock().unwrap().push(trouble));
@@ -71,22 +34,18 @@ impl Troubles {
     }
 }
 
-fn ok(path: &str) -> Reply {
-    Some((200, "application/json", fixture(path)))
-}
-
 fn problem(status: u16, code: &str) -> Reply {
     let body = json!({ "type": format!("https://silo.test/problems/{code}"), "title": code, "status": status });
-    Some((status, "application/problem+json", body.to_string()))
+    reply(status, "application/problem+json", body.to_string())
 }
 
 /// The playback start requests of the server fixtures.
 fn playback(req: &Seen) -> Reply {
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "catalog/items/movie:heat-1995/versions") => ok("silo/list_catalog_item_versions_ok.json"),
-        ("GET", "playback/capabilities") => ok("silo/playback_capability_available.json"),
+        ("GET", "catalog/items/movie:heat-1995/versions") => ok("list_catalog_item_versions_ok.json"),
+        ("GET", "playback/capabilities") => ok("playback_capability_available.json"),
         ("GET", p) if p.starts_with("markers/") => problem(404, "not_found"),
-        ("POST", "playback/start") => Some((201, "application/json", fixture("silo/playback_start_opaque_ids.json"))),
+        ("POST", "playback/start") => json(201, fixture("playback_start_opaque_ids.json")),
         _ => None,
     }
 }
@@ -115,7 +74,7 @@ fn a_refused_refresh_with_400_401_or_403_signs_the_user_out() {
 fn a_503_or_no_reply_is_offline_and_never_signs_the_user_out() {
     let replies: [fn(&Seen) -> Reply; 4] = [
         |_| problem(503, "service_unavailable"),
-        |_| Some((503, "text/plain", String::new())),
+        |_| reply(503, "text/plain", String::new()),
         |_| None,
         |req| if req.path == "auth/refresh" { None } else { problem(401, "token_refresh_required") },
     ];
@@ -131,8 +90,7 @@ fn a_503_or_no_reply_is_offline_and_never_signs_the_user_out() {
 
 #[test]
 fn the_probe_reads_system_info_with_no_sign_in() {
-    let (client, seen, _) =
-        fake(|req| if req.path == "system/info" { ok("silo/get_system_info_ok.json") } else { None });
+    let (client, seen, _) = fake(|req| if req.path == "system/info" { ok("get_system_info_ok.json") } else { None });
     block_on(client.probe()).unwrap();
     assert_eq!(seen.lock().unwrap()[0].path, "system/info");
 }
@@ -144,7 +102,7 @@ fn a_failed_progress_report_is_sent_with_sync_progress_when_the_server_answers()
         let down = down.clone();
         move |req| match req.path.as_str() {
             _ if down.load(Ordering::SeqCst) => None,
-            "sync/progress" => ok("silo/sync_progress_ok.json"),
+            "sync/progress" => ok("sync_progress_ok.json"),
             _ => playback(req),
         }
     });
@@ -182,7 +140,7 @@ fn kept_progress_goes_only_to_its_profile() {
         let down = down.clone();
         move |req| match req.path.as_str() {
             _ if down.load(Ordering::SeqCst) => None,
-            "sync/progress" => ok("silo/sync_progress_ok.json"),
+            "sync/progress" => ok("sync_progress_ok.json"),
             _ => playback(req),
         }
     });
@@ -203,7 +161,7 @@ fn kept_progress_goes_only_to_its_profile() {
 fn a_report_that_the_server_refuses_is_synced_at_once() {
     let (client, seen, _) = fake(|req| match req.path.as_str() {
         p if p.ends_with("/progress") && p.starts_with("playback/") => problem(404, "playback_session_not_found"),
-        "sync/progress" => ok("silo/sync_progress_ok.json"),
+        "sync/progress" => ok("sync_progress_ok.json"),
         _ => playback(req),
     });
     block_on(client.start_playback("movie:heat-1995", None)).unwrap();
@@ -245,8 +203,8 @@ fn sign_out_sends_the_kept_progress_and_then_ends_the_session_on_the_server() {
         let down = down.clone();
         move |req| match req.path.as_str() {
             _ if down.load(Ordering::SeqCst) => None,
-            "sync/progress" => ok("silo/sync_progress_ok.json"),
-            "auth/logout" => Some((204, "application/json", String::new())),
+            "sync/progress" => ok("sync_progress_ok.json"),
+            "auth/logout" => json(204, String::new()),
             _ => playback(req),
         }
     });
@@ -269,7 +227,7 @@ fn progress_kept_across_a_server_switch_goes_out_when_the_account_is_active_agai
             "playback/start" | "playback/capabilities" | "catalog/items/movie:heat-1995/versions" => playback(req),
             p if p.starts_with("markers/") => playback(req),
             _ if down.load(Ordering::SeqCst) => None,
-            "sync/progress" => ok("silo/sync_progress_ok.json"),
+            "sync/progress" => ok("sync_progress_ok.json"),
             _ => None,
         }
     };

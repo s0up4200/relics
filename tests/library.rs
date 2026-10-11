@@ -1,62 +1,12 @@
 //! The Library page: the video Libraries, the Recommended rows, the grid query and its paging, against a
 //! fake HTTP client.
 
-use std::sync::{Arc, Mutex};
+mod common;
 
-use futures::AsyncReadExt as _;
+use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
-use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response, Url};
 use serde_json::json;
-use silo_omarchy::api::{Client, Device, Server, Tokens};
 use silo_omarchy::browse::{Browse, Choice, Paging, SortField, Watch};
-
-fn fixture(name: &str) -> String {
-    std::fs::read_to_string(format!("{}/tests/fixtures/silo/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
-}
-
-#[derive(Debug, Clone)]
-struct Seen {
-    method: String,
-    path: String,
-    body: String,
-}
-
-type Reply = (u16, String);
-
-/// A fake Silo server at `https://silo.test/`. `reply` gets each request and returns the status and the
-/// JSON body.
-fn fake(reply: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> (Client, Arc<Mutex<Vec<Seen>>>) {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let log = seen.clone();
-    let reply = Arc::new(reply);
-    let http: Arc<dyn HttpClient> = FakeHttpClient::create(move |req| {
-        let (log, reply) = (log.clone(), reply.clone());
-        async move {
-            let method = req.method().to_string();
-            let path = req.uri().to_string().strip_prefix("https://silo.test/").unwrap().to_string();
-            let mut body = String::new();
-            req.into_body().read_to_string(&mut body).await?;
-            let request = Seen { method, path, body };
-            log.lock().unwrap().push(request.clone());
-            let (status, body) = reply(&request);
-            Ok(Response::builder()
-                .status(status)
-                .header("Content-Type", "application/json")
-                .body(AsyncBody::from(body))
-                .unwrap())
-        }
-    });
-    let server =
-        Server { id: "server-1".into(), name: "silo.test".into(), url: Url::parse("https://silo.test/").unwrap() };
-    let device = Device { id: "device-1".into(), name: "omarchy-box".into() };
-    let client = Client::new(http, server, device, Tokens { access_token: "acc".into(), refresh_token: "ref".into() });
-    client.set_profile(Some("p-owner".into()));
-    (client, seen)
-}
-
-fn not_found() -> Reply {
-    (404, String::new())
-}
 
 #[test]
 fn the_sidebar_lists_only_the_video_libraries_in_the_server_order() {
@@ -67,7 +17,7 @@ fn the_sidebar_lists_only_the_video_libraries_in_the_server_order() {
         {"id": "4", "name": "Comics", "type": "manga", "sort_order": 2},
     ]});
     let (client, seen) = fake(move |req| match req.path.as_str() {
-        "api/v2/user/libraries" => (200, libraries.to_string()),
+        "user/libraries" => json(200, libraries.to_string()),
         _ => not_found(),
     });
     let libraries = block_on(client.libraries()).unwrap();
@@ -79,7 +29,7 @@ fn the_sidebar_lists_only_the_video_libraries_in_the_server_order() {
 #[test]
 fn the_fixture_libraries_decode() {
     let (client, _) = fake(|req| match req.path.as_str() {
-        "api/v2/user/libraries" => (200, fixture("user_libraries.json")),
+        "user/libraries" => ok("user_libraries.json"),
         _ => not_found(),
     });
     assert_eq!(block_on(client.libraries()).unwrap().len(), 1);
@@ -88,16 +38,14 @@ fn the_fixture_libraries_decode() {
 #[test]
 fn the_recommended_tab_reads_the_library_layout_and_the_items_of_each_section() {
     let (client, seen) = fake(|req| match req.path.as_str() {
-        "api/v2/library/1/layout" => (200, fixture("get_library_layout_ok.json")),
-        "api/v2/library/1/sections/continue_watching/items?image_size=small" => {
-            (200, fixture("get_library_section_items_ok.json"))
-        }
-        "api/v2/library/1/sections/recently_added/items?image_size=small" => {
+        "library/1/layout" => ok("get_library_layout_ok.json"),
+        "library/1/sections/continue_watching/items?image_size=small" => ok("get_library_section_items_ok.json"),
+        "library/1/sections/recently_added/items?image_size=small" => {
             let mut section: serde_json::Value =
                 serde_json::from_str(&fixture("get_library_section_items_ok.json")).unwrap();
             section["id"] = "recently_added".into();
             section["total_count"] = 40.into();
-            (200, section.to_string())
+            json(200, section.to_string())
         }
         _ => not_found(),
     });
@@ -114,7 +62,7 @@ fn the_recommended_tab_reads_the_library_layout_and_the_items_of_each_section() 
 #[test]
 fn the_genre_filter_lists_the_genres_of_the_library() {
     let (client, _) = fake(|req| match req.path.as_str() {
-        "api/v2/catalog/filters?library_id=1&skip_technical=true" => (200, fixture("get_catalog_filters_ok.json")),
+        "catalog/filters?library_id=1&skip_technical=true" => ok("get_catalog_filters_ok.json"),
         _ => not_found(),
     });
     assert_eq!(block_on(client.genres("1")).unwrap(), ["Crime"]);
@@ -127,7 +75,7 @@ fn body(seen: &Seen) -> serde_json::Value {
 #[test]
 fn the_default_grid_sorts_by_title_ascending_with_no_rules() {
     let (client, seen) = fake(|req| match req.path.as_str() {
-        "api/v2/catalog/query?image_size=small" => (200, fixture("query_catalog_items_ok.json")),
+        "catalog/query?image_size=small" => ok("query_catalog_items_ok.json"),
         _ => not_found(),
     });
     let query = Browse::default().query("1", false);
