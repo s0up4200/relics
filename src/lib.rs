@@ -1,4 +1,5 @@
 pub mod api;
+pub mod artwork;
 pub mod home;
 pub mod library;
 pub mod mpv;

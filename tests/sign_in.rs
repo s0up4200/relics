@@ -112,14 +112,14 @@ fn requests_carry_the_token_and_the_profile() {
     let (http, seen) = fake(|req| match req.path.as_str() {
         "api/v2/profiles" => ok("list_profiles_ok.json"),
         "api/v2/home/layout" => ok("get_home_layout_ok.json"),
-        "api/v2/home/sections" => ok("list_home_sections_ok.json"),
+        "api/v2/home/sections?image_size=small" => ok("list_home_sections_ok.json"),
         _ => (404, "text/plain", String::new()),
     });
     let client = signed_in(http, "acc");
     let profiles = block_on(client.profiles()).unwrap();
     assert_eq!(profiles[0].name, "Laura");
     client.set_profile(Some(profiles[0].id.to_string()));
-    block_on(client.home()).unwrap();
+    block_on(client.home("small")).unwrap();
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0].header("Authorization"), Some("Bearer acc"));
@@ -219,19 +219,24 @@ fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
     let sections = serde_json::json!({"sections": [recent, picks]});
     let (http, _) = fake(move |req| match req.path.as_str() {
         "api/v2/home/layout" => (200, "application/json", layout.to_string()),
-        "api/v2/home/sections" => (200, "application/json", sections.to_string()),
+        "api/v2/home/sections?image_size=medium" => (200, "application/json", sections.to_string()),
         _ => (404, "text/plain", String::new()),
     });
     let client = signed_in(http, "acc");
     client.set_profile(Some("p-owner".into()));
-    let home = block_on(client.home()).unwrap();
+    let home = block_on(client.home("medium")).unwrap();
     let rows: Vec<_> = home
         .iter()
         .map(|s| {
-            (s.title.as_str(), s.featured, s.view_all, s.items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>())
+            (
+                s.section_type.as_str(),
+                s.featured,
+                s.view_all,
+                s.items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            )
         })
         .collect();
-    assert_eq!(rows, [("Picks", true, false, vec!["Alien"]), ("Recently Added", false, true, vec!["Heat", "Ronin"])]);
+    assert_eq!(rows, [("picks", true, false, vec!["Alien"]), ("recent", false, true, vec!["Heat", "Ronin"])]);
 }
 
 fn profile(id: &str, has_pin: bool) -> wire::Profile {

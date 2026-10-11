@@ -35,6 +35,22 @@ _Avoid_: Shelf, carousel, rail
 A Home section that the server marks as featured. The Library window shows it as a hero above the other rows.
 _Avoid_: Banner
 
+**Artwork ladder**:
+The fixed set of widths at which the Silo server caches each artwork type. `image_size` picks one rung for a whole response.
+_Avoid_: Variants, resolutions
+
+**Revisioned artwork**:
+Artwork whose URL path has a content revision (`w500.<rev>.webp`). The bytes never change, so the cache keeps it with no expiry.
+_Avoid_: Immutable URL (the query and signature still change)
+
+**Thumbhash**:
+A hash of about 21 bytes that the API sends next to each artwork URL. It decodes to a blurred preview that the Library window shows while the image loads or after it fails.
+_Avoid_: Blurhash (a different format)
+
+**Artwork cache**:
+The image cache of the app. It keeps decoded images in memory and the files in `$XDG_CACHE_HOME`, keyed by the origin plus the path.
+_Avoid_: Image cache (that is the name of the GPUI trait)
+
 **Player window**:
 The window that libmpv draws video in. Its app id is `silo-player`. The app has at most one Player window. It can show several Playback sessions one after another. It closes when the user quits it or the last item ends.
 

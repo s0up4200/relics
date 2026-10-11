@@ -165,6 +165,8 @@ pub struct Tokens {
 #[derive(Debug, Clone)]
 pub struct HomeSection {
     pub id: String,
+    /// The server type of the section, for example `continue_watching`.
+    pub section_type: String,
     pub title: String,
     /// The Library window shows a Featured section as a hero above the rows.
     pub featured: bool,
@@ -260,9 +262,11 @@ impl Client {
     }
 
     /// The Home sections of the active Profile, in the order of the server Home layout.
-    pub async fn home(&self) -> Result<Vec<HomeSection>, Error> {
+    /// `image_size` is the rung of the Artwork ladder for the artwork URLs.
+    pub async fn home(&self, image_size: &str) -> Result<Vec<HomeSection>, Error> {
         let layout: wire::SectionLayout = self.call(Method::GET, "home/layout", None).await?;
-        let sections: wire::SectionCollection = self.call(Method::GET, "home/sections", None).await?;
+        let path = format!("home/sections?image_size={image_size}");
+        let sections: wire::SectionCollection = self.call(Method::GET, &path, None).await?;
         let mut sections = sections.sections;
         Ok(layout
             .sections
@@ -273,6 +277,7 @@ impl Client {
                 HomeSection {
                     view_all: total > items.len() as i64,
                     id: entry.id,
+                    section_type: entry.section_type,
                     title: entry.title,
                     featured: entry.featured,
                     items,

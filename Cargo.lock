@@ -6036,6 +6036,7 @@ name = "silo-omarchy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "futures",
  "gethostname",
@@ -6044,10 +6045,13 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-http-client",
  "gpui-pre-reqwest-client",
+ "image",
  "libmpv2",
  "oo7",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "thumbhash",
  "uuid",
 ]
 
@@ -6589,6 +6593,12 @@ checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "thumbhash"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b7726e0245a7331bd0c9a1fb4fd99fd695bcd478ca569f0eda2ff2cb14e7a00"
 
 [[package]]
 name = "tiff"
