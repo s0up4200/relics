@@ -480,7 +480,13 @@ pub fn prune(dir: &Path, max_bytes: u64) -> u64 {
     for entry in entries.flatten() {
         let path = entry.path();
         match path.extension().and_then(|e| e.to_str()) {
-            Some("tmp") => _ = std::fs::remove_file(&path),
+            // A temp file older than an hour is left from a crash. A newer one can belong to a running download.
+            Some("tmp") => {
+                let modified = entry.metadata().and_then(|meta| meta.modified());
+                if modified.is_ok_and(|time| time.elapsed().is_ok_and(|age| age > Duration::from_secs(3600))) {
+                    _ = std::fs::remove_file(&path);
+                }
+            }
             Some("etag") => {
                 if !path.with_extension("").exists() {
                     _ = std::fs::remove_file(&path);

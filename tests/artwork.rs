@@ -136,11 +136,14 @@ fn prune_deletes_the_least_recently_used_files_and_left_over_temp_files() {
     }
     std::fs::write(dir.join("old.etag"), "\"e1\"").unwrap();
     std::fs::write(dir.join("crashed.tmp"), [0u8; 10]).unwrap();
+    let crashed = std::fs::File::options().write(true).open(dir.join("crashed.tmp")).unwrap();
+    crashed.set_modified(now - std::time::Duration::from_secs(7200)).unwrap();
+    std::fs::write(dir.join("running.tmp"), [0u8; 10]).unwrap();
     artwork::prune(&dir, 250);
     let mut left: Vec<_> =
         std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     left.sort();
-    assert_eq!(left, ["mid", "new"]);
+    assert_eq!(left, ["mid", "new", "running.tmp"]);
 }
 
 #[test]
