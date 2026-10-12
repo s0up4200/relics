@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Arch Linux, because the Ubuntu runners have an old mpv.
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install packages
+        run: >-
+          pacman -Syu --noconfirm --needed
+          base-devel clang cmake git rust mpv
+          wayland libxkbcommon libxkbcommon-x11 libxcb fontconfig freetype2 alsa-lib vulkan-headers
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked

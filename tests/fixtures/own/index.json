@@ -1,0 +1,69 @@
+{
+  "comment": "Fixtures that silo-omarchy adds, in the format of the server fixtures in ../silo. They were written by hand from docs/architecture/playback-protocol-v3.md of the server.",
+  "fixtures": [
+    {
+      "name": "playback_start_transcode",
+      "operation_id": "startPlayback",
+      "scenario": "A HEVC 10-bit file that the server transcodes to HLS from a resume point at 600 s.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/playback/start"
+      },
+      "expected_status": 201,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/PlaybackDecision",
+      "body_file": "playback_start_transcode.json"
+    },
+    {
+      "name": "playback_start_adaptation_unavailable",
+      "operation_id": "startPlayback",
+      "scenario": "The file cannot play directly and the server does not allow transcoding.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/playback/start"
+      },
+      "expected_status": 201,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/PlaybackDecision",
+      "body_file": "playback_start_adaptation_unavailable.json"
+    },
+    {
+      "name": "playback_start_unknown_outcome",
+      "operation_id": "startPlayback",
+      "scenario": "A newer server answers with an outcome that this app does not know.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/playback/start"
+      },
+      "expected_status": 201,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/PlaybackDecision",
+      "body_file": "playback_start_unknown_outcome.json"
+    },
+    {
+      "name": "playback_replan_failure_recovery",
+      "operation_id": "replanPlayback",
+      "scenario": "The direct stream failed at 3600 s. The replan after the failure moves the session to a transcode from that position.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/playback/11111111-1111-4111-8111-111111111111/replan"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/PlaybackDecision",
+      "body_file": "playback_replan_failure_recovery.json"
+    }
+  ]
+}

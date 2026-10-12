@@ -1,0 +1,59 @@
+name: Release
+
+# A signed tag vX.Y.Z builds the package from packaging/aur/PKGBUILD and creates a GitHub release.
+# A manual run (workflow_dispatch) builds the package for the current version and creates no release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install packages
+        run: pacman -Syu --noconfirm --needed base-devel git github-cli
+      - uses: actions/checkout@v5
+      - name: Check the version and the tag signature
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" != tag ]; then exit 0; fi
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The tag $GITHUB_REF_NAME does not match the version $version in Cargo.toml" >&2
+            exit 1
+          fi
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.type + " " + .object.sha')
+          if [ "${ref%% *}" != tag ]; then
+            echo "The tag $GITHUB_REF_NAME is not an annotated, signed tag" >&2
+            exit 1
+          fi
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/${ref#* }" --jq '.verification.verified')
+          if [ "$verified" != true ]; then
+            echo "GitHub cannot verify the signature of the tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+      - name: Build the package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # makepkg uses this file and does not download the source.
+          git archive --prefix="silo-omarchy-$VERSION/" -o "packaging/aur/silo-omarchy-$VERSION.tar.gz" HEAD
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/aur/PKGBUILD
+          # makepkg refuses to run as root. --syncdeps installs depends and makedepends, so a missing entry fails here.
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+          chown -R builder packaging/aur
+          cd packaging/aur
+          sudo -u builder makepkg --syncdeps --noconfirm
+      - name: Create the GitHub release
+        if: github.ref_type == 'tag'
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

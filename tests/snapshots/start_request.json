@@ -1,0 +1,215 @@
+{
+  "protocol_version": 3,
+  "client_features": [
+    "playback_plan_v3"
+  ],
+  "file_id": "120",
+  "installation_id": "11111111-1111-4111-8111-111111111111",
+  "profile_id": "p-owner",
+  "playback_attempt_id": "<uuid>",
+  "quality_preference": "original",
+  "subtitle_fidelity_preference": "preserve",
+  "metered": false,
+  "client_capabilities": {
+    "video_evidence": "declared",
+    "audio_evidence": "declared",
+    "codecs_video": [
+      "h264",
+      "hevc",
+      "av1",
+      "vp9",
+      "vp8",
+      "mpeg2video",
+      "mpeg4",
+      "vc1"
+    ],
+    "codecs_video_hardware": [
+      "h264",
+      "hevc",
+      "av1",
+      "vp9",
+      "vp8",
+      "mpeg2video",
+      "mpeg4",
+      "vc1"
+    ],
+    "codecs_audio": [
+      "aac",
+      "mp3",
+      "opus",
+      "vorbis",
+      "flac",
+      "alac",
+      "ac3",
+      "eac3",
+      "dts",
+      "truehd",
+      "pcm"
+    ],
+    "containers": [
+      "mp4",
+      "mkv",
+      "webm",
+      "mov",
+      "avi",
+      "mpegts",
+      "m2ts"
+    ],
+    "hdr": false
+  },
+  "client_playback_context": {
+    "protocol_version": 3,
+    "app_version": "<version>",
+    "form_factor": "desktop",
+    "device": {
+      "platform": "linux"
+    },
+    "output": {},
+    "deliveries": {
+      "original_http": {
+        "enabled": true,
+        "supported_on_device": true,
+        "containers": [
+          "mp4",
+          "mkv",
+          "webm",
+          "mov",
+          "avi",
+          "mpegts",
+          "m2ts"
+        ],
+        "video_codecs": [
+          "h264",
+          "hevc",
+          "av1",
+          "vp9",
+          "vp8",
+          "mpeg2video",
+          "mpeg4",
+          "vc1"
+        ],
+        "audio_decode_codecs": [
+          "aac",
+          "mp3",
+          "opus",
+          "vorbis",
+          "flac",
+          "alac",
+          "ac3",
+          "eac3",
+          "dts",
+          "truehd",
+          "pcm"
+        ],
+        "audio_passthrough_codecs": [],
+        "subtitles": {
+          "embedded_text": true,
+          "sidecar_text": true,
+          "ass_styling": true,
+          "embedded_bitmap": true,
+          "sidecar_bitmap": true,
+          "font_attachments": true
+        },
+        "features": [],
+        "auth_header_refresh": false,
+        "validated_claims": [
+          "client_managed_dynamic_range_v1",
+          "client_selected_audio_track_v1"
+        ],
+        "transformations": []
+      },
+      "progressive": {
+        "enabled": true,
+        "supported_on_device": true,
+        "containers": [
+          "mp4",
+          "mkv",
+          "webm",
+          "mov",
+          "avi",
+          "mpegts",
+          "m2ts"
+        ],
+        "video_codecs": [
+          "h264",
+          "hevc",
+          "av1",
+          "vp9",
+          "vp8",
+          "mpeg2video",
+          "mpeg4",
+          "vc1"
+        ],
+        "audio_decode_codecs": [
+          "aac",
+          "mp3",
+          "opus",
+          "vorbis",
+          "flac",
+          "alac",
+          "ac3",
+          "eac3",
+          "dts",
+          "truehd",
+          "pcm"
+        ],
+        "audio_passthrough_codecs": [],
+        "subtitles": {
+          "embedded_text": true,
+          "sidecar_text": true,
+          "ass_styling": true,
+          "embedded_bitmap": true,
+          "sidecar_bitmap": true,
+          "font_attachments": true
+        },
+        "features": [],
+        "auth_header_refresh": false,
+        "validated_claims": [],
+        "transformations": []
+      },
+      "hls": {
+        "enabled": true,
+        "supported_on_device": true,
+        "containers": [
+          "hls"
+        ],
+        "video_codecs": [
+          "h264",
+          "hevc",
+          "av1",
+          "vp9",
+          "vp8",
+          "mpeg2video",
+          "mpeg4",
+          "vc1"
+        ],
+        "audio_decode_codecs": [
+          "aac",
+          "mp3",
+          "opus",
+          "vorbis",
+          "flac",
+          "alac",
+          "ac3",
+          "eac3",
+          "dts",
+          "truehd",
+          "pcm"
+        ],
+        "audio_passthrough_codecs": [],
+        "subtitles": {
+          "embedded_text": true,
+          "sidecar_text": true,
+          "ass_styling": true,
+          "embedded_bitmap": true,
+          "sidecar_bitmap": true,
+          "font_attachments": true
+        },
+        "features": [],
+        "auth_header_refresh": false,
+        "validated_claims": [],
+        "transformations": []
+      }
+    }
+  }
+}

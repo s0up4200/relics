@@ -1,0 +1,40 @@
+# Template for the AUR package. The release workflow builds the package from this file.
+# To update the AUR, copy this file to the AUR clone, set pkgver, and run updpkgsums.
+pkgname=silo-omarchy
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Native Silo media player for Omarchy'
+arch=('x86_64')
+url='https://github.com/s0up4200/silo-omarchy'
+license=('unknown')
+depends=('mpv' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'vulkan-icd-loader' 'gcc-libs' 'glibc')
+makedepends=('cargo' 'clang' 'cmake')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
+  install -Dm0644 -t "$pkgdir/usr/share/$pkgname/" data/silo-controls.lua
+  install -Dm0644 -t "$pkgdir/usr/share/omarchy/default/hypr/apps/" data/silo-omarchy.lua
+  install -Dm0644 -t "$pkgdir/usr/share/applications/" data/silo-omarchy.desktop
+}

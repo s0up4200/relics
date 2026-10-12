@@ -1,0 +1,9 @@
+# Only the mpv adapter (src/mpv.rs) may hold a libmpv handle.
+disallowed-types = [
+    { path = "libmpv2::Mpv", reason = "only the mpv adapter in src/mpv.rs may use libmpv" },
+]
+
+# Only the Artwork cache (src/artwork.rs) may make an image element, so that each image loads through the cache.
+disallowed-methods = [
+    { path = "gpui::img", reason = "load artwork through src/artwork.rs so it goes through the cache" },
+]
