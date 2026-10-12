@@ -23,7 +23,8 @@ use crate::grid::GridPage;
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
 use crate::library_page::{LibraryPage, is_shows};
-use crate::search::{OpenPerson, Search, person_query};
+use crate::person::PersonPage;
+use crate::search::{OpenPerson, Search};
 use crate::settings_page::{AccountAction, SettingsPage};
 use crate::state::Pair;
 
@@ -67,8 +68,9 @@ pub enum Page {
     Library(Entity<LibraryPage>),
     Detail(Entity<Detail>),
     Search(Entity<Search>),
-    /// The titles of a Person, or the full list of a row.
+    /// The full list of a row.
     Grid(Entity<GridPage>),
+    Person(Entity<PersonPage>),
     Watchlist(Entity<GridPage>),
     History(Entity<GridPage>),
     Settings(Entity<SettingsPage>),
@@ -87,6 +89,7 @@ impl Page {
                 cx.notify();
             }),
             Page::Search(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
+            Page::Person(page) => page.update(cx, |page, cx| page.set_active(active, cx)),
             Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => {
                 page.update(cx, |page, cx| page.set_active(active, cx))
             }
@@ -103,6 +106,7 @@ impl Page {
             Page::Library(page) => page.into_any_element(),
             Page::Detail(page) => page.into_any_element(),
             Page::Search(page) => page.into_any_element(),
+            Page::Person(page) => page.into_any_element(),
             Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => page.into_any_element(),
             Page::Settings(page) => page.into_any_element(),
         }
@@ -207,10 +211,13 @@ impl Pages {
         self.open(Page::Detail(page), cx);
     }
 
-    /// Opens the Person grid.
+    /// Opens the Person page.
     fn open_person(&mut self, person: &OpenPerson, window: &mut Window, cx: &mut Context<Self>) {
-        let open = OpenGrid { title: person.name.clone(), query: person_query(&person.id) };
-        self.open_grid(&open, window, cx);
+        let client = self.client.clone();
+        let page = cx.new(|cx| PersonPage::new(client, person, window, cx));
+        cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
+        cx.subscribe_in(&page, window, |this, _, Open(item), window, cx| this.open_item(item, window, cx)).detach();
+        self.open(Page::Person(page), cx);
     }
 
     /// Opens a page with the grid of a query, for example "View all" of a row.
@@ -345,11 +352,11 @@ impl Pages {
         self.show(page, cx);
     }
 
-    /// The sidebar row of the page that shows. A detail page, a Person grid or the full list of a row has the
+    /// The sidebar row of the page that shows. A detail page, a Person page or the full list of a row has the
     /// row of the page that opened it.
     fn current_row(&self, cx: &gpui::App) -> usize {
         let mut pages = std::iter::once(&self.page).chain(self.back.iter().rev());
-        match pages.find(|p| !matches!(p, Page::Detail(_) | Page::Grid(_))) {
+        match pages.find(|p| !matches!(p, Page::Detail(_) | Page::Grid(_) | Page::Person(_))) {
             Some(Page::Search(_)) => self.search_row(),
             Some(Page::Watchlist(_)) => self.watchlist_row(),
             Some(Page::History(_)) => self.history_row(),
@@ -376,6 +383,7 @@ impl Pages {
             Page::Home(home) => home.update(cx, |home, cx| home.key(key, cx)),
             Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
+            Page::Person(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Search(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
             Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => {
                 page.update(cx, |page, cx| page.key(key, cx))

@@ -39,7 +39,21 @@ fn the_person_grid_lists_the_titles_of_the_person_newest_first() {
         "catalog/query?image_size=small" => ok("query_catalog_items_ok.json"),
         _ => not_found(),
     });
-    block_on(client.query_catalog(&search::person_query("7"), Rung::Small)).unwrap();
+    block_on(client.query_catalog(&search::person_query("7", None), Rung::Small)).unwrap();
     let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0].body).unwrap();
     assert_eq!(body, json!({"source": "person", "person_id": "7", "sort": "year", "order": "desc", "limit": 60}));
+}
+
+#[test]
+fn the_movies_and_series_tabs_of_the_filmography_narrow_the_titles_to_one_type() {
+    let (client, seen) = fake(|req| match req.path.as_str() {
+        "catalog/query?image_size=small" => ok("query_catalog_items_ok.json"),
+        _ => not_found(),
+    });
+    block_on(client.query_catalog(&search::person_query("7", Some("movie")), Rung::Small)).unwrap();
+    block_on(client.query_catalog(&search::person_query("7", Some("series")), Rung::Small)).unwrap();
+    let seen = seen.lock().unwrap();
+    let types: Vec<serde_json::Value> =
+        seen.iter().map(|req| serde_json::from_str::<serde_json::Value>(&req.body).unwrap()["type"].clone()).collect();
+    assert_eq!(types, [json!("movie"), json!("series")]);
 }

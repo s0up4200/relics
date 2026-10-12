@@ -1,5 +1,5 @@
 //! The poster grid of a catalog query. It loads the next page with the cursor when the focus or the scroll
-//! comes near the end. The Library page uses it, and Search and the Person grid can use it with their own query.
+//! comes near the end. The Library page uses it, and Search and the Person page can use it with their own query.
 
 use std::sync::Arc;
 

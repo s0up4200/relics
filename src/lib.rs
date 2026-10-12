@@ -12,6 +12,7 @@ pub mod library_page;
 pub mod mpris;
 pub mod mpv;
 pub mod pages;
+pub mod person;
 pub mod playback;
 pub mod player;
 pub mod profiles;

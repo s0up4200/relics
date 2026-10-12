@@ -1,6 +1,6 @@
-//! The Search page and the Person grid. Search sends the text 200 ms after the last key. It shows the matching
-//! people in a row above a grid of the matching titles. Enter on a person opens the Person grid: the shared poster
-//! grid of the titles that the Person took part in.
+//! The Search page and the filmography query of the Person page. Search sends the text 200 ms after the last key.
+//! It shows the matching people in a row above a grid of the matching titles. Enter on a person opens the Person
+//! page.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use crate::keys::Key;
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 const PHOTO: f32 = 96.;
 
-/// The user pressed Enter on a person in Search or on a cast card of the detail page.
+/// The user pressed Enter on a person in Search or on a cast or crew card of the detail page.
 pub struct OpenPerson {
     pub id: String,
     pub name: String,
@@ -40,11 +40,13 @@ pub fn query(text: &str) -> wire::CatalogQuery {
     }
 }
 
-/// The query of the Person grid: the titles of the Person, the newest first, as in the web client.
-pub fn person_query(person_id: &str) -> wire::CatalogQuery {
+/// The query of the filmography on the Person page: the titles of the Person, the newest first, as in the web
+/// client. `type_` is "movie" or "series" for the Movies and Series tabs, and `None` for All.
+pub fn person_query(person_id: &str, type_: Option<&str>) -> wire::CatalogQuery {
     wire::CatalogQuery {
         source: Some("person".into()),
         person_id: person_id.try_into().ok(),
+        type_: type_.map(Into::into),
         sort: Some("year".into()),
         order: Some("desc".into()),
         limit: std::num::NonZeroU64::new(PAGE_SIZE),

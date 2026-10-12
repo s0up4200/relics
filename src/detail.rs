@@ -491,7 +491,7 @@ impl Detail {
         cx.notify();
     }
 
-    /// Opens the Person grid of the cast or crew member at `focus`, when the server knows the person.
+    /// Opens the Person page of the cast or crew member at `focus`, when the server knows the person.
     fn open_person(&mut self, focus: Focus, cx: &mut Context<Self>) {
         self.focus = focus;
         let person = self.item.as_ref().and_then(|item| match focus {
