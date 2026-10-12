@@ -1,0 +1,18 @@
+[package]
+name = "in-app-video-prototype"
+default-run = "in-app-video-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# The versions and features match the app and gpui, so the shared target dir builds only this crate.
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui-kit = { version = "=0.7.0", default-features = false, features = ["assets"] }
+libmpv2 = { version = "=6.0.0", default-features = false, features = ["render"] }
+raw-window-handle = "0.6.2"
+wayland-client = "0.31.15"
+wayland-backend = { version = "0.3.17", features = ["client_system", "dlopen"] }
+khronos-egl = { version = "6.0.0", features = ["dynamic"] }
+# Only for the click test helper in src/bin/click.rs.
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
