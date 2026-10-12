@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use futures::executor::block_on;
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response};
@@ -57,28 +58,57 @@ fn revisioned_artwork_downloads_once_and_then_comes_from_disk() {
     assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{names:?}");
 }
 
+/// The time of the first download in a test. Later calls add to it, so no test waits.
+fn start() -> SystemTime {
+    SystemTime::now()
+}
+
+const MINUTE: Duration = Duration::from_secs(60);
+
 #[test]
-fn other_artwork_revalidates_with_the_etag() {
+fn other_artwork_revalidates_with_the_etag_at_most_once_per_hour() {
     let dir = empty_dir("mutable");
     let (http, seen) =
         host(vec![(200, Some("\"e1\""), "old"), (304, Some("\"e1\""), ""), (200, Some("\"e2\""), "new")]);
-    let file = block_on(artwork::fetch(&http, &dir, MUTABLE)).unwrap();
-    assert_eq!(block_on(artwork::fetch(&http, &dir, MUTABLE)).unwrap(), file);
+    let t0 = start();
+    let (file, _) = block_on(artwork::download(&http, &dir, MUTABLE, t0)).unwrap();
+    assert!(!artwork::revalidation_due(&dir, MUTABLE, t0 + 59 * MINUTE));
+    assert_eq!(block_on(artwork::download(&http, &dir, MUTABLE, t0 + 59 * MINUTE)).unwrap(), (file.clone(), 0));
+    assert_eq!(seen.lock().unwrap().len(), 1, "a file checked less than an hour ago comes from disk");
+    let t1 = t0 + 61 * MINUTE;
+    assert!(artwork::revalidation_due(&dir, MUTABLE, t1));
+    block_on(artwork::download(&http, &dir, MUTABLE, t1)).unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "old", "304 keeps the file");
-    block_on(artwork::fetch(&http, &dir, MUTABLE)).unwrap();
+    assert!(!artwork::revalidation_due(&dir, MUTABLE, t1 + 30 * MINUTE), "the 304 starts a new hour");
+    let t2 = t1 + 61 * MINUTE;
+    block_on(artwork::download(&http, &dir, MUTABLE, t2)).unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "new", "200 replaces the file");
     assert_eq!(*seen.lock().unwrap(), [None, Some("\"e1\"".into()), Some("\"e1\"".into())]);
 }
 
 #[test]
+fn revisioned_artwork_never_revalidates_and_a_missing_file_is_not_due() {
+    let dir = empty_dir("never-due");
+    let (http, _) = host(vec![(200, Some("\"e1\""), "poster")]);
+    let t0 = start();
+    assert!(!artwork::revalidation_due(&dir, MUTABLE, t0), "there is no file to check");
+    block_on(artwork::download(&http, &dir, REVISIONED, t0)).unwrap();
+    assert!(!artwork::revalidation_due(&dir, REVISIONED, t0 + Duration::from_secs(400 * 24 * 3600)));
+}
+
+#[test]
 fn a_failed_download_writes_no_file_and_a_failed_revalidation_keeps_the_old_one() {
     let dir = empty_dir("failed");
-    let (http, _) = host(vec![(404, None, "expired"), (200, Some("\"e1\""), "old"), (404, None, "expired")]);
-    assert!(block_on(artwork::fetch(&http, &dir, MUTABLE)).is_err());
+    let (http, seen) = host(vec![(404, None, "expired"), (200, Some("\"e1\""), "old"), (503, None, "down")]);
+    let t0 = start();
+    assert!(block_on(artwork::download(&http, &dir, MUTABLE, t0)).is_err());
     assert_eq!(std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0), 0);
-    let file = block_on(artwork::fetch(&http, &dir, MUTABLE)).unwrap();
-    assert_eq!(block_on(artwork::fetch(&http, &dir, MUTABLE)).unwrap(), file);
+    let (file, _) = block_on(artwork::download(&http, &dir, MUTABLE, t0)).unwrap();
+    let t1 = t0 + 61 * MINUTE;
+    assert_eq!(block_on(artwork::download(&http, &dir, MUTABLE, t1)).unwrap(), (file.clone(), 0));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
+    assert!(!artwork::revalidation_due(&dir, MUTABLE, t1 + 30 * MINUTE), "a failed check also waits an hour");
+    assert_eq!(seen.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -134,10 +164,10 @@ fn each_surface_gets_the_smallest_rung_at_least_as_wide_as_its_pixels() {
 fn a_download_reports_the_bytes_that_it_wrote_and_prune_the_bytes_that_it_kept() {
     let dir = empty_dir("written");
     let (http, _) = host(vec![(200, Some("\"e1\""), "poster")]);
-    let (file, written) = block_on(artwork::download(&http, &dir, REVISIONED)).unwrap();
+    let (file, written) = block_on(artwork::download(&http, &dir, REVISIONED, start())).unwrap();
     assert_eq!(written, 6);
     assert_eq!(
-        block_on(artwork::download(&http, &dir, REVISIONED)).unwrap(),
+        block_on(artwork::download(&http, &dir, REVISIONED, start())).unwrap(),
         (file, 0),
         "a file on disk writes nothing"
     );
@@ -206,13 +236,14 @@ fn dimensions(file: &std::path::Path) -> (u32, u32) {
     image::ImageReader::open(file).unwrap().with_guessed_format().unwrap().into_dimensions().unwrap()
 }
 
-/// A fake artwork host that sends the same image for each request, and counts the requests.
-fn image_host(body: Vec<u8>) -> (Arc<dyn HttpClient>, Arc<Mutex<usize>>) {
+/// A fake artwork host that sends `bodies` in order and then the last one again, and counts the requests.
+fn image_host(bodies: Vec<Vec<u8>>) -> (Arc<dyn HttpClient>, Arc<Mutex<usize>>) {
     let count = Arc::new(Mutex::new(0));
     let log = count.clone();
     let http = FakeHttpClient::create(move |_| {
-        *log.lock().unwrap() += 1;
-        let body = body.clone();
+        let mut count = log.lock().unwrap();
+        let body = bodies[(*count).min(bodies.len() - 1)].clone();
+        *count += 1;
         async move { Ok(Response::builder().status(200).body(AsyncBody::from(body)).unwrap()) }
     });
     (http, count)
@@ -221,14 +252,41 @@ fn image_host(body: Vec<u8>) -> (Arc<dyn HttpClient>, Arc<Mutex<usize>>) {
 #[test]
 fn a_shrunk_copy_stays_on_disk_for_each_target_width() {
     let dir = empty_dir("shrunk");
-    let (http, count) = image_host(png(600, 900));
-    let (copy, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, 200)).unwrap();
+    let (http, count) = image_host(vec![png(600, 900)]);
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, start(), 200)).unwrap();
     assert_eq!(dimensions(&copy), (200, 300));
     let resigned = REVISIONED.replace("exp=1&sig=a", "exp=2&sig=b");
-    assert_eq!(block_on(artwork::download_sized(&http, &dir, &resigned, 200)).unwrap(), (copy.clone(), 0));
+    assert_eq!(block_on(artwork::download_sized(&http, &dir, &resigned, start(), 200)).unwrap(), (copy.clone(), 0));
     assert_eq!(*count.lock().unwrap(), 1, "the later load uses the copy on disk");
-    let (other, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, 300)).unwrap();
+    let (other, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, start(), 300)).unwrap();
     assert_ne!(other, copy, "another target width has its own copy");
-    let (full, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, 500)).unwrap();
+    let (full, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, start(), 500)).unwrap();
     assert_eq!(dimensions(&full), (600, 900), "an image near the target stays as it is");
+}
+
+#[test]
+fn a_file_on_disk_shows_without_a_request() {
+    let dir = empty_dir("on-disk");
+    let (http, count) = image_host(vec![png(600, 900)]);
+    assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), None, "nothing is on disk yet");
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, start(), 200)).unwrap();
+    assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), Some((copy, 0)));
+    let (other, written) = artwork::on_disk(&dir, MUTABLE, 300).expect("the file is on disk");
+    assert_eq!(dimensions(&other), (300, 450), "another width shrinks from the file on disk");
+    assert!(written > 0, "the new copy counts as written");
+    assert_eq!(*count.lock().unwrap(), 1);
+}
+
+#[test]
+fn a_new_file_from_a_revalidation_replaces_the_shrunk_copies() {
+    let dir = empty_dir("replaced");
+    let (http, count) = image_host(vec![png(600, 900), png(900, 600)]);
+    let t0 = start();
+    block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 200)).unwrap();
+    artwork::on_disk(&dir, MUTABLE, 300).unwrap();
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t0 + 61 * MINUTE, 200)).unwrap();
+    assert_eq!(*count.lock().unwrap(), 2);
+    assert_eq!(dimensions(&copy), (200, 133), "the copy comes from the new file");
+    let (other, _) = artwork::on_disk(&dir, MUTABLE, 300).unwrap();
+    assert_eq!(dimensions(&other), (300, 200), "the old copy for another width is gone");
 }

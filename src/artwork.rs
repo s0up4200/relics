@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, bail};
 use base64::Engine as _;
@@ -24,6 +24,11 @@ const DISK_LIMIT: u64 = 512 * 1024 * 1024;
 const MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// The most artwork downloads that run at the same time.
 const DOWNLOADS: usize = 6;
+/// The most revalidations that run at the same time. They have their own slots, so that they do not delay
+/// the downloads.
+const REVALIDATIONS: usize = 2;
+/// A file on disk that is not revisioned is revalidated when its last check is this old.
+const REVALIDATE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// The Artwork cache. It keeps an LRU of decoded images in memory, limited by decoded
 /// bytes, and the files in `$XDG_CACHE_HOME/silo-omarchy/artwork/`. GPUI decodes each
@@ -36,6 +41,9 @@ pub struct ArtworkCache {
     /// The downloads that wait for a free slot, in render order.
     queue: VecDeque<Job>,
     running: usize,
+    /// The images that show from disk and are due for a revalidation. They start when no download waits.
+    stale: VecDeque<Job>,
+    revalidating: usize,
     /// The decoded bytes of the images in memory.
     bytes: usize,
     /// Counts the drawn frames. Each entry keeps the frame that last drew it.
@@ -89,6 +97,8 @@ pub fn global(cx: &mut App) -> Entity<ArtworkCache> {
         entries: HashMap::new(),
         queue: VecDeque::new(),
         running: 0,
+        stale: VecDeque::new(),
+        revalidating: 0,
         bytes: 0,
         frame: 0,
         frame_open: false,
@@ -116,32 +126,81 @@ impl ArtworkCache {
         self.entries.retain(|_, entry| !matches!(entry.state, State::Failed(_)));
     }
 
-    /// Starts the queued downloads while fewer than `DOWNLOADS` run.
+    /// Looks for the image on disk, off the main thread. An image on disk shows at once, and is queued for a
+    /// revalidation when it is due. Else the image is queued for a download.
+    fn open(&mut self, job: Job, cx: &mut App) {
+        let (dir, this) = (self.dir.clone(), self.this.clone());
+        let found = cx.background_executor().spawn(async move {
+            let found = on_disk(&dir, &job.url, job.target);
+            let due = found.is_some() && revalidation_due(&dir, &job.url, SystemTime::now());
+            (job, found, due)
+        });
+        cx.spawn(async move |cx| {
+            let (job, found, due) = found.await;
+            this.update(cx, |this, cx| {
+                match found {
+                    Some(found) => {
+                        this.ready(&job.key, Ok(found), cx);
+                        if due {
+                            this.stale.push_back(job);
+                        }
+                    }
+                    None => this.queue.push_back(job),
+                }
+                this.start_downloads(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Starts the queued downloads while fewer than `DOWNLOADS` run. When no download waits, it also starts the
+    /// queued revalidations while fewer than `REVALIDATIONS` run.
     fn start_downloads(&mut self, cx: &mut App) {
         while self.running < DOWNLOADS
-            && let Some(Job { key, url, target }) = self.queue.pop_front()
+            && let Some(job) = self.queue.pop_front()
         {
             self.running += 1;
-            let (http, dir, this) = (self.http.clone(), self.dir.clone(), self.this.clone());
-            let download =
-                cx.background_executor().spawn(async move { download_sized(&http, &dir, &url, target).await });
-            cx.spawn(async move |cx| {
-                let result = download.await;
-                this.update(cx, |this, cx| this.finish(key, result, cx)).ok();
-            })
-            .detach();
+            self.spawn(job, false, cx);
         }
+        while self.queue.is_empty()
+            && self.revalidating < REVALIDATIONS
+            && let Some(job) = self.stale.pop_front()
+        {
+            self.revalidating += 1;
+            self.spawn(job, true, cx);
+        }
+    }
+
+    /// Runs [`download_sized`] for `job` in the background, and then [`Self::revalidated`] or [`Self::finish`].
+    fn spawn(&self, Job { key, url, target }: Job, revalidation: bool, cx: &mut App) {
+        let (http, dir, this) = (self.http.clone(), self.dir.clone(), self.this.clone());
+        let download = cx
+            .background_executor()
+            .spawn(async move { download_sized(&http, &dir, &url, SystemTime::now(), target).await });
+        cx.spawn(async move |cx| {
+            let result = download.await;
+            this.update(cx, |this, cx| match revalidation {
+                true => this.revalidated(key, result, cx),
+                false => this.finish(key, result, cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn finish(&mut self, key: String, result: anyhow::Result<(PathBuf, u64)>, cx: &mut Context<Self>) {
         self.running -= 1;
+        self.ready(&key, result, cx);
+        self.start_downloads(cx);
+    }
+
+    /// Gives the entry at `key` the image in the file of `result`, or the error, and redraws its views.
+    fn ready(&mut self, key: &str, result: anyhow::Result<(PathBuf, u64)>, cx: &mut Context<Self>) {
         if let Ok((_, written)) = &result {
-            self.disk_bytes += written;
-            if self.disk_bytes > DISK_LIMIT {
-                self.prune(cx);
-            }
+            self.wrote(*written, cx);
         }
-        if let Some(entry) = self.entries.get_mut(&key) {
+        if let Some(entry) = self.entries.get_mut(key) {
             let state = match result {
                 Ok((file, _)) => State::Ready(ImageCacheItem::new(&Resource::Path(file.clone().into()), cx), file),
                 Err(err) => State::Failed(ImageCacheError::Other(Arc::new(err))),
@@ -152,6 +211,38 @@ impl ArtworkCache {
                     app.notify(view);
                 }
             }
+        }
+    }
+
+    /// Counts `written` bytes on disk, and prunes the disk when they go over the limit.
+    fn wrote(&mut self, written: u64, cx: &mut Context<Self>) {
+        self.disk_bytes += written;
+        if self.disk_bytes > DISK_LIMIT {
+            self.prune(cx);
+        }
+    }
+
+    /// A revalidation of the image at `key` ended. When the server sent a new file, the cache forgets each
+    /// image of that URL, so that each width loads again from the new file. A failed revalidation keeps the
+    /// image from disk.
+    fn revalidated(&mut self, key: String, result: anyhow::Result<(PathBuf, u64)>, cx: &mut Context<Self>) {
+        self.revalidating -= 1;
+        if let Ok((_, written)) = result
+            && written > 0
+        {
+            self.wrote(written, cx);
+            let url = &key[..key.rfind("-w").expect("each key ends with its width") + 2];
+            let old: Vec<String> = self.entries.keys().filter(|k| k.starts_with(url)).cloned().collect();
+            for old in old {
+                let entry = self.entries.remove(&old).expect("the key comes from the map");
+                self.bytes -= entry.bytes;
+                if let State::Ready(item, _) = entry.state
+                    && let Some(Ok(image)) = item.get()
+                {
+                    cx.drop_image(image, None);
+                }
+            }
+            cx.refresh_windows();
         }
         self.start_downloads(cx);
     }
@@ -234,9 +325,14 @@ impl ArtworkCache {
                 this.update(cx, |this, cx| this.end_frame(window, cx)).ok();
             });
         }
-        let entry = self.entries.entry(key.clone()).or_insert_with(|| {
-            self.queue.push_back(Job { key: key.clone(), url: url.to_string(), target });
-            Entry { state: State::Fetching(HashSet::new()), last_use: 0, bytes: 0, refetched: false }
+        if !self.entries.contains_key(&key) {
+            self.open(Job { key: key.clone(), url: url.to_string(), target }, cx);
+        }
+        let entry = self.entries.entry(key.clone()).or_insert_with(|| Entry {
+            state: State::Fetching(HashSet::new()),
+            last_use: 0,
+            bytes: 0,
+            refetched: false,
         });
         entry.last_use = self.frame;
         let result = match &mut entry.state {
@@ -347,27 +443,36 @@ pub fn discard(file: &Path) {
 }
 
 /// Returns the cache file of the artwork at `url` in `dir`, and downloads it first when
-/// necessary. A revisioned file on disk is used as it is. Other files are revalidated
-/// with their ETag. When the revalidation fails, the old file is used.
+/// necessary. See [`download`].
 pub async fn fetch(http: &Arc<dyn HttpClient>, dir: &Path, url: &str) -> anyhow::Result<PathBuf> {
-    Ok(download(http, dir, url).await?.0)
+    Ok(download(http, dir, url, SystemTime::now()).await?.0)
 }
 
-/// [`fetch`], and the number of bytes that it wrote to `dir`.
-pub async fn download(http: &Arc<dyn HttpClient>, dir: &Path, url: &str) -> anyhow::Result<(PathBuf, u64)> {
+/// Returns the cache file of the artwork at `url` in `dir`, and the number of bytes that the call wrote to `dir`.
+/// A file on disk is used as it is, except when [`revalidation_due`] at `now`: then the call revalidates it with
+/// its ETag. When the revalidation fails, the old file is used. `now` is the time of the call.
+pub async fn download(
+    http: &Arc<dyn HttpClient>,
+    dir: &Path,
+    url: &str,
+    now: SystemTime,
+) -> anyhow::Result<(PathBuf, u64)> {
     let name = file_name(url).context("not an artwork URL")?;
     let file = dir.join(&name);
     let etag_file = dir.join(format!("{name}.etag"));
     let cached = file.exists();
     if cached {
         // The modification time tells `prune` when the file was last used.
-        std::fs::File::options().write(true).open(&file)?.set_modified(SystemTime::now())?;
-        if is_revisioned(url) {
+        std::fs::File::options().write(true).open(&file)?.set_modified(now)?;
+        if !revalidation_due(dir, url, now) {
             return Ok((file, 0));
         }
     }
     let mut request = Request::get(url);
-    if cached && let Ok(etag) = std::fs::read_to_string(&etag_file) {
+    if cached
+        && let Ok(etag) = std::fs::read_to_string(&etag_file)
+        && !etag.is_empty()
+    {
         request = request.header("If-None-Match", etag);
     }
     let reply = async {
@@ -384,22 +489,58 @@ pub async fn download(http: &Arc<dyn HttpClient>, dir: &Path, url: &str) -> anyh
         Ok(Some((etag, body)))
     };
     match reply.await {
-        Ok(None) => Ok((file, 0)),
         Ok(Some((etag, body))) => {
             std::fs::create_dir_all(dir)?;
             let temp = dir.join(format!("{name}.tmp"));
             let written = body.len() as u64;
             std::fs::write(&temp, body)?;
             std::fs::rename(&temp, &file)?;
-            match etag {
-                Some(etag) => std::fs::write(&etag_file, etag)?,
-                None => _ = std::fs::remove_file(&etag_file),
+            if cached {
+                remove_copies(dir, &name);
             }
+            // The ETag file also keeps the time of the last check, see `revalidation_due`. It is empty when the
+            // server sent no ETag.
+            std::fs::write(&etag_file, etag.unwrap_or_default())?;
+            checked(&etag_file, now)?;
             Ok((file, written))
         }
-        Err(_) if cached => Ok((file, 0)),
-        Err(err) => Err(err),
+        Err(err) if !cached => Err(err),
+        // A 304 and a failed revalidation both start a new hour, so that an offline cache does not ask again
+        // at each load.
+        _ => {
+            checked(&etag_file, now)?;
+            Ok((file, 0))
+        }
     }
+}
+
+/// Sets the time of the last check in `etag_file` to `now`. It makes an empty ETag file when there is none.
+fn checked(etag_file: &Path, now: SystemTime) -> anyhow::Result<()> {
+    let file = std::fs::File::options().write(true).create(true).truncate(false).open(etag_file)?;
+    file.set_modified(now)?;
+    Ok(())
+}
+
+/// Deletes the shrunk copies of the cache file `name` in `dir`.
+fn remove_copies(dir: &Path, name: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{name}-w");
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// True when the artwork at `url` is on disk in `dir`, is not revisioned, and its last check is at least
+/// [`REVALIDATE_AFTER`] older than `now`. A file with no record of a check is due.
+pub fn revalidation_due(dir: &Path, url: &str, now: SystemTime) -> bool {
+    let Some(name) = file_name(url) else { return false };
+    if is_revisioned(url) || !dir.join(&name).exists() {
+        return false;
+    }
+    let checked = std::fs::metadata(dir.join(format!("{name}.etag"))).and_then(|meta| meta.modified());
+    checked.map_or(true, |at| now.duration_since(at).is_ok_and(|age| age >= REVALIDATE_AFTER))
 }
 
 /// [`download`] for an image that shows `target` pixels wide. When the image is much wider, the cache also keeps
@@ -409,9 +550,26 @@ pub async fn download_sized(
     http: &Arc<dyn HttpClient>,
     dir: &Path,
     url: &str,
+    now: SystemTime,
     target: u32,
 ) -> anyhow::Result<(PathBuf, u64)> {
-    let (file, written) = download(http, dir, url).await?;
+    let (file, written) = download(http, dir, url, now).await?;
+    sized(file, written, target)
+}
+
+/// The file for the artwork at `url` that shows `target` pixels wide, from disk only, as [`download_sized`]
+/// gives it. `None` when the artwork is not on disk. The number is the bytes of a new shrunk copy.
+pub fn on_disk(dir: &Path, url: &str, target: u32) -> Option<(PathBuf, u64)> {
+    let file = dir.join(file_name(url)?);
+    // The modification time tells `prune` when the file was last used.
+    std::fs::File::options().write(true).open(&file).ok()?.set_modified(SystemTime::now()).ok()?;
+    sized(file, 0, target).ok()
+}
+
+/// The shrunk copy of the cache `file` for `target` pixels wide, or `file` when the image needs no copy. It makes
+/// the copy when `written` is more than zero (the file is new) or when there is no copy. The number is `written`
+/// plus the bytes of a new copy.
+fn sized(file: PathBuf, written: u64, target: u32) -> anyhow::Result<(PathBuf, u64)> {
     let mut name = file.file_name().context("a cache file has a name")?.to_os_string();
     name.push(format!("-w{target}"));
     let copy = file.with_file_name(name);
