@@ -12,7 +12,7 @@ use futures::executor::block_on;
 use serde_json::{Value, json};
 use silo_omarchy::api::{Client, Decision, Error, Trouble};
 use silo_omarchy::library::retry_delay;
-use silo_omarchy::playback::{Replan, Sample};
+use silo_omarchy::playback::{Operation, Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -76,7 +76,9 @@ fn a_503_or_no_reply_is_offline_and_never_signs_the_user_out() {
         |_| problem(503, "service_unavailable"),
         |_| reply(503, "text/plain", String::new()),
         |_| None,
-        |req| if req.path == "auth/refresh" { None } else { problem(401, "token_refresh_required") },
+        |req| {
+            if req.path == "auth/refresh" { None } else { problem(401, "token_refresh_required") }
+        },
     ];
     for (case, reply) in replies.into_iter().enumerate() {
         let (client, _, troubles) = fake(reply);
@@ -172,12 +174,12 @@ fn a_report_that_the_server_refuses_is_synced_at_once() {
 }
 
 #[test]
-fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position() {
+fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position_with_the_same_version() {
     let (client, seen, _) = fake(|req| match req.path.as_str() {
         p if p.ends_with("/replan") => problem(410, "playback_session_ended"),
         _ => playback(req),
     });
-    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    block_on(client.start_version("movie:heat-1995", Some("120"), None)).unwrap();
     let replan = Replan {
         session_id: SESSION.into(),
         attempt_id: "attempt".into(),
@@ -186,6 +188,8 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position() {
         attempted_plan_keys: vec!["key".into()],
         selected_tracks: json!({}),
         position: 1234.5,
+        operation: Operation::FailureRecovery,
+        quality: "original".into(),
     };
     let decision = block_on(client.replan(&replan)).unwrap();
     assert!(matches!(decision, Decision::Playable { .. }), "{decision:?}");
@@ -194,6 +198,7 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position() {
         seen.iter().filter(|s| s.path == "playback/start").map(|s| serde_json::from_str(&s.body).unwrap()).collect();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[1]["start_position"], 1234.5);
+    assert_eq!((&starts[1]["file_id"], &starts[1]["allow_alternate_versions"]), (&json!("120"), &json!(false)));
 }
 
 #[test]
@@ -257,4 +262,33 @@ fn a_failed_sign_out_does_not_show_the_offline_banner_or_the_sign_in_screen() {
     assert!(block_on(client.sign_out()).is_err());
     assert_eq!(refused.get(), []);
     assert_eq!(offline.get(), []);
+}
+
+#[test]
+fn a_write_action_while_offline_fails_and_is_not_sent_again() {
+    let down = Arc::new(AtomicBool::new(true));
+    let (client, seen, troubles) = fake({
+        let down = down.clone();
+        move |req| match req.path.as_str() {
+            _ if down.load(Ordering::SeqCst) => None,
+            "sync/progress" => ok("sync_progress_ok.json"),
+            _ => json(204, String::new()),
+        }
+    });
+    let writes = [
+        block_on(client.set_favorite("movie:heat-1995", true)),
+        block_on(client.set_rating("movie:heat-1995", Some(4))),
+        block_on(client.set_watched("movie:heat-1995", true)),
+        block_on(client.set_watchlist("movie:heat-1995", true)),
+    ];
+    for (i, write) in writes.iter().enumerate() {
+        assert!(write.as_ref().is_err_and(Error::is_offline), "write {i}: {write:?}");
+    }
+    assert_eq!(troubles.get(), [Trouble::Offline; 4]);
+
+    down.store(false, Ordering::SeqCst);
+    let sent = seen.lock().unwrap().len();
+    block_on(client.sync_progress()).unwrap();
+    let later: Vec<String> = seen.lock().unwrap()[sent..].iter().map(|s| s.path.clone()).collect();
+    assert!(later.is_empty(), "the client keeps no write to send later: {later:?}");
 }

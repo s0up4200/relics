@@ -12,7 +12,13 @@ gpui = { package = "gpui-pre", version = "=0.3.7" }
 gpui-kit = { version = "=0.7.0", default-features = false, features = ["assets"] }
 gpui-omarchy = "=0.2.0"
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.7" }
-libmpv2 = { version = "=6.0.0", default-features = false }
+libmpv2 = { version = "=6.0.0", default-features = false, features = ["render"] }
+# The video surface of the Player view (ADR 0003). The versions and features match the crates that gpui
+# already pulls in, so the lock gets no new crates.
+raw-window-handle = "0.6.2"
+wayland-client = "0.31.15"
+wayland-backend = { version = "0.3.17", features = ["client_system", "dlopen"] }
+khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 futures = "0.3.34"

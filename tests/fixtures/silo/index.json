@@ -1,6 +1,47 @@
 {
   "fixtures": [
     {
+      "name": "add_favorite_not_found",
+      "operation_id": "addFavorite",
+      "scenario": "An item the viewer may not see cannot be added.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/favorites/movie:hidden",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 404,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "add_favorite_not_found.json"
+    },
+    {
+      "name": "add_favorite_profile_header_required",
+      "operation_id": "addFavorite",
+      "scenario": "A profile-scoped mutation called without X-Profile-Id.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/favorites/movie:new",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "add_favorite_profile_header_required.json"
+    },
+    {
       "name": "add_to_watchlist_not_found",
       "operation_id": "addToWatchlist",
       "scenario": "An item the viewer may not see cannot be added.",
@@ -94,6 +135,92 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/DeviceLoginCancel",
       "body_file": "cancel_device_login_ok.json"
+    },
+    {
+      "name": "cancel_request_ok",
+      "operation_id": "cancelRequest",
+      "scenario": "Profile-scoped lifecycle response with synthetic provider state.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/requests/r-1/cancel",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        },
+        "body": "{\"reason\":\"No longer needed\"}"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/MediaRequest",
+      "body_file": "cancel_request_ok.json"
+    },
+    {
+      "name": "create_request_ok",
+      "operation_id": "createRequest",
+      "scenario": "A new request is created; an uncertain response must not be automatically retried.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/requests",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        },
+        "body": "{\"media_type\":\"movie\",\"tmdb_id\":12345,\"title\":\"Example\"}"
+      },
+      "expected_status": 201,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/MediaRequest",
+      "body_file": "create_request_ok.json"
+    },
+    {
+      "name": "delete_favorite_locked_profile",
+      "operation_id": "deleteFavorite",
+      "scenario": "A PIN-locked profile without X-Profile-Token.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v2/favorites/movie:c",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-locked"
+        }
+      },
+      "expected_status": 403,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "delete_favorite_locked_profile.json"
+    },
+    {
+      "name": "delete_rating_locked_profile",
+      "operation_id": "deleteRating",
+      "scenario": "A PIN-locked profile without X-Profile-Token.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v2/ratings/movie:c",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-locked"
+        }
+      },
+      "expected_status": 403,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "delete_rating_locked_profile.json"
     },
     {
       "name": "delete_watchlist_entry_locked_profile",
@@ -257,6 +384,26 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/CatalogItemDetail",
       "body_file": "get_catalog_item_ok.json"
+    },
+    {
+      "name": "get_collection_items_ok",
+      "operation_id": "getCollectionItems",
+      "scenario": "A bounded manual membership page with its continuation envelope.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/collections/c1/items",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/CollectionPersonalCollectionItem",
+      "body_file": "get_collection_items_ok.json"
     },
     {
       "name": "get_current_user_ok",
@@ -439,6 +586,48 @@
       "body_file": "get_item_markers_ok.json"
     },
     {
+      "name": "get_library_collections_locked_profile",
+      "operation_id": "getLibraryCollections",
+      "scenario": "A PIN-locked profile without X-Profile-Token.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/library/1/collections",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-locked"
+        }
+      },
+      "expected_status": 403,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "get_library_collections_locked_profile.json"
+    },
+    {
+      "name": "get_library_collections_ok",
+      "operation_id": "getLibraryCollections",
+      "scenario": "The library's Collections tab: curated collections in full, their groups, and the viewer's opted-in personal collections.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/library/1/collections",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/LibraryCollectionTab",
+      "body_file": "get_library_collections_ok.json"
+    },
+    {
       "name": "get_library_layout_ok",
       "operation_id": "getLibraryLayout",
       "scenario": "The library's section layout for the acting profile, without items.",
@@ -602,6 +791,48 @@
       "body_file": "get_system_info_ok.json"
     },
     {
+      "name": "get_watch_trickplay_not_found",
+      "operation_id": "getWatchTrickplay",
+      "scenario": "A file the item does not list, or one without published previews: not found.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/watch/movie:heat-1995/trickplay?file_id=7",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 404,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "get_watch_trickplay_not_found.json"
+    },
+    {
+      "name": "get_watch_trickplay_ok",
+      "operation_id": "getWatchTrickplay",
+      "scenario": "The seek-bar previews of a movie's file: eleven sheets of 10x10 thumbnails, one every ten seconds, each sheet URL signed.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/watch/movie:heat-1995/trickplay?file_id=42",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/WatchTrickplay",
+      "body_file": "get_watch_trickplay_ok.json"
+    },
+    {
       "name": "list_auth_providers_ok",
       "operation_id": "listAuthProviders",
       "scenario": "The sign-in providers a client may offer before login: the built-in one and a plugin-backed OAuth provider.",
@@ -742,6 +973,48 @@
       "response_media_type": "application/problem+json",
       "schema": "#/components/schemas/Problem",
       "body_file": "list_catalog_item_versions_unknown_query_parameter.json"
+    },
+    {
+      "name": "list_collections_contains_item_ok",
+      "operation_id": "listCollections",
+      "scenario": "Visible personal collections, each of the profile's own manual collections marked with whether it holds the title.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/collections?contains_item=movie-1",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/PersonalCollectionCollection",
+      "body_file": "list_collections_contains_item_ok.json"
+    },
+    {
+      "name": "list_collections_ok",
+      "operation_id": "listCollections",
+      "scenario": "The acting profile's own collections, then another profile's shared collection; groups is always empty.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/collections",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/PersonalCollectionCollection",
+      "body_file": "list_collections_ok.json"
     },
     {
       "name": "list_effective_settings_authentication_required",
@@ -905,6 +1178,27 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/SectionCollection",
       "body_file": "list_library_sections_ok.json"
+    },
+    {
+      "name": "list_my_requests_ok",
+      "operation_id": "listMyRequests",
+      "scenario": "Account requests have stable creation order and string identifiers.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/requests/mine",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/MediaRequestCollection",
+      "body_file": "list_my_requests_ok.json"
     },
     {
       "name": "list_people_limit_out_of_range",
@@ -1149,6 +1443,68 @@
       "body_file": "list_series_seasons_without_artwork.json"
     },
     {
+      "name": "list_similar_limit_out_of_range",
+      "operation_id": "listSimilar",
+      "scenario": "limit above 50; v1 silently clamped, v2 refuses.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/recommendations/similar/movie:heat-1995?limit=51",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_similar_limit_out_of_range.json"
+    },
+    {
+      "name": "list_similar_ok",
+      "operation_id": "listSimilar",
+      "scenario": "Cards similar to an item by content.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/recommendations/similar/movie:heat-1995?limit=1",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/CatalogItemCollection",
+      "body_file": "list_similar_ok.json"
+    },
+    {
+      "name": "list_similar_profile_header_required",
+      "operation_id": "listSimilar",
+      "scenario": "A similar-items read without X-Profile-Id.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/recommendations/similar/movie:heat-1995",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "list_similar_profile_header_required.json"
+    },
+    {
       "name": "login_account_required",
       "operation_id": "login",
       "scenario": "The directory accepts the password, but the server has no account for the person and does not create one: an administrator has to add it (v1 answers not_permitted).",
@@ -1274,6 +1630,47 @@
       "response_media_type": "application/problem+json",
       "schema": "#/components/schemas/Problem",
       "body_file": "logout_permission_denied.json"
+    },
+    {
+      "name": "mark_watched_not_found",
+      "operation_id": "markWatched",
+      "scenario": "An item outside the viewer's catalog cannot be marked.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/watched/movie:missing",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 404,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "mark_watched_not_found.json"
+    },
+    {
+      "name": "mark_watched_profile_header_required",
+      "operation_id": "markWatched",
+      "scenario": "Marking watched without X-Profile-Id: a validation failure naming the header.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/watched/movie:heat-1995",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        }
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "mark_watched_profile_header_required.json"
     },
     {
       "name": "not_acceptable",
@@ -1868,6 +2265,27 @@
       "body_file": "refresh_session_token_required.json"
     },
     {
+      "name": "request_status_ok",
+      "operation_id": "getRequestStatus",
+      "scenario": "Profile-scoped lifecycle response with synthetic provider state.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/requests/status",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "private, no-cache",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/FeatureStatus",
+      "body_file": "request_status_ok.json"
+    },
+    {
       "name": "server_identity_ok",
       "operation_id": "getServerIdentity",
       "scenario": "Discovery before login: the deployment's stable server identity, the same at every address.",
@@ -1883,6 +2301,49 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/ServerIdentity",
       "body_file": "server_identity_ok.json"
+    },
+    {
+      "name": "set_rating_out_of_range",
+      "operation_id": "setRating",
+      "scenario": "A rating outside 1 to 5 is a validation failure naming the member.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/ratings/movie:new",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        },
+        "body": "{\"rating\":6}"
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "set_rating_out_of_range.json"
+    },
+    {
+      "name": "set_rating_profile_header_required",
+      "operation_id": "setRating",
+      "scenario": "A profile-scoped mutation called without X-Profile-Id.",
+      "request": {
+        "method": "PUT",
+        "path": "/api/v2/ratings/movie:new",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        },
+        "body": "{\"rating\":4}"
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "set_rating_profile_header_required.json"
     },
     {
       "name": "start_device_login_ok",
@@ -2043,6 +2504,48 @@
       "response_media_type": "application/problem+json",
       "schema": "#/components/schemas/Problem",
       "body_file": "unknown_query_parameter.json"
+    },
+    {
+      "name": "unmark_watched_not_found",
+      "operation_id": "unmarkWatched",
+      "scenario": "An item outside the viewer's catalog cannot be unmarked.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v2/watched/movie:missing",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-owner"
+        }
+      },
+      "expected_status": 404,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "unmark_watched_not_found.json"
+    },
+    {
+      "name": "unmark_watched_profile_locked",
+      "operation_id": "unmarkWatched",
+      "scenario": "A PIN-locked profile without X-Profile-Token cannot change its watched state.",
+      "request": {
+        "method": "DELETE",
+        "path": "/api/v2/watched/movie:heat-1995",
+        "headers": {
+          "Authorization": "Bearer tok-member",
+          "X-Profile-Id": "p-locked"
+        }
+      },
+      "expected_status": 403,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "unmark_watched_profile_locked.json"
     },
     {
       "name": "unsupported_media_type",

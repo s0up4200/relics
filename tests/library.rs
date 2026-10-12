@@ -8,7 +8,9 @@ use futures::executor::block_on;
 use serde_json::json;
 use silo_omarchy::api::wire;
 use silo_omarchy::artwork::Rung;
-use silo_omarchy::browse::{self, Browse, Choice, Paging, SortField, Watch};
+use silo_omarchy::browse::{self, Browse, Choice, Facet, Paging, SortField, Watch};
+use silo_omarchy::filter_panel::{self, Chip, Entry, Facets, MenuKind, Outcome, Panel, Text};
+use silo_omarchy::keys::Key;
 
 #[test]
 fn the_sidebar_lists_only_the_video_libraries_in_the_server_order() {
@@ -66,12 +68,16 @@ fn the_recommended_tab_reads_the_library_layout_and_the_items_of_each_section() 
 }
 
 #[test]
-fn the_genre_filter_lists_the_genres_of_the_library() {
-    let (client, _) = fake(|req| match req.path.as_str() {
-        "catalog/filters?library_id=1&skip_technical=true" => ok("get_catalog_filters_ok.json"),
+fn the_filter_panel_reads_the_filter_values_of_the_library_or_of_the_whole_catalog() {
+    let (client, seen) = fake(|req| match req.path.as_str() {
+        "catalog/filters?library_id=1&skip_technical=true" | "catalog/filters?skip_technical=true" => {
+            ok("get_catalog_filters_ok.json")
+        }
         _ => not_found(),
     });
-    assert_eq!(block_on(client.genres("1")).unwrap(), ["Crime"]);
+    assert_eq!(block_on(client.filters(Some("1"))).unwrap().genres, ["Crime"]);
+    assert_eq!(block_on(client.filters(None)).unwrap().genres, ["Crime"]);
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
 fn body(seen: &Seen) -> serde_json::Value {
@@ -132,7 +138,24 @@ fn the_filters_become_one_rule_group_that_must_match_all_rules() {
 #[test]
 fn each_sort_field_has_its_server_name() {
     let fields: Vec<_> = SortField::ALL.iter().map(|f| f.wire()).collect();
-    assert_eq!(fields, ["title", "added_at", "release_date", "rating_imdb", "runtime", "date_viewed"]);
+    assert_eq!(
+        fields,
+        [
+            "title",
+            "added_at",
+            "release_date",
+            "year",
+            "content_rating",
+            "runtime",
+            "rating_imdb",
+            "rating_tmdb",
+            "resolution",
+            "bitrate",
+            "progress",
+            "date_viewed",
+            "plays",
+        ]
+    );
 }
 
 #[test]
@@ -212,8 +235,6 @@ fn the_sort_menu_sets_the_field_and_the_order() {
     assert_eq!((browse.sort, browse.descending), (SortField::DateAdded, true));
     assert!(browse.is_chosen(&Choice::Sort(SortField::DateAdded)));
     assert!(!browse.is_chosen(&Choice::Descending(false)));
-    let menu = Choice::sort_menu();
-    assert_eq!(menu.len(), 8, "six fields, ascending and descending");
 }
 
 #[test]
@@ -230,13 +251,209 @@ fn the_letter_menu_has_all_and_a_to_z() {
 }
 
 #[test]
-fn the_filter_menu_lists_watch_status_quality_decades_and_genres() {
-    let menu = Choice::filter_menu(&["Crime".into()], 2026);
-    let labels: Vec<_> = menu.iter().map(Choice::label).collect();
-    assert_eq!(&labels[..5], ["Unwatched", "In progress", "Watched", "4K", "HDR"]);
-    assert_eq!(labels[5], "2020s");
-    assert_eq!(labels[17], "1900s");
-    assert_eq!(labels.last().unwrap(), "Crime");
+fn the_new_sort_fields_and_filters_go_to_the_server_in_the_catalog_query() {
+    let (client, seen) = fake(|req| match req.path.as_str() {
+        "catalog/query?image_size=small" => ok("query_catalog_items_ok.json"),
+        _ => not_found(),
+    });
+    let mut browse = Browse { sort: SortField::Plays, descending: true, ..Browse::default() };
+    for choice in [
+        Choice::YearFrom(1990),
+        Choice::YearTo(2005),
+        Choice::MinRating(7),
+        Choice::Facet(Facet::Studio, "A24".into()),
+        Choice::Facet(Facet::Language, "en".into()),
+        Choice::Facet(Facet::Actor, "Tom Hanks".into()),
+        Choice::Facet(Facet::Director, "Ridley Scott".into()),
+        Choice::Facet(Facet::Writer, "Aaron Sorkin".into()),
+        Choice::Facet(Facet::Producer, "Kevin Feige".into()),
+        Choice::Facet(Facet::Network, "HBO".into()),
+        Choice::Facet(Facet::Country, "US".into()),
+        Choice::DolbyVision,
+        Choice::AddedIn("30d"),
+        Choice::ReleasedIn("1y"),
+    ] {
+        browse.choose(&choice);
+    }
+    block_on(client.query_catalog(&browse.query("1", false), Rung::Small)).unwrap();
+    let rule = |field: &str, op: &str, value: serde_json::Value| json!({"field": field, "op": op, "value": value});
+    assert_eq!(
+        body(&seen.lock().unwrap()[0]),
+        json!({
+            "source": "query",
+            "library_id": "1",
+            "sort": "plays",
+            "order": "desc",
+            "limit": 60,
+            "match": "all",
+            "groups": [{"match": "all", "rules": [
+                rule("year", "gte", 1990.into()),
+                rule("year", "lte", 2005.into()),
+                rule("rating_imdb", "gte", 7.into()),
+                rule("original_language", "is", "en".into()),
+                rule("actor", "is", "Tom Hanks".into()),
+                rule("director", "is", "Ridley Scott".into()),
+                rule("writer", "is", "Aaron Sorkin".into()),
+                rule("producer", "is", "Kevin Feige".into()),
+                rule("studio", "is", "A24".into()),
+                rule("network", "is", "HBO".into()),
+                rule("country", "is", "US".into()),
+                rule("added_at", "in_last", "30d".into()),
+                rule("release_date", "in_last", "1y".into()),
+                rule("dolby_vision", "is", true.into()),
+            ]}],
+        })
+    );
+}
+
+#[test]
+fn a_facet_takes_one_value_and_each_new_filter_is_a_chip() {
+    let mut browse = Browse::default();
+    browse.choose(&Choice::Facet(Facet::Studio, "A24".into()));
+    browse.choose(&Choice::Facet(Facet::Studio, "Neon".into()));
+    browse.choose(&Choice::YearFrom(1990));
+    browse.choose(&Choice::MinRating(8));
+    browse.choose(&Choice::AddedIn("7d"));
+    browse.choose(&Choice::DolbyVision);
+    let labels: Vec<_> = browse.chips().iter().map(Choice::chip_label).collect();
+    assert_eq!(labels, ["From 1990", "IMDb 8+", "Studio: Neon", "Added in the last 7 days", "Dolby Vision"]);
+    for chip in browse.chips() {
+        browse.remove(&chip);
+    }
+    assert_eq!(browse.filters, browse::Filters::default());
+}
+
+#[test]
+fn a_panel_step_closes_the_panel_and_tells_if_the_sort_or_a_filter_changed() {
+    let mut browse = Browse::default();
+    let mut menu = None;
+    assert_eq!(filter_panel::step(&mut menu, &mut browse, |_, _| Outcome::Changed), None);
+
+    menu = Some(Panel::new(MenuKind::Filter, facets(), 2026));
+    let step = filter_panel::step(&mut menu, &mut browse, |_, browse| {
+        browse.filters.hdr = true;
+        Outcome::Changed
+    });
+    assert_eq!(step, Some((Outcome::Changed, true)));
+    assert!(menu.is_some());
+
+    assert_eq!(filter_panel::step(&mut menu, &mut browse, |_, _| Outcome::Closed), Some((Outcome::Closed, false)));
+    assert!(menu.is_none());
+}
+
+#[test]
+fn the_bar_chips_end_with_clear_all_and_each_chip_removes_its_filter() {
+    let mut browse = Browse::default();
+    assert!(Chip::all(&browse).is_empty());
+
+    browse.filters.hdr = true;
+    browse.letter = Some('B');
+    let chips = Chip::all(&browse);
+    let labels: Vec<_> = chips.iter().map(Chip::label).collect();
+    assert_eq!(labels, ["HDR ×", "Starts with B ×", "Clear all"]);
+
+    chips[0].remove(&mut browse);
+    assert!(!browse.filters.hdr);
+    chips[2].remove(&mut browse);
+    assert!(browse.chips().is_empty());
+}
+
+fn facets() -> Facets {
+    Facets { studios: vec!["A24".into(), "Neon".into(), "Annapurna".into()], ..Facets::default() }
+}
+
+fn keys(panel: &mut Panel, browse: &mut Browse, keys: &[(&str, Option<&str>)]) -> Outcome {
+    let mut last = Outcome::Unused;
+    for (key, typed) in keys {
+        last = panel.key(Key::parse(key), *typed, browse);
+    }
+    last
+}
+
+#[test]
+fn down_and_up_in_the_filter_panel_move_from_section_to_section() {
+    let (mut panel, mut browse) = (Panel::new(MenuKind::Filter, facets(), 2026), Browse::default());
+    let titles: Vec<_> = panel.sections().iter().map(|s| s.title).collect();
+    assert_eq!(
+        titles,
+        [
+            "Watch status",
+            "Video quality",
+            "Minimum IMDb rating",
+            "Year",
+            "Added in the last",
+            "Released in the last",
+            "Studio",
+            "Actor",
+            "Director",
+            "Writer",
+            "Producer",
+        ],
+        "a facet with no values on the server has no section"
+    );
+    keys(&mut panel, &mut browse, &[("down", None), ("down", None)]);
+    assert_eq!(panel.focused(), Entry::Pick(Choice::MinRating(5)));
+    keys(&mut panel, &mut browse, &[("right", None), ("up", None)]);
+    assert_eq!(panel.focused(), Entry::Pick(Choice::FourK));
+    assert_eq!(keys(&mut panel, &mut browse, &[("enter", None)]), Outcome::Changed);
+    assert!(browse.filters.four_k);
+}
+
+#[test]
+fn a_year_field_takes_digits_and_enter_sets_the_year() {
+    let (mut panel, mut browse) = (Panel::new(MenuKind::Filter, facets(), 2026), Browse::default());
+    keys(&mut panel, &mut browse, &[("down", None), ("down", None), ("down", None)]);
+    assert_eq!(panel.focused(), Entry::Field(Text::YearFrom));
+    let typed = [("1", Some("1")), ("9", Some("9")), ("x", Some("x")), ("9", Some("9")), ("5", Some("5"))];
+    keys(&mut panel, &mut browse, &typed);
+    assert_eq!(panel.text(Text::YearFrom), "1995", "a letter is not a digit");
+    assert_eq!(keys(&mut panel, &mut browse, &[("enter", None)]), Outcome::Changed);
+    assert_eq!(browse.filters.year_from, Some(1995));
+    assert_eq!(panel.text(Text::YearFrom), "", "Enter empties the field");
+}
+
+#[test]
+fn typing_in_a_facet_field_narrows_its_values_and_enter_picks_the_first() {
+    let (mut panel, mut browse) = (Panel::new(MenuKind::Filter, facets(), 2026), Browse::default());
+    keys(&mut panel, &mut browse, &[("down", None); 6]);
+    assert_eq!(panel.focused(), Entry::Field(Text::Facet(Facet::Studio)));
+    keys(&mut panel, &mut browse, &[("a", Some("a")), ("n", Some("n"))]);
+    let studio = &panel.sections()[6];
+    let values = studio.entries[1..].to_vec();
+    assert_eq!(
+        values,
+        [Entry::Pick(Choice::Facet(Facet::Studio, "Annapurna".into()))],
+        "the match ignores case and looks anywhere in the name"
+    );
+    assert_eq!(keys(&mut panel, &mut browse, &[("enter", None)]), Outcome::Changed);
+    assert_eq!(browse.filters.facets, [(Facet::Studio, "Annapurna".to_string())]);
+}
+
+#[test]
+fn enter_in_a_person_field_filters_by_the_typed_name_and_esc_empties_then_closes() {
+    let (mut panel, mut browse) = (Panel::new(MenuKind::Filter, facets(), 2026), Browse::default());
+    keys(&mut panel, &mut browse, &[("down", None); 7]);
+    assert_eq!(panel.focused(), Entry::Field(Text::Facet(Facet::Actor)));
+    let name: Vec<_> = ["T", "o", "m", "space", "H", "a", "n", "k", "s"]
+        .iter()
+        .map(|k| (*k, Some(if *k == "space" { " " } else { *k })))
+        .collect();
+    keys(&mut panel, &mut browse, &name);
+    keys(&mut panel, &mut browse, &[("enter", None)]);
+    assert_eq!(browse.filters.facets, [(Facet::Actor, "Tom Hanks".to_string())]);
+    keys(&mut panel, &mut browse, &[("x", Some("x"))]);
+    assert_eq!(keys(&mut panel, &mut browse, &[("escape", None)]), Outcome::Moved);
+    assert_eq!(panel.text(Text::Facet(Facet::Actor)), "");
+    assert_eq!(keys(&mut panel, &mut browse, &[("escape", None)]), Outcome::Closed);
+}
+
+#[test]
+fn the_sort_menu_has_a_field_section_and_an_order_section() {
+    let (mut panel, mut browse) = (Panel::new(MenuKind::Sort, facets(), 2026), Browse::default());
+    let sections = panel.sections();
+    assert_eq!(sections.iter().map(|s| s.entries.len()).collect::<Vec<_>>(), [13, 2]);
+    assert_eq!(keys(&mut panel, &mut browse, &[("down", None), ("right", None), ("enter", None)]), Outcome::Closed);
+    assert!(browse.descending, "Enter in the sort menu applies and closes it");
 }
 
 fn page(titles: &[&str], next: Option<&str>) -> silo_omarchy::api::wire::CatalogBrowseCollection {
@@ -254,13 +471,14 @@ fn page(titles: &[&str], next: Option<&str>) -> silo_omarchy::api::wire::Catalog
 
 #[test]
 fn the_grid_pages_with_the_cursor_until_the_last_page() {
-    let query = Browse::default().query("1", false);
+    let add =
+        |paging: &mut Paging, page: wire::CatalogBrowseCollection| paging.add(page.items, Some(page.total), page.page);
     let mut paging = Paging::default();
-    assert_eq!(paging.next_query(&query).unwrap().cursor, None, "the first page has no cursor");
-    paging.add(page(&["a", "b"], Some("c2")));
-    assert_eq!(paging.next_query(&query).unwrap().cursor.as_deref(), Some("c2"));
-    paging.add(page(&["c"], None));
-    assert!(paging.next_query(&query).is_none(), "the last page ends the paging");
+    assert_eq!(paging.next_cursor(), Some(None), "the first page has no cursor");
+    add(&mut paging, page(&["a", "b"], Some("c2")));
+    assert_eq!(paging.next_cursor(), Some(Some("c2".into())));
+    add(&mut paging, page(&["c"], None));
+    assert_eq!(paging.next_cursor(), None, "the last page ends the paging");
     let titles: Vec<_> = paging.items.iter().map(|i| i.title.as_str()).collect();
     assert_eq!(titles, ["a", "b", "c"]);
     assert_eq!(paging.total, Some(9));

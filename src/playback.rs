@@ -10,6 +10,9 @@ use crate::api::wire;
 use crate::settings::{IntroSkipMode, ServerSettings};
 
 pub mod subtitles;
+pub mod tracks;
+
+use tracks::{Carry, Choice, Kind, Track};
 
 /// The time between two progress reports while the file is open, playing or paused.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -22,6 +25,13 @@ const NORMAL_END_FRACTION: f64 = 0.985;
 const PROMPT_TIME: Duration = Duration::from_secs(5);
 /// Credits that end this close to the end of the file, in seconds, run to the end of the file.
 const CREDITS_TO_END_SECONDS: f64 = 1.0;
+/// How long the Up Next card counts down before the next Item plays. Without end credits, the card shows this long
+/// before the end of the file.
+const UP_NEXT_TIME: Duration = Duration::from_secs(10);
+/// After this many Items in a row play by themselves with no input of the user, the Still watching prompt shows in
+/// place of the next one. It is the default of the `player.passout_threshold` setting of the settings contract.
+// ponytail: a fixed count; read the client_local setting when the app gets a Local setting for it.
+pub const STILL_WATCHING_AFTER: u32 = 3;
 /// Before each load, the app refreshes a token that has less time than this left.
 const REFRESH_BEFORE_LOAD: Duration = Duration::from_secs(4 * 3600);
 /// When the token in mpv has this much time left, the app refreshes it and reloads at the position.
@@ -29,7 +39,7 @@ const RENEW_BEFORE_EXPIRY: Duration = Duration::from_secs(600);
 /// A reloaded stream that plays this many seconds is healthy again, and the next failure starts a new chain.
 // ponytail: a fixed distance; a stream that fails every few seconds restarts the chain only by Enter.
 const HEALTHY_SECONDS: f64 = 10.0;
-/// The text of the controller when the recovery chain gave up.
+/// The prompt text that the Player view shows when the recovery chain gave up.
 const LOST: &str = "Lost connection to the server";
 
 /// HTTP headers as (name, value).
@@ -56,7 +66,22 @@ pub struct Replan {
     pub selected_tracks: serde_json::Value,
     /// The last good source position.
     pub position: f64,
+    pub operation: Operation,
+    /// The `quality_preference`: a step label of the Quality ladder, or `original`.
+    pub quality: String,
 }
+
+/// Why the app asks for a new plan.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Operation {
+    /// The plan failed: `failure_recovery`.
+    FailureRecovery,
+    /// The user picked a step on the Quality ladder: `quality_change`.
+    QualityChange,
+}
+
+/// The quality preference of a start request: the file as it is, with no lower step of the Quality ladder.
+pub const ORIGINAL: &str = "original";
 
 #[derive(Debug)]
 pub enum Input {
@@ -82,18 +107,20 @@ pub enum Input {
     EndOfFile,
     /// mpv could not open or read the file.
     LoadFailed,
-    /// The user closed the Player window, pressed q, or sent the MPRIS Stop.
+    /// mpv quit, or the user sent the MPRIS Stop.
     Shutdown,
-    /// The app ends the session: a new Item replaces it, or the Library window closes.
+    /// The app ends the session: Back in the Player view, a new Item replaces it, or the Library window closes.
     End,
     /// The periodic tick of the caller.
     Tick,
-    /// The Lua controller loaded and waits for the theme.
-    ControlsReady,
-    /// The user took the Skip prompt, with a click or Enter.
+    /// The user pressed Enter or clicked the button that shows: the Skip prompt, Play now on the Up Next card,
+    /// Continue on the Still watching prompt, or the retry after `LOST`.
     Action,
     /// The Item has a next episode.
     NextEpisode,
+    /// The Item is a pick of a server shuffle with a next pick. The next pick plays at the end, also when the Server
+    /// settings do not auto-play the next episode.
+    Shuffle,
     /// The Item has a previous episode.
     PreviousEpisode,
     /// mpv ended a seek at this player position, or started the file there.
@@ -108,10 +135,47 @@ pub enum Input {
     SeekBy(f64),
     /// MPRIS SetPosition: go to this player position.
     SetPosition(f64),
-    /// MPRIS Next.
+    /// MPRIS Next, or Skip in the Player view.
     Next,
     /// MPRIS Previous.
     Previous,
+    /// mpv reports the tracks of the file.
+    Tracks(Vec<Track>),
+    /// The user picked a track of `kind` in the Track picker. `None` turns the subtitles off.
+    PickTrack {
+        kind: Kind,
+        id: Option<i64>,
+    },
+    /// The user picked this step label of the Quality ladder.
+    PickQuality(String),
+    /// The user picked the file version with this file id.
+    SwitchVersion(String),
+    /// The user cancelled the Up Next card: the next Item does not play at the end.
+    CancelUpNext,
+    /// The user pressed a key, clicked, scrolled or moved the mouse in the Player view.
+    Active,
+}
+
+impl Input {
+    /// The input comes from the user, so the user is not away.
+    fn is_user_input(&self) -> bool {
+        matches!(
+            self,
+            Input::Active
+                | Input::Action
+                | Input::Play
+                | Input::Pause
+                | Input::PlayPause
+                | Input::SeekBy(_)
+                | Input::SetPosition(_)
+                | Input::Next
+                | Input::Previous
+                | Input::PickTrack { .. }
+                | Input::PickQuality(_)
+                | Input::SwitchVersion(_)
+                | Input::CancelUpNext
+        )
+    }
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -131,25 +195,25 @@ pub enum Command {
     Progress { session_id: String, sample: Sample },
     /// Send `stopPlayback`, with the final sample when the session has one.
     Stop { session_id: String, sample: Option<Sample> },
-    /// Destroy the mpv handle, which closes the Player window.
+    /// Destroy the mpv handle, which closes the Player view.
     ClosePlayer,
     /// Show this text to the user.
     ShowError(String),
-    /// Send the theme colors to the Lua controller.
-    SendTheme,
     /// Add the subtitle file at `url` to mpv and show it.
     AddSubtitle { url: String, title: String, language: String },
-    /// Show the subtitle track of the file with this mpv track id.
-    SelectSubtitle(i64),
+    /// Show the subtitle track with this mpv track id. `None` hides the subtitles.
+    SelectSubtitle(Option<i64>),
+    /// Play the audio track with this mpv track id.
+    SelectAudio(i64),
     /// Draw these Markers, in player time, on the seek bar.
     ShowMarkers(Vec<Marker>),
     /// Show the Skip prompt with this label. An empty label hides it.
     ShowPrompt(String),
     /// Seek to this player position.
     Seek(f64),
-    /// Play the next episode in the same Player window. The session has already ended.
+    /// Play the next episode in the same Player view. The session has already ended.
     PlayNext,
-    /// Play the previous episode in the same Player window. The session has already ended.
+    /// Play the previous episode in the same Player view. The session has already ended.
     PlayPrevious,
     /// Set the mpv `pause` property.
     SetPause(bool),
@@ -157,6 +221,13 @@ pub enum Command {
     Refresh,
     /// Ask the server for a new plan and send `Input::Replanned`.
     Replan(Replan),
+    /// Start the file version `file_id` of the same Item at this source position, in the same Player view. The
+    /// session has already ended. The replan request names no file, so a version switch is a new start.
+    PlayVersion { file_id: String, position: Option<f64> },
+    /// Show the Up Next card with this many seconds left before the next Item plays. `None` hides it.
+    UpNext(Option<u64>),
+    /// Show or hide the Still watching prompt.
+    StillWatching(bool),
 }
 
 /// The recovery chain: a failure starts it, and each next failure goes one step on.
@@ -171,7 +242,7 @@ enum Chain {
     Replanning,
     /// The app loaded the new plan.
     Replanned,
-    /// The controller shows the `LOST` text. Enter starts the chain again.
+    /// The Player view shows the `LOST` text as the prompt. Enter starts the chain again.
     Lost,
 }
 
@@ -202,6 +273,8 @@ pub struct Session {
     resolved: Vec<usize>,
     prompt: Option<Prompt>,
     has_next: bool,
+    /// The next Item is the next pick of a shuffle.
+    shuffle: bool,
     has_previous: bool,
     /// The headers for the next load.
     access: Option<Access>,
@@ -217,6 +290,24 @@ pub struct Session {
     audio_language: Option<String>,
     /// The keys of the plans that failed.
     failed_keys: Vec<String>,
+    /// The tracks of the file, as mpv last reported them.
+    tracks: Vec<Track>,
+    /// The track choice of the Track picker, in this session or carried from the last episode.
+    carry: Carry,
+    /// The part of `carry` that mpv has not played yet in the file that loads.
+    pending: Carry,
+    /// The step of the Quality ladder that plays.
+    quality: String,
+    /// The step of a quality change replan that runs.
+    changing: Option<String>,
+    /// The Up Next card shows, and the next Item plays at this time.
+    up_next: Option<SystemTime>,
+    /// The user cancelled the Up Next card, so the next Item does not play by itself.
+    cancelled: bool,
+    /// How many Items in a row played by themselves, with no input of the user, up to this one.
+    auto_plays: u32,
+    /// The Still watching prompt shows. The value is the final position for the stop report.
+    still_watching: Option<Option<f64>>,
 }
 
 /// The Skip prompt that shows now.
@@ -251,6 +342,8 @@ struct Plan {
     subtitle: Option<Command>,
     /// The Markers in player time.
     markers: Vec<Marker>,
+    /// The plan as the server sent it, for the Playback info panel.
+    wire: wire::PlaybackPlan,
 }
 
 impl Session {
@@ -270,6 +363,7 @@ impl Session {
             resolved: Vec::new(),
             prompt: None,
             has_next: false,
+            shuffle: false,
             has_previous: false,
             access: None,
             mpv_expires: None,
@@ -279,12 +373,61 @@ impl Session {
             load_start: 0.0,
             audio_language: None,
             failed_keys: Vec::new(),
+            tracks: Vec::new(),
+            carry: Carry::default(),
+            pending: Carry::default(),
+            quality: ORIGINAL.into(),
+            changing: None,
+            up_next: None,
+            cancelled: false,
+            auto_plays: 0,
+            still_watching: None,
         }
+    }
+
+    /// Starts the session after `count` Items in a row played by themselves, with no input of the user.
+    pub fn with_auto_plays(mut self, count: u32) -> Self {
+        self.auto_plays = count;
+        self
+    }
+
+    /// How many Items in a row played by themselves, with no input of the user. The next Item starts with it.
+    pub fn auto_plays(&self) -> u32 {
+        self.auto_plays
+    }
+
+    /// Starts the session with the track choice of the last episode of the same series.
+    pub fn with_carry(mut self, carry: Carry) -> Self {
+        self.carry = carry;
+        self
+    }
+
+    /// The track choice to carry to the next episode.
+    pub fn carry(&self) -> Carry {
+        self.carry.clone()
+    }
+
+    /// The tracks of the file, for the Track picker.
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
+
+    /// The plan that plays, for the Playback info panel and the Quality ladder.
+    pub fn plan(&self) -> Option<&wire::PlaybackPlan> {
+        self.plan.as_ref().map(|plan| &plan.wire)
+    }
+
+    /// The step label of the Quality ladder that plays.
+    pub fn quality(&self) -> &str {
+        &self.quality
     }
 
     pub fn step(&mut self, input: Input, now: SystemTime) -> Vec<Command> {
         if self.ended {
             return Vec::new();
+        }
+        if input.is_user_input() {
+            self.auto_plays = 0;
         }
         match input {
             Input::Started { decision, access } => match decision {
@@ -321,35 +464,32 @@ impl Session {
             }
             Input::Replanned(decision) if self.chain == Chain::Replanning => match decision {
                 Some(Decision::Playable { session_id, plan, .. }) => {
-                    let Some(old) = &self.plan else {
-                        return Vec::new();
-                    };
-                    let source = self.position.unwrap_or(self.load_start) + old.offset;
-                    // The Markers come in source time. The plan keeps them in player time.
-                    let markers = old
-                        .markers
-                        .iter()
-                        .map(|marker| Marker {
-                            start: marker.start + old.offset,
-                            end: marker.end + old.offset,
-                            ..marker.clone()
-                        })
-                        .collect();
-                    let attempt_id = old.attempt_id.clone();
-                    self.adopt(session_id, attempt_id, &plan, markers);
-                    let start = (source - plan.timeline.timeline_offset_seconds).max(0.0);
-                    self.position = Some(start);
                     self.chain = Chain::Replanned;
-                    self.load_now(start)
+                    self.play_replan(session_id, &plan)
                 }
                 _ => self.lose(),
             },
+            Input::Replanned(decision) if self.changing.is_some() => {
+                let label = self.changing.take().unwrap_or_default();
+                match decision {
+                    Some(Decision::Playable { session_id, plan, .. }) => {
+                        self.quality = label;
+                        self.play_replan(session_id, &plan)
+                    }
+                    // The old plan still plays.
+                    _ => Vec::new(),
+                }
+            }
             Input::Replanned(_) => Vec::new(),
             Input::FileLoaded => {
                 self.loaded = true;
                 self.last_report = Some(now);
-                let subtitle = self.plan.as_ref().and_then(|plan| plan.subtitle.clone());
-                [Some(self.show_markers()), subtitle].into_iter().flatten().collect()
+                // The user turned the subtitles off in the Track picker.
+                let off = self.carry.subtitle == Some(Choice::Off);
+                let subtitle = self.plan.as_ref().and_then(|plan| plan.subtitle.clone()).filter(|_| !off);
+                let mut commands: Vec<Command> = [Some(self.show_markers()), subtitle].into_iter().flatten().collect();
+                commands.extend(self.play_carry());
+                commands
             }
             Input::Position(position) if self.loaded => {
                 self.position = Some(position);
@@ -358,7 +498,11 @@ impl Session {
                 {
                     self.chain = Chain::Healthy;
                 }
-                self.enter(position, now)
+                let mut commands = self.enter(position, now);
+                if !self.ended {
+                    commands.extend(self.up_next(position, now));
+                }
+                commands
             }
             Input::Duration(duration) if self.loaded => {
                 self.duration = Some(duration);
@@ -370,6 +514,13 @@ impl Session {
             }
             Input::Tick => {
                 let mut commands = Vec::new();
+                if let Some(until) = self.up_next {
+                    if now >= until {
+                        return self.auto_advance(self.source_position());
+                    }
+                    let left = until.duration_since(now).unwrap_or_default().as_secs_f64().ceil() as u64;
+                    commands.push(Command::UpNext(Some(left)));
+                }
                 if self.prompt.as_ref().is_some_and(|prompt| now >= prompt.until) {
                     self.prompt = None;
                     commands.push(Command::ShowPrompt(String::new()));
@@ -378,13 +529,26 @@ impl Session {
                 commands.extend(self.renew(now));
                 commands
             }
-            Input::ControlsReady => vec![Command::SendTheme, self.show_markers()],
             Input::Action if self.chain == Chain::Lost => {
                 self.chain = Chain::Healthy;
                 let mut commands = vec![Command::ShowPrompt(String::new())];
                 commands.extend(self.recover());
                 commands
             }
+            Input::Action if self.still_watching.is_some() => {
+                let position = self.still_watching.unwrap_or_default();
+                let mut commands = vec![Command::SetPause(false)];
+                commands.extend(self.play_next(position));
+                commands
+            }
+            Input::Action if self.up_next.is_some() => self.play_next(self.source_position()),
+            Input::CancelUpNext => match self.up_next.take() {
+                Some(_) => {
+                    self.cancelled = true;
+                    vec![Command::UpNext(None)]
+                }
+                None => Vec::new(),
+            },
             Input::Action => match self.prompt.take() {
                 Some(Prompt { action: Action::Seek { to, marker }, .. }) => {
                     self.resolved.push(marker);
@@ -399,6 +563,10 @@ impl Session {
             },
             Input::NextEpisode => {
                 self.has_next = true;
+                Vec::new()
+            }
+            Input::Shuffle => {
+                (self.has_next, self.shuffle) = (true, true);
                 Vec::new()
             }
             Input::PreviousEpisode => {
@@ -418,16 +586,17 @@ impl Session {
             {
                 vec![Command::Seek(position)]
             }
-            Input::Next if self.has_next => self.play_next(self.source_position()),
+            Input::Next if self.has_next => self.play_next(self.stop_position()),
             Input::Previous if self.has_previous => {
                 let mut commands = self.finish(self.source_position(), false);
                 commands.push(Command::PlayPrevious);
                 commands
             }
+            Input::EndOfFile if self.still_watching.is_some() => Vec::new(),
             Input::EndOfFile => {
                 let (position, normal) = self.end_position();
-                if normal && self.has_next && self.settings.auto_play_next {
-                    self.play_next(position)
+                if normal && self.auto_next() && !self.cancelled {
+                    self.auto_advance(position)
                 } else if normal {
                     self.finish(position, true)
                 } else {
@@ -435,9 +604,69 @@ impl Session {
                     self.recover()
                 }
             }
+            Input::Tracks(tracks) => {
+                self.tracks = tracks;
+                if self.loaded { self.play_carry() } else { Vec::new() }
+            }
+            Input::PickTrack { kind, id } => {
+                let track = id.and_then(|id| self.tracks.iter().find(|track| track.kind == kind && track.id == id));
+                let picked = if id.is_none() { Some(Choice::Off) } else { track.map(Choice::of) };
+                // A reload of the file shows the picked track of the file, not the sidecar of the start. A picked
+                // external track is that sidecar.
+                if let (Kind::Sub, Some(track), Some(plan)) = (kind, track, &mut self.plan)
+                    && !track.external
+                {
+                    plan.subtitle = Some(Command::SelectSubtitle(Some(track.id)));
+                }
+                let (choice, pending) = match kind {
+                    Kind::Audio => (&mut self.carry.audio, &mut self.pending.audio),
+                    Kind::Sub => (&mut self.carry.subtitle, &mut self.pending.subtitle),
+                    Kind::Other => return Vec::new(),
+                };
+                *pending = None;
+                if picked.is_some() {
+                    *choice = picked;
+                }
+                match kind {
+                    Kind::Audio => id.map(Command::SelectAudio).into_iter().collect(),
+                    _ => vec![Command::SelectSubtitle(id)],
+                }
+            }
+            Input::PickQuality(label) => {
+                let Some(plan) = &self.plan else {
+                    return Vec::new();
+                };
+                if label == self.quality || self.changing.is_some() || self.chain != Chain::Healthy {
+                    return Vec::new();
+                }
+                let replan = Replan {
+                    session_id: plan.session_id.clone(),
+                    attempt_id: plan.attempt_id.clone(),
+                    failed_plan_id: plan.plan_id.clone(),
+                    plan_attempt_key: plan.plan_attempt_key.clone(),
+                    // Nothing failed, so each plan is a choice again.
+                    attempted_plan_keys: Vec::new(),
+                    selected_tracks: plan.selected_tracks.clone(),
+                    position: self.position.unwrap_or(self.load_start) + plan.offset,
+                    operation: Operation::QualityChange,
+                    quality: label.clone(),
+                };
+                self.changing = Some(label);
+                vec![Command::Replan(replan)]
+            }
+            Input::SwitchVersion(file_id) => {
+                if self.plan.as_ref().is_none_or(|plan| *plan.wire.effective_media_file_id == file_id) {
+                    return Vec::new();
+                }
+                let position = self.source_position();
+                let mut commands = self.finish(position, false);
+                commands.push(Command::PlayVersion { file_id, position });
+                commands
+            }
             Input::LoadFailed => self.recover(),
-            Input::Shutdown => self.finish(self.source_position(), true),
-            Input::End => self.finish(self.source_position(), false),
+            Input::Shutdown => self.finish(self.stop_position(), true),
+            Input::End => self.finish(self.stop_position(), false),
+            Input::Active => Vec::new(),
             Input::Position(_)
             | Input::Duration(_)
             | Input::Seeked(_)
@@ -465,7 +694,11 @@ impl Session {
     /// Makes `plan` the plan of the session. `markers` are in source time.
     fn adopt(&mut self, session_id: String, attempt_id: String, plan: &wire::PlaybackPlan, markers: Vec<Marker>) {
         let tracks = &plan.subtitle.inventory;
-        let chosen = subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
+        let default = || subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
+        let chosen = match &self.carry.subtitle {
+            Some(choice @ Choice::Track { .. }) => subtitles::carried(tracks, choice).or_else(default),
+            _ => default(),
+        };
         // Direct play streams the file itself, with each of its tracks. mpv counts the tracks of a kind from 1.
         let direct = Delivery::from(plan.delivery.clone()) == Delivery::OriginalHttp;
         let aid = plan.selected_tracks.audio.as_ref().and_then(|audio| audio.index).filter(|_| direct).map(|i| i + 1);
@@ -475,7 +708,7 @@ impl Session {
                 // tracks in the order of the file.
                 let before =
                     tracks.iter().filter(|t| t.source == "embedded" && t.combined_index < track.combined_index).count();
-                return Some(Command::SelectSubtitle(before as i64 + 1));
+                return Some(Command::SelectSubtitle(Some(before as i64 + 1)));
             }
             // ponytail: a track without a URL needs a burn-in replan (operation track_change), so it shows no
             // subtitles.
@@ -501,7 +734,27 @@ impl Session {
             offset,
             subtitle,
             markers,
+            wire: plan.clone(),
         });
+    }
+
+    /// Plays the new plan of a replan at the source position that plays now. The Markers keep their source time.
+    fn play_replan(&mut self, session_id: String, plan: &wire::PlaybackPlan) -> Vec<Command> {
+        let Some(old) = &self.plan else {
+            return Vec::new();
+        };
+        let source = self.position.unwrap_or(self.load_start) + old.offset;
+        // The Markers come in source time. The plan keeps them in player time.
+        let markers = old
+            .markers
+            .iter()
+            .map(|marker| Marker { start: marker.start + old.offset, end: marker.end + old.offset, ..marker.clone() })
+            .collect();
+        let attempt_id = old.attempt_id.clone();
+        self.adopt(session_id, attempt_id, plan, markers);
+        let start = (source - plan.timeline.timeline_offset_seconds).max(0.0);
+        self.position = Some(start);
+        self.load_now(start)
     }
 
     /// Loads the plan at `start`, after a refresh when the token has less than 4 hours left.
@@ -523,6 +776,9 @@ impl Session {
         self.load_start = start;
         self.mpv_expires = access.expires;
         self.renewed = false;
+        // mpv resets the tracks on each load, so the Track picker choice must play again in the new file.
+        self.pending = self.carry.clone();
+        self.tracks.clear();
         vec![Command::Load { url: plan.url.clone(), headers: access.headers.clone(), start, aid: plan.aid }]
     }
 
@@ -560,11 +816,34 @@ impl Session {
                     attempted_plan_keys: self.failed_keys.clone(),
                     selected_tracks: plan.selected_tracks.clone(),
                     position: good + plan.offset,
+                    operation: Operation::FailureRecovery,
+                    quality: self.quality.clone(),
                 })]
             }
             Chain::Replanned => self.lose(),
             Chain::Refreshing | Chain::Replanning | Chain::Lost => Vec::new(),
         }
+    }
+
+    /// Plays the tracks of the Track picker choice that the loaded file has and that do not play yet. Each kind
+    /// plays once per load, so that a later pick of the user stays.
+    fn play_carry(&mut self) -> Vec<Command> {
+        let mut commands = Vec::new();
+        for kind in [Kind::Audio, Kind::Sub] {
+            let pending = if kind == Kind::Audio { &mut self.pending.audio } else { &mut self.pending.subtitle };
+            let Some(choice) = pending else { continue };
+            let found = self.tracks.iter().find(|t| t.kind == kind && choice.matches(t.lang.as_deref(), t.forced));
+            let Some(track) = found else { continue };
+            if !track.selected {
+                commands.push(if kind == Kind::Audio {
+                    Command::SelectAudio(track.id)
+                } else {
+                    Command::SelectSubtitle(Some(track.id))
+                });
+            }
+            *pending = None;
+        }
+        commands
     }
 
     fn lose(&mut self) -> Vec<Command> {
@@ -602,22 +881,27 @@ impl Session {
                     commands.extend([Command::Seek(end), self.show("Watch intro", undo, true, now)]);
                 }
             },
-            MarkerKind::Credits if to_end && self.has_next => {
-                if self.settings.auto_skip_credits && self.settings.auto_play_next {
-                    commands.extend(self.play_next(self.source_position()));
-                } else {
-                    commands.push(self.show("Next episode", Action::Next, false, now));
+            // With autoplay, the Up Next card shows in these credits.
+            MarkerKind::Credits if to_end && self.has_next && self.auto_next() => {
+                if self.settings.auto_skip_credits {
+                    commands.extend(self.auto_advance(self.source_position()));
                 }
+            }
+            MarkerKind::Credits if to_end && self.has_next => {
+                commands.push(self.show("Next episode", Action::Next, false, now))
             }
             MarkerKind::Credits if !to_end && self.settings.auto_skip_credits => {
                 self.resolved.push(index);
                 commands.push(Command::Seek(end));
             }
+            MarkerKind::Credits => commands.push(self.show("Skip credits", skip, false, now)),
             MarkerKind::Recap if self.settings.auto_skip_recap => {
                 self.resolved.push(index);
                 commands.push(Command::Seek(end));
             }
-            _ => {}
+            MarkerKind::Recap => commands.push(self.show("Skip recap", skip, false, now)),
+            MarkerKind::Preview => commands.push(self.show("Skip preview", skip, false, now)),
+            MarkerKind::Unknown(_) => {}
         }
         commands
     }
@@ -638,7 +922,57 @@ impl Session {
         Command::ShowPrompt(label.into())
     }
 
-    /// Ends the session at `position` and plays the next episode in the same Player window.
+    /// The next Item plays at the end: the next pick of a shuffle, or the next episode when the Server settings
+    /// auto-play it.
+    fn auto_next(&self) -> bool {
+        self.has_next && (self.shuffle || self.settings.auto_play_next)
+    }
+
+    /// Shows the Up Next card when the position enters the end of the file, and hides it when the position leaves.
+    /// The end starts at the end credits, else `UP_NEXT_TIME` before the end of the file.
+    fn up_next(&mut self, position: f64, now: SystemTime) -> Vec<Command> {
+        let markers = self.plan.as_ref().map_or(&[][..], |plan| &plan.markers);
+        let start = self.player_duration().map(|duration| {
+            let credits = markers.iter().filter(|marker| {
+                matches!(marker.kind, MarkerKind::Credits) && marker.end >= duration - CREDITS_TO_END_SECONDS
+            });
+            credits.map(|marker| marker.start).fold(duration - UP_NEXT_TIME.as_secs_f64(), f64::min)
+        });
+        let inside = self.auto_next()
+            && !self.cancelled
+            && self.still_watching.is_none()
+            && start.is_some_and(|start| position >= start);
+        match (inside, self.up_next) {
+            (true, None) => {
+                self.up_next = Some(now + UP_NEXT_TIME);
+                vec![Command::UpNext(Some(UP_NEXT_TIME.as_secs()))]
+            }
+            (false, Some(_)) => {
+                self.up_next = None;
+                vec![Command::UpNext(None)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Plays the next Item with no input of the user: at the end of the file or of the Up Next countdown.
+    /// After `STILL_WATCHING_AFTER` of them in a row, it pauses and shows the Still watching prompt instead.
+    fn auto_advance(&mut self, position: Option<f64>) -> Vec<Command> {
+        if self.auto_plays < STILL_WATCHING_AFTER {
+            self.auto_plays += 1;
+            return self.play_next(position);
+        }
+        self.still_watching = Some(position);
+        let hide = self.up_next.take().map(|_| Command::UpNext(None));
+        hide.into_iter().chain([Command::SetPause(true), Command::StillWatching(true)]).collect()
+    }
+
+    /// The final position of a stop report: the position of the Still watching prompt while it shows.
+    fn stop_position(&self) -> Option<f64> {
+        self.still_watching.unwrap_or_else(|| self.source_position())
+    }
+
+    /// Ends the session at `position` and plays the next episode in the same Player view.
     fn play_next(&mut self, position: Option<f64>) -> Vec<Command> {
         let mut commands = self.finish(position, false);
         commands.push(Command::PlayNext);
@@ -673,6 +1007,12 @@ impl Session {
         let mut commands = Vec::new();
         if self.prompt.take().is_some() || self.chain == Chain::Lost {
             commands.push(Command::ShowPrompt(String::new()));
+        }
+        if self.up_next.take().is_some() {
+            commands.push(Command::UpNext(None));
+        }
+        if self.still_watching.take().is_some() {
+            commands.push(Command::StillWatching(false));
         }
         let sample = position.map(|position| self.sample(position));
         commands.push(Command::Stop { session_id, sample });

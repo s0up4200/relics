@@ -8,9 +8,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use silo_omarchy::api::types::{Marker, MarkerKind};
-use silo_omarchy::mpv::{Player, find_controls};
+use silo_omarchy::mpv::Player;
 use silo_omarchy::playback::Input;
+use silo_omarchy::playback::tracks::Kind;
 
 /// One request that the stub got: the path, the `Authorization` header and the device name header.
 #[derive(Debug, Clone)]
@@ -188,7 +188,7 @@ fn a_401_in_the_middle_of_an_hls_stream_ends_it_before_the_duration() {
         matches!(input, Input::EndOfFile | Input::LoadFailed)
     });
     assert!(position < 5.0, "{end:?} at {position} of 6 s, so the end rule sees an Early end");
-    // The window stays, so the controller can show "Lost connection to the server".
+    // mpv stays open, so the Player view can show "Lost connection to the server".
     assert_eq!(player.property("idle-active").unwrap_or_default(), "no");
 }
 
@@ -203,61 +203,29 @@ fn closing_the_player_ends_with_shutdown() {
     wait_for(&rx, |input| matches!(input, Input::Shutdown));
 }
 
-fn open_with_controls() -> (Player, Receiver<Input>) {
-    let (tx, rx) = mpsc::channel();
-    let script = format!("{}/data/silo-controls.lua", env!("CARGO_MANIFEST_DIR"));
-    let player = Player::open("no", &[("vo", "null"), ("ao", "null"), ("scripts", &script)], move |input| {
-        tx.send(input).ok();
-    })
-    .unwrap();
-    (player, rx)
+#[test]
+fn the_player_view_changes_the_volume_and_mutes() {
+    let (player, _rx) = open();
+    let (volume, _) = player.volume().unwrap();
+    player.add_volume(-5.0).unwrap();
+    player.toggle_mute().unwrap();
+    assert_eq!(player.volume().unwrap(), (volume - 5.0, true));
+    player.toggle_mute().unwrap();
+    assert!(!player.volume().unwrap().1);
 }
 
 #[test]
-fn the_controller_says_that_it_is_ready() {
-    let (_player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-}
-
-#[test]
-fn the_controller_is_found_in_the_data_dirs_in_order() {
-    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("controls-search");
-    std::fs::remove_dir_all(&root).ok();
-    let script = |dir: &str| {
-        let path = root.join(dir).join("silo-controls.lua");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "").unwrap();
-        path
-    };
-    let own = script("own");
-    let user = script("home/.local/share/silo-omarchy");
-    let system = script("usr/share/silo-omarchy");
-    std::fs::create_dir_all(root.join("empty")).unwrap();
-    let dir = |d: &str| Some(root.join(d).into_os_string());
-    let data_dirs = Some(format!("{0}/empty:{0}/usr/share", root.display()).into());
-
-    let found = find_controls(|name| match name {
-        "SILO_OMARCHY_DATA" => dir("own"),
-        "HOME" => dir("home"),
-        "XDG_DATA_DIRS" => data_dirs.clone(),
-        _ => None,
-    });
-    assert_eq!(found, Some(own));
-    // XDG_DATA_HOME is $HOME/.local/share when it is not set.
-    let found = find_controls(|name| match name {
-        "SILO_OMARCHY_DATA" => dir("empty"),
-        "HOME" => dir("home"),
-        "XDG_DATA_DIRS" => data_dirs.clone(),
-        _ => None,
-    });
-    assert_eq!(found, Some(user));
-    let found = find_controls(|name| match name {
-        "XDG_DATA_HOME" => dir("empty"),
-        "XDG_DATA_DIRS" => data_dirs.clone(),
-        _ => None,
-    });
-    assert_eq!(found, Some(system));
-    assert_eq!(find_controls(|name| (name == "XDG_DATA_HOME").then(|| dir("empty")).flatten()), None);
+fn the_player_view_changes_and_resets_the_subtitle_delay() {
+    let (player, _rx) = open();
+    assert_eq!(player.sub_delay().unwrap(), 0.0);
+    player.add_sub_delay(0.1).unwrap();
+    player.add_sub_delay(0.1).unwrap();
+    player.add_sub_delay(-0.5).unwrap();
+    // mpv keeps the delay as a 32-bit float.
+    let delay = player.sub_delay().unwrap();
+    assert!((delay + 0.3).abs() < 1e-6, "{delay}");
+    player.set_sub_delay(0.0).unwrap();
+    assert_eq!(player.sub_delay().unwrap(), 0.0);
 }
 
 /// Waits up to 15 s until the mpv property `name` has the value `want`.
@@ -267,23 +235,6 @@ fn wait_for_property(player: &Player, name: &str, want: &str) {
         assert!(Instant::now() < deadline, "{name} is {:?}, not {want}", player.property(name).ok());
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-#[test]
-fn a_cycles_the_audio_track_only_for_the_file_that_plays() {
-    let stub = stub(usize::MAX);
-    let (player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    let url = format!("{}/sample.mp4", stub.url);
-    player.load(&url, &headers(), 0.0, None).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    wait_for_property(&player, "aid", "1");
-    // The test video has one audio track, so the next track is none.
-    player.command(&["keypress", "a"]).unwrap();
-    wait_for_property(&player, "aid", "no");
-    player.load(&url, &headers(), 0.0, None).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    wait_for_property(&player, "aid", "1");
 }
 
 #[test]
@@ -298,35 +249,6 @@ fn an_added_subtitle_shows_and_its_request_has_the_header() {
     assert_eq!(player.property("current-tracks/sub/lang").unwrap(), "eng");
     assert!(stub.requests.lock().unwrap().iter().any(|r| r.path == "/sample.vtt"));
     assert_each_request_has_the_header(&stub);
-}
-
-#[test]
-fn enter_takes_the_skip_prompt() {
-    let (player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    player.show_prompt("Skip intro").unwrap();
-    // The script message and the key reach the controller on different paths, so the key can come first.
-    // Press Enter again until the controller sends the action.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        player.command(&["keypress", "ENTER"]).unwrap();
-        if let Ok(Input::Action) = rx.recv_timeout(Duration::from_millis(200)) {
-            return;
-        }
-        assert!(Instant::now() < deadline, "the controller sent no action");
-    }
-}
-
-#[test]
-fn seek_moves_the_position_after_the_controller_gets_the_markers() {
-    let stub = stub(usize::MAX);
-    let (player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    player.show_markers(&[Marker { kind: MarkerKind::Intro, start: -1.5, end: 2.0 }]).unwrap();
-    player.seek(3.0).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::Position(position) if *position >= 3.0));
 }
 
 #[test]
@@ -349,7 +271,45 @@ fn direct_play_plays_the_chosen_audio_track_and_shows_an_embedded_subtitle_track
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     wait_for_property(&player, "current-tracks/audio/lang", "jpn");
     assert_eq!(player.property("sid").unwrap(), "no");
-    player.select_subtitle(1).unwrap();
+    player.select_subtitle(Some(1)).unwrap();
     wait_for_property(&player, "current-tracks/sub/lang", "eng");
     assert_eq!(player.property("track-list/count").unwrap(), "4", "no second copy of the subtitle track");
+}
+
+/// The (id, language, selected) of each track of `kind`.
+fn tracks_of(input: &Input, kind: Kind) -> Vec<(i64, String, bool)> {
+    let Input::Tracks(tracks) = input else { return vec![] };
+    let of_kind = tracks.iter().filter(|track| track.kind == kind);
+    of_kind.map(|track| (track.id, track.lang.clone().unwrap_or_default(), track.selected)).collect()
+}
+
+#[test]
+fn mpv_reports_the_track_list_and_a_pick_by_id_selects_the_audio_and_subtitle_track() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open();
+    player.load(&format!("{}/tracks.mkv", stub.url), &headers(), 0.0, None).unwrap();
+    let audio = |eng, jpn| vec![(1, "eng".to_string(), eng), (2, "jpn".to_string(), jpn)];
+    let first = wait_for(&rx, |input| tracks_of(input, Kind::Audio) == audio(true, false));
+    let Input::Tracks(tracks) = first else { unreachable!() };
+    let sub = tracks.iter().find(|track| track.kind == Kind::Sub).expect("the embedded subtitle track");
+    assert_eq!(
+        (sub.id, sub.lang.as_deref(), sub.codec.as_deref(), sub.external),
+        (1, Some("eng"), Some("subrip"), false)
+    );
+    let eng = tracks.iter().find(|track| track.kind == Kind::Audio).unwrap();
+    assert_eq!((eng.codec.as_deref(), eng.channels), (Some("aac"), Some(1)));
+
+    player.select_audio(2).unwrap();
+    wait_for(&rx, |input| tracks_of(input, Kind::Audio) == audio(false, true));
+    player.select_subtitle(Some(1)).unwrap();
+    wait_for(&rx, |input| tracks_of(input, Kind::Sub) == [(1, "eng".to_string(), true)]);
+    player.select_subtitle(None).unwrap();
+    wait_for(&rx, |input| tracks_of(input, Kind::Sub) == [(1, "eng".to_string(), false)]);
+
+    player.add_subtitle(&format!("{}/sample.vtt", stub.url), "English", "eng").unwrap();
+    let added = wait_for(&rx, |input| tracks_of(input, Kind::Sub).len() == 2);
+    let Input::Tracks(tracks) = added else { unreachable!() };
+    let external = tracks.iter().find(|track| track.kind == Kind::Sub && track.id == 2).unwrap();
+    assert!(external.external && external.selected, "{external:?}");
+    assert_eq!(external.title.as_deref(), Some("English"));
 }

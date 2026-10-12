@@ -1,8 +1,10 @@
 //! The subtitle choice at the start of playback. It is a port of the web player rule
 //! `resolveSubtitleAutoSelect` (silo-server web/src/player/utils/subtitleSort.ts), so a
 //! Profile gets the same subtitles on each client. The app keeps no remembered track per
-//! series, so the track signature of the web rule is left out.
+//! series, so the track signature of the web rule is left out. Only the choice of the Track
+//! picker carries to the next episode in the same run (`carried`).
 
+use super::tracks::Choice;
 use crate::api::wire::SubtitleInventoryItemV3 as Track;
 use crate::settings::{ServerSettings, SubtitleMode};
 
@@ -44,6 +46,13 @@ pub fn choose(tracks: &[Track], settings: &ServerSettings, audio_language: Optio
     }
 }
 
+/// Returns the `combined_index` of the best track for a choice of the Track picker that carried over from the
+/// last episode: a track with the same language and forced state.
+pub fn carried(tracks: &[Track], choice: &Choice) -> Option<i64> {
+    let matching = tracks.iter().filter(|track| choice.matches(track.language.as_deref(), track.forced));
+    matching.min_by_key(|track| priority(track)).map(|track| track.combined_index)
+}
+
 fn normalize(value: Option<&str>) -> String {
     value.unwrap_or_default().trim().to_lowercase()
 }
@@ -54,7 +63,7 @@ fn concrete(value: Option<&str>) -> Option<String> {
     (!value.is_empty() && !ORIGINAL.contains(&value.as_str())).then_some(value)
 }
 
-fn same_language(a: Option<&str>, b: Option<&str>) -> bool {
+pub fn same_language(a: Option<&str>, b: Option<&str>) -> bool {
     match (concrete(a), concrete(b)) {
         (Some(a), Some(b)) => language_code(&a) == language_code(&b),
         _ => false,

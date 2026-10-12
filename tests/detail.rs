@@ -19,17 +19,16 @@ fn the_detail_page_reads_the_item_with_large_artwork() {
 }
 
 #[test]
-fn a_series_lists_its_seasons_and_the_episodes_of_the_chosen_season() {
+fn a_series_lists_its_seasons_with_posters_and_the_episodes_of_the_chosen_season() {
     let (client, _) = fake(|req| match req.path.as_str() {
-        "catalog/series/series:severance/seasons?include_artwork=false" => {
-            ok("list_series_seasons_without_artwork.json")
-        }
+        "catalog/series/series:severance/seasons?image_size=large" => ok("list_series_seasons_ok.json"),
         "catalog/series/series:severance/seasons/1/episodes?image_size=medium" => ok("list_season_episodes_ok.json"),
         _ => not_found(),
     });
-    let seasons = block_on(client.seasons("series:severance")).unwrap();
+    let seasons = block_on(client.seasons("series:severance", Rung::Large)).unwrap();
     assert_eq!(seasons.len(), 1);
     assert_eq!((seasons[0].season_number, seasons[0].title.as_str()), (1, "Season 1"));
+    assert!(seasons[0].poster_url.is_some(), "the season cards show the poster");
     let episodes = block_on(client.season_episodes("series:severance", 1, Rung::Medium)).unwrap();
     assert_eq!(episodes[0].title, "Good News About Hell");
 }

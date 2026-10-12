@@ -34,7 +34,6 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
-  install -Dm0644 -t "$pkgdir/usr/share/$pkgname/" data/silo-controls.lua
   install -Dm0644 -t "$pkgdir/usr/share/omarchy/default/hypr/apps/" data/silo-omarchy.lua
   install -Dm0644 -t "$pkgdir/usr/share/applications/" data/silo-omarchy.desktop
 }

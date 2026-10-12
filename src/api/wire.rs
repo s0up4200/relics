@@ -78,6 +78,62 @@ impl<'de> ::serde::Deserialize<'de> for AccountId {
             })
     }
 }
+#[doc = "`AdvanceShuffleRequest`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct AdvanceShuffleRequest {
+    #[doc = "The content ID of the item that finished. The shuffle advances only while this item is still current, so a retry after a lost response changes nothing"]
+    pub from_content_id: AdvanceShuffleRequestFromContentId,
+}
+#[doc = "The content ID of the item that finished. The shuffle advances only while this item is still current, so a retry after a lost response changes nothing"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct AdvanceShuffleRequestFromContentId(::std::string::String);
+impl ::std::ops::Deref for AdvanceShuffleRequestFromContentId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<AdvanceShuffleRequestFromContentId> for ::std::string::String {
+    fn from(value: AdvanceShuffleRequestFromContentId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for AdvanceShuffleRequestFromContentId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for AdvanceShuffleRequestFromContentId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for AdvanceShuffleRequestFromContentId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for AdvanceShuffleRequestFromContentId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
 #[doc = "`AppliedQuirkV3`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct AppliedQuirkV3 {
@@ -573,6 +629,15 @@ pub struct CatalogItem {
     pub work_title: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub year: ::std::option::Option<i64>,
+}
+#[doc = "`CatalogItemCollection`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct CatalogItemCollection {
+    #[doc = "The page's items; empty, never null"]
+    pub items: ::std::vec::Vec<CatalogItem>,
+    #[doc = "Cursor state; absent for bounded unpaginated collections"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub page: ::std::option::Option<PageInfo>,
 }
 #[doc = "`CatalogItemDetail`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
@@ -1197,6 +1262,76 @@ pub struct ClientPlaybackContextV3 {
     pub output: OutputContextV3,
     pub protocol_version: i64,
 }
+#[doc = "`CollectionGroup`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct CollectionGroup {
+    #[doc = "How the group orders its collections: manual, name_asc, name_desc, recent or most_items"]
+    pub default_sort_mode: ::std::string::String,
+    #[doc = "Opaque identifier"]
+    pub id: CollectionGroupId,
+    pub name: ::std::string::String,
+    pub slug: ::std::string::String,
+    pub sort_order: i64,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct CollectionGroupId(::std::string::String);
+impl ::std::ops::Deref for CollectionGroupId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<CollectionGroupId> for ::std::string::String {
+    fn from(value: CollectionGroupId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for CollectionGroupId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for CollectionGroupId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CollectionGroupId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for CollectionGroupId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`CollectionPersonalCollectionItem`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct CollectionPersonalCollectionItem {
+    #[doc = "The page's items; empty, never null"]
+    pub items: ::std::vec::Vec<PersonalCollectionItem>,
+    #[doc = "Cursor state; absent for bounded unpaginated collections"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub page: ::std::option::Option<PageInfo>,
+}
 #[doc = "`CollectionUserLibrary`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct CollectionUserLibrary {
@@ -1205,6 +1340,11 @@ pub struct CollectionUserLibrary {
     #[doc = "Cursor state; absent for bounded unpaginated collections"]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub page: ::std::option::Option<PageInfo>,
+}
+#[doc = "`CreateShuffleRequest`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct CreateShuffleRequest {
+    pub scope: ShuffleScopeRequest,
 }
 #[doc = "`CrewCredit`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
@@ -1225,6 +1365,162 @@ pub struct CrewCredit {
     pub tmdb_id: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub tvdb_id: ::std::option::Option<::std::string::String>,
+}
+#[doc = "`CuratedCollection`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct CuratedCollection {
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub backdrop_thumbhash: ::std::option::Option<::std::string::String>,
+    #[doc = "Presigned, short-lived; empty when none"]
+    pub backdrop_url: ::std::string::String,
+    #[doc = "manual, smart, or an import type"]
+    pub collection_type: ::std::string::String,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub created_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    pub description: ::std::string::String,
+    pub featured: bool,
+    #[doc = "null when ungrouped"]
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub group_id: ::std::option::Option<::std::string::String>,
+    pub id: ::std::string::String,
+    pub item_count: i64,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub last_sync_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    pub last_sync_message: ::std::string::String,
+    pub last_sync_status: ::std::string::String,
+    #[doc = "Opaque identifier"]
+    pub library_id: CuratedCollectionLibraryId,
+    #[doc = "Every library the collection spans; empty, never null"]
+    pub library_ids: ::std::vec::Vec<CuratedCollectionLibraryIdsItem>,
+    pub management_key: ::std::string::String,
+    pub management_mode: ::std::string::String,
+    pub management_source: ::std::string::String,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub next_sync_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "poster_url is the acting profile's collage of the collection's first titles it can see, composed by the server because the collection has no uploaded, template or imported poster. False for an uploaded, template or imported poster and whenever poster_url is empty. See getCollectionCapabilities poster_collages"]
+    pub poster_is_collage: bool,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_thumbhash: ::std::option::Option<::std::string::String>,
+    #[doc = "Presigned, short-lived; empty when none"]
+    pub poster_url: ::std::string::String,
+    #[doc = "Smart collection query; null when not a smart collection"]
+    pub query_definition: ::serde_json::Value,
+    pub slug: ::std::string::String,
+    #[doc = "Sort configuration document; null when default"]
+    pub sort_config: ::serde_json::Value,
+    pub sort_order: i64,
+    #[doc = "Import source configuration; null when not imported"]
+    pub source_config: ::serde_json::Value,
+    #[doc = "Where an imported collection came from; empty otherwise"]
+    pub source_url: ::std::string::String,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sync_schedule: ::std::option::Option<::std::string::String>,
+    pub title: ::std::string::String,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub updated_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    pub visibility: ::std::string::String,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct CuratedCollectionLibraryId(::std::string::String);
+impl ::std::ops::Deref for CuratedCollectionLibraryId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<CuratedCollectionLibraryId> for ::std::string::String {
+    fn from(value: CuratedCollectionLibraryId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for CuratedCollectionLibraryId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for CuratedCollectionLibraryId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CuratedCollectionLibraryId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for CuratedCollectionLibraryId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct CuratedCollectionLibraryIdsItem(::std::string::String);
+impl ::std::ops::Deref for CuratedCollectionLibraryIdsItem {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<CuratedCollectionLibraryIdsItem> for ::std::string::String {
+    fn from(value: CuratedCollectionLibraryIdsItem) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for CuratedCollectionLibraryIdsItem {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for CuratedCollectionLibraryIdsItem {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CuratedCollectionLibraryIdsItem {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for CuratedCollectionLibraryIdsItem {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
 }
 #[doc = "`DegradationWarningV3`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
@@ -1699,6 +1995,28 @@ pub struct FailureV3 {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub message: ::std::option::Option<::std::string::String>,
 }
+#[doc = "`FeatureStatus`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct FeatureStatus {
+    #[doc = "Whether the current principal may use the capability"]
+    pub allowed: bool,
+    #[doc = "Whether the server reports download progress (download on requests, their targets, the title detail's request state, and watchlist titles). Whether a given request has any depends on its download server's request plugin."]
+    pub download_progress_supported: bool,
+    pub follow_supported: bool,
+    #[doc = "Whether a series already in the library can be requested for the seasons it is missing. False while a download server that takes series uses a request plugin that cannot fetch individual seasons, so such a series stays already_available."]
+    pub missing_seasons_requestable: bool,
+    pub rating_restrictions_enforced: bool,
+    pub requests_enabled: bool,
+    #[doc = "Opaque revision of this document"]
+    pub revision: ::std::string::String,
+    pub season_requests_supported: bool,
+    #[doc = "Support and configuration state, not health"]
+    pub state: ::std::string::String,
+    #[doc = "Whether adding a title the library doesn't have to the watchlist also requests it (or follows its request) for this viewer: requests and watchlist requests are on for the server, the profile has not opted out, and the viewer may request."]
+    pub watchlist_requests: bool,
+    #[doc = "Whether the server keeps watchlist entries for titles the library doesn't have: the /watchlist/titles operations, and in_watchlist on discovery results and the title detail. False while requests are disabled, when those operations answer 409 capability_disabled; the entries are kept."]
+    pub watchlist_titles_supported: bool,
+}
 #[doc = "`FileMarkers`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct FileMarkers {
@@ -1982,6 +2300,104 @@ pub struct ItemVideoInfo {
     pub site: ::std::string::String,
     pub site_key: ::std::string::String,
 }
+#[doc = "`LibraryCollectionCard`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct LibraryCollectionCard {
+    #[doc = "Present on a personal collection: the profile that made it"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub creator_profile_id: ::std::option::Option<::std::string::String>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub featured: ::std::option::Option<bool>,
+    pub id: ::std::string::String,
+    pub item_count: i64,
+    #[doc = "poster_url is the acting profile's collage of the collection's first titles it can see, composed by the server because the collection has no uploaded, template or imported poster. False for an uploaded, template or imported poster and whenever poster_url is empty. See getCollectionCapabilities poster_collages"]
+    pub poster_is_collage: bool,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_thumbhash: ::std::option::Option<::std::string::String>,
+    #[doc = "Presigned, short-lived; empty when none"]
+    pub poster_url: ::std::string::String,
+    pub title: ::std::string::String,
+}
+#[doc = "`LibraryCollectionGroup`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct LibraryCollectionGroup {
+    pub collections: ::std::vec::Vec<LibraryCollectionCard>,
+    pub id: ::std::string::String,
+    #[doc = "admin or user_collections"]
+    pub kind: ::std::string::String,
+    pub name: ::std::string::String,
+    pub sort_mode: ::std::string::String,
+    pub sort_order: i64,
+}
+#[doc = "`LibraryCollectionTab`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct LibraryCollectionTab {
+    #[doc = "Every visible curated collection in full; empty, never null"]
+    pub collections: ::std::vec::Vec<CuratedCollection>,
+    #[doc = "Non-empty groups in display order; empty when groups are not configured"]
+    pub groups: ::std::vec::Vec<LibraryCollectionGroup>,
+    #[doc = "Opaque identifier"]
+    pub library_id: LibraryCollectionTabLibraryId,
+    #[doc = "Absent when every collection is grouped"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ungrouped: ::std::option::Option<LibraryCollectionUngrouped>,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct LibraryCollectionTabLibraryId(::std::string::String);
+impl ::std::ops::Deref for LibraryCollectionTabLibraryId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<LibraryCollectionTabLibraryId> for ::std::string::String {
+    fn from(value: LibraryCollectionTabLibraryId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for LibraryCollectionTabLibraryId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for LibraryCollectionTabLibraryId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for LibraryCollectionTabLibraryId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for LibraryCollectionTabLibraryId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`LibraryCollectionUngrouped`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct LibraryCollectionUngrouped {
+    pub collections: ::std::vec::Vec<LibraryCollectionCard>,
+    pub sort_order: i64,
+}
 #[doc = "`LoginInputBody`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct LoginInputBody {
@@ -2160,6 +2576,320 @@ pub struct MarkerSegment {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub start_seconds: ::std::option::Option<f64>,
 }
+#[doc = "`MediaRequest`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct MediaRequest {
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub approved_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "TMDB image path"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub backdrop_path: ::std::option::Option<::std::string::String>,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub completed_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub created_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[doc = "How far the request's downloads are over all its servers (1080p and 4K together), while any reports them: bytes summed, the phase that needs the most attention, the latest estimate, and the oldest report's time"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub download: ::std::option::Option<RequestDownload>,
+    #[doc = "Admins only: the integration's own identifier"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub external_id: ::std::option::Option<::std::string::String>,
+    #[doc = "Admins only: the status as the download server reports it"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub external_status: ::std::option::Option<::std::string::String>,
+    #[doc = "Opaque identifier"]
+    pub id: MediaRequestId,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub imdb_id: ::std::option::Option<::std::string::String>,
+    #[doc = "Admins only: the download server's kind"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub integration_kind: ::std::option::Option<::std::string::String>,
+    pub is_anime: bool,
+    #[doc = "Admins only: why the last submission to a download server failed. It can name servers and routing rules"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub last_error: ::std::option::Option<::std::string::String>,
+    #[doc = "The catalog item once the media is in the library"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub library_content_id: ::std::option::Option<::std::string::String>,
+    #[doc = "movie or series"]
+    pub media_type: ::std::string::String,
+    #[doc = "active, declined, cancelled, failed"]
+    pub outcome: ::std::string::String,
+    #[doc = "Why the request was declined or withdrawn, when a reason was given"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub outcome_reason: ::std::option::Option<::std::string::String>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub overview: ::std::option::Option<::std::string::String>,
+    #[doc = "TMDB image path"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_path: ::std::option::Option<::std::string::String>,
+    pub provider: ::std::string::String,
+    #[doc = "Opaque identifier"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub requested_by_profile_id: ::std::option::Option<MediaRequestRequestedByProfileId>,
+    #[doc = "Opaque identifier"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub requested_by_user_id: ::std::option::Option<MediaRequestRequestedByUserId>,
+    #[doc = "Series season requests: each requested season's episodes, once the series is in the library; empty otherwise"]
+    pub season_progress: ::std::vec::Vec<RequestSeasonProgress>,
+    #[doc = "Series: the requested season numbers; empty means the whole series (requests made through v1 or before season requests)"]
+    pub seasons: ::std::vec::Vec<i64>,
+    #[doc = "What created the request: direct (the Request button or an API create) or watchlist (adding a title that is not in the library to a watchlist); more values may be added"]
+    pub source: ::std::string::String,
+    #[doc = "The one state to show a user: pending, approved, processing, partially_available (some requested seasons are in the library), available (in the library), declined, cancelled or failed"]
+    pub state: ::std::string::String,
+    #[doc = "pending, approved, queued, downloading, completed"]
+    pub status: ::std::string::String,
+    #[doc = "Empty, never null"]
+    pub targets: ::std::vec::Vec<RequestTarget>,
+    pub title: ::std::string::String,
+    #[doc = "TMDB identifier (external, not a Silo ID)"]
+    pub tmdb_id: i64,
+    #[doc = "TVDB identifier (external, not a Silo ID)"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub tvdb_id: ::std::option::Option<i64>,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub updated_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub year: ::std::option::Option<i64>,
+}
+#[doc = "`MediaRequestCollection`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct MediaRequestCollection {
+    #[doc = "The page's items; empty, never null"]
+    pub items: ::std::vec::Vec<MediaRequest>,
+    #[doc = "Cursor state; absent for bounded unpaginated collections"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub page: ::std::option::Option<PageInfo>,
+}
+#[doc = "`MediaRequestCreate`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct MediaRequestCreate {
+    #[doc = "TMDB image path"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub backdrop_path: ::std::option::Option<::std::string::String>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub imdb_id: ::std::option::Option<::std::string::String>,
+    pub media_type: ::std::string::String,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub overview: ::std::option::Option<::std::string::String>,
+    #[doc = "TMDB image path"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_path: ::std::option::Option<::std::string::String>,
+    #[doc = "Series only: the season numbers to request, starting at 1 (a season below 1 is refused). Omitted: every aired season not yet complete in the library"]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub seasons: ::std::vec::Vec<i64>,
+    pub title: MediaRequestCreateTitle,
+    #[doc = "TMDB identifier (external, not a Silo ID)"]
+    pub tmdb_id: ::std::num::NonZeroU64,
+    #[doc = "TVDB identifier (external, not a Silo ID)"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub tvdb_id: ::std::option::Option<::std::num::NonZeroU64>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub year: ::std::option::Option<i64>,
+}
+#[doc = "`MediaRequestCreateTitle`"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct MediaRequestCreateTitle(::std::string::String);
+impl ::std::ops::Deref for MediaRequestCreateTitle {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<MediaRequestCreateTitle> for ::std::string::String {
+    fn from(value: MediaRequestCreateTitle) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for MediaRequestCreateTitle {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for MediaRequestCreateTitle {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for MediaRequestCreateTitle {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for MediaRequestCreateTitle {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct MediaRequestId(::std::string::String);
+impl ::std::ops::Deref for MediaRequestId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<MediaRequestId> for ::std::string::String {
+    fn from(value: MediaRequestId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for MediaRequestId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for MediaRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for MediaRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for MediaRequestId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct MediaRequestRequestedByProfileId(::std::string::String);
+impl ::std::ops::Deref for MediaRequestRequestedByProfileId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<MediaRequestRequestedByProfileId> for ::std::string::String {
+    fn from(value: MediaRequestRequestedByProfileId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for MediaRequestRequestedByProfileId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for MediaRequestRequestedByProfileId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for MediaRequestRequestedByProfileId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for MediaRequestRequestedByProfileId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct MediaRequestRequestedByUserId(::std::string::String);
+impl ::std::ops::Deref for MediaRequestRequestedByUserId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<MediaRequestRequestedByUserId> for ::std::string::String {
+    fn from(value: MediaRequestRequestedByUserId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for MediaRequestRequestedByUserId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for MediaRequestRequestedByUserId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for MediaRequestRequestedByUserId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for MediaRequestRequestedByUserId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
 #[doc = "`NativeEmbeddedSubtitleCapabilityV3`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct NativeEmbeddedSubtitleCapabilityV3 {
@@ -2283,6 +3013,391 @@ impl ::std::convert::TryFrom<::std::string::String> for PersonId {
     }
 }
 impl<'de> ::serde::Deserialize<'de> for PersonId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`PersonalCollection`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct PersonalCollection {
+    #[doc = "manual, smart, or an import source (mdblist, tmdb, trakt)"]
+    pub collection_type: ::std::string::String,
+    #[doc = "Whether the collection holds the listCollections contains_item title. Present only when contains_item is sent, and then only on the acting profile's own manual collections; false for a title the profile cannot access"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub contains: ::std::option::Option<bool>,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub created_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[doc = "Opaque identifier"]
+    pub creator_profile_id: PersonalCollectionCreatorProfileId,
+    pub description: ::std::string::String,
+    #[doc = "Display filter fragment; absent when none"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub display_query_definition: ::std::option::Option<::serde_json::Value>,
+    #[doc = "Always null: personal collection groups are no longer supported"]
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub group_id: ::std::option::Option<PersonalCollectionGroupId>,
+    #[doc = "Opaque identifier"]
+    pub id: PersonalCollectionId,
+    pub include_in_server_collections: bool,
+    #[doc = "Every profile on the login sees the collection read-only, including profiles added later; otherwise only its creator does"]
+    pub is_shared: bool,
+    pub item_count: i64,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub last_sync_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    pub last_sync_message: ::std::string::String,
+    #[doc = "Empty until the first sync"]
+    pub last_sync_status: ::std::string::String,
+    pub name: ::std::string::String,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub next_sync_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "poster_url is a collage of the collection's first titles the acting profile can see, composed by the server because the collection has no uploaded or imported poster. False for an uploaded or imported poster and whenever poster_url is empty: before the collage is built, when no title the profile can see has a poster, and on getCollection and updateCollection, which carry no poster_url for any poster because their body sits behind a strong ETag. See getCollectionCapabilities poster_collages"]
+    pub poster_is_collage: bool,
+    pub poster_thumbhash: ::std::string::String,
+    #[doc = "Presigned, short-lived; empty when there is no poster"]
+    pub poster_url: ::std::string::String,
+    #[doc = "The profile the row is scoped to"]
+    pub profile_id: PersonalCollectionProfileId,
+    #[doc = "Smart-collection query document; {} for a manual collection"]
+    pub query_definition: ::serde_json::Value,
+    #[doc = "Default sort document; {} when unset"]
+    pub sort_config: ::serde_json::Value,
+    #[doc = "Position in its creator's own order of collections"]
+    pub sort_order: i64,
+    #[doc = "Import source document; absent for a manual or smart collection"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub source_config: ::std::option::Option<::serde_json::Value>,
+    #[doc = "Where an imported collection is synced from; empty otherwise"]
+    pub source_url: ::std::string::String,
+    #[doc = "The cadence sync_schedule names; empty when the collection is not synced, custom for a schedule no cadence name produces"]
+    pub sync_cadence: ::std::string::String,
+    #[doc = "Empty when the collection is not synced"]
+    pub sync_schedule: ::std::string::String,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub updated_at: ::chrono::DateTime<::chrono::offset::Utc>,
+}
+#[doc = "`PersonalCollectionCollection`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct PersonalCollectionCollection {
+    #[doc = "Always empty: personal collection groups are no longer supported"]
+    pub groups: ::std::vec::Vec<CollectionGroup>,
+    #[doc = "The page's items; empty, never null"]
+    pub items: ::std::vec::Vec<PersonalCollection>,
+    #[doc = "Cursor state; absent for bounded unpaginated collections"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub page: ::std::option::Option<PageInfo>,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct PersonalCollectionCreatorProfileId(::std::string::String);
+impl ::std::ops::Deref for PersonalCollectionCreatorProfileId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PersonalCollectionCreatorProfileId> for ::std::string::String {
+    fn from(value: PersonalCollectionCreatorProfileId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for PersonalCollectionCreatorProfileId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for PersonalCollectionCreatorProfileId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PersonalCollectionCreatorProfileId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for PersonalCollectionCreatorProfileId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Always null: personal collection groups are no longer supported"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct PersonalCollectionGroupId(::std::string::String);
+impl ::std::ops::Deref for PersonalCollectionGroupId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PersonalCollectionGroupId> for ::std::string::String {
+    fn from(value: PersonalCollectionGroupId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for PersonalCollectionGroupId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for PersonalCollectionGroupId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PersonalCollectionGroupId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for PersonalCollectionGroupId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct PersonalCollectionId(::std::string::String);
+impl ::std::ops::Deref for PersonalCollectionId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PersonalCollectionId> for ::std::string::String {
+    fn from(value: PersonalCollectionId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for PersonalCollectionId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for PersonalCollectionId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PersonalCollectionId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for PersonalCollectionId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`PersonalCollectionItem`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct PersonalCollectionItem {
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub added_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[doc = "Opaque identifier"]
+    pub collection_id: PersonalCollectionItemCollectionId,
+    #[doc = "Opaque identifier"]
+    pub media_item_id: PersonalCollectionItemMediaItemId,
+    pub position: i64,
+    #[doc = "Catalog title when the item is available."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub title: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct PersonalCollectionItemCollectionId(::std::string::String);
+impl ::std::ops::Deref for PersonalCollectionItemCollectionId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PersonalCollectionItemCollectionId> for ::std::string::String {
+    fn from(value: PersonalCollectionItemCollectionId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for PersonalCollectionItemCollectionId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for PersonalCollectionItemCollectionId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PersonalCollectionItemCollectionId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for PersonalCollectionItemCollectionId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct PersonalCollectionItemMediaItemId(::std::string::String);
+impl ::std::ops::Deref for PersonalCollectionItemMediaItemId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PersonalCollectionItemMediaItemId> for ::std::string::String {
+    fn from(value: PersonalCollectionItemMediaItemId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for PersonalCollectionItemMediaItemId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for PersonalCollectionItemMediaItemId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PersonalCollectionItemMediaItemId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for PersonalCollectionItemMediaItemId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "The profile the row is scoped to"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct PersonalCollectionProfileId(::std::string::String);
+impl ::std::ops::Deref for PersonalCollectionProfileId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PersonalCollectionProfileId> for ::std::string::String {
+    fn from(value: PersonalCollectionProfileId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for PersonalCollectionProfileId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for PersonalCollectionProfileId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for PersonalCollectionProfileId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for PersonalCollectionProfileId {
     fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
     where
         D: ::serde::Deserializer<'de>,
@@ -4258,6 +5373,12 @@ impl<'de> ::serde::Deserialize<'de> for ProgressSyncSuccessMediaItemId {
             })
     }
 }
+#[doc = "`RatingSet`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RatingSet {
+    #[doc = "Stars, 1 to 5"]
+    pub rating: ::std::num::NonZeroU64,
+}
 #[doc = "`RefreshSessionInputBody`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct RefreshSessionInputBody {
@@ -4326,6 +5447,350 @@ pub struct RefreshedTokens {
     pub expires_in: i64,
     #[doc = "Refresh token for the next refreshSession"]
     pub refresh_token: ::std::string::String,
+}
+#[doc = "`RequestCancelInputBody`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct RequestCancelInputBody {
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub reason: ::std::option::Option<RequestCancelInputBodyReason>,
+}
+#[doc = "`RequestCancelInputBodyReason`"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct RequestCancelInputBodyReason(::std::string::String);
+impl ::std::ops::Deref for RequestCancelInputBodyReason {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<RequestCancelInputBodyReason> for ::std::string::String {
+    fn from(value: RequestCancelInputBodyReason) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for RequestCancelInputBodyReason {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() > 2000usize {
+            return Err("longer than 2000 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for RequestCancelInputBodyReason {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RequestCancelInputBodyReason {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for RequestCancelInputBodyReason {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`RequestDownload`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RequestDownload {
+    #[doc = "Bytes still to download; present whenever bytes_total is"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub bytes_left: ::std::option::Option<i64>,
+    #[doc = "Size of the downloads in bytes; absent while unknown"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub bytes_total: ::std::option::Option<::std::num::NonZeroU64>,
+    #[doc = "Distinct downloads in flight; a season pack counts once"]
+    pub downloads: i64,
+    #[doc = "When the download server expects the downloads to finish; absent when it cannot tell"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub estimated_completion_at: ::std::option::Option<::chrono::DateTime<::chrono::offset::Utc>>,
+    #[doc = "How much has downloaded, rounded down; absent while the size is unknown"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub percent: ::std::option::Option<i64>,
+    #[doc = "queued, downloading, paused, stalled, importing or import_blocked. More values may be added: read an unknown one as downloading, without a percentage"]
+    pub phase: ::std::string::String,
+    #[doc = "When the server last heard from the download server. A client may hide figures older than about ten minutes"]
+    pub updated_at: ::chrono::DateTime<::chrono::offset::Utc>,
+}
+#[doc = "`RequestMediaPage`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RequestMediaPage {
+    pub page: i64,
+    #[doc = "Empty, never null"]
+    pub results: ::std::vec::Vec<RequestMediaResult>,
+    pub total_pages: i64,
+    pub total_results: i64,
+}
+#[doc = "`RequestMediaResult`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RequestMediaResult {
+    #[doc = "missing or available in this server's catalog"]
+    pub availability: ::std::string::String,
+    #[doc = "TMDB image path"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub backdrop_path: ::std::option::Option<::std::string::String>,
+    #[doc = "Whether the title is on the viewing profile's watchlist, as a watchlist title or through its catalog item"]
+    pub in_watchlist: bool,
+    #[doc = "The catalog item when the media is available"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub library_content_id: ::std::option::Option<::std::string::String>,
+    #[doc = "movie or series"]
+    pub media_type: ::std::string::String,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub overview: ::std::option::Option<::std::string::String>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub popularity: ::std::option::Option<f64>,
+    #[doc = "TMDB image path"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub poster_path: ::std::option::Option<::std::string::String>,
+    #[doc = "Calendar date, YYYY-MM-DD"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub release_date: ::std::option::Option<::std::string::String>,
+    pub request: RequestMediaState,
+    pub title: ::std::string::String,
+    #[doc = "TMDB identifier (external, not a Silo ID)"]
+    pub tmdb_id: i64,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub vote_average: ::std::option::Option<f64>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub year: ::std::option::Option<i64>,
+}
+#[doc = "`RequestMediaState`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RequestMediaState {
+    #[doc = "How far the active request's downloads are, while its download server reports them. Only the title detail (getRequestMediaDetail) and the watchlist titles (listWatchlistTitles) carry it"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub download: ::std::option::Option<RequestDownload>,
+    #[doc = "Whether the viewer will be notified when the media becomes available: they requested it or follow it"]
+    pub following: bool,
+    #[doc = "Why the media is not requestable"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub reason: ::std::option::Option<::std::string::String>,
+    #[doc = "The active request, when one exists"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub request_id: ::std::option::Option<RequestMediaStateRequestId>,
+    #[doc = "Whether the viewer may request this media now"]
+    pub requestable: bool,
+    #[doc = "Whether the viewing profile made the active request, so there is nothing to follow"]
+    pub requested_by_viewer: bool,
+    #[doc = "User-facing state of the active request, when one exists: pending, approved or processing"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub state: ::std::option::Option<::std::string::String>,
+    #[doc = "Status of the active request, when one exists"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub status: ::std::option::Option<::std::string::String>,
+}
+#[doc = "The active request, when one exists"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct RequestMediaStateRequestId(::std::string::String);
+impl ::std::ops::Deref for RequestMediaStateRequestId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<RequestMediaStateRequestId> for ::std::string::String {
+    fn from(value: RequestMediaStateRequestId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for RequestMediaStateRequestId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for RequestMediaStateRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RequestMediaStateRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for RequestMediaStateRequestId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`RequestSeasonProgress`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RequestSeasonProgress {
+    #[doc = "Aired episodes by the library's own metadata; 0 when it has no air dates yet"]
+    pub episodes_aired: i64,
+    #[doc = "Episodes with a file in an enabled library"]
+    pub episodes_available: i64,
+    pub season_number: i64,
+}
+#[doc = "`RequestTarget`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct RequestTarget {
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub created_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[doc = "How far this target's downloads are, while its download server reports them"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub download: ::std::option::Option<RequestDownload>,
+    #[doc = "Admins only: the integration's own identifier"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub external_id: ::std::option::Option<::std::string::String>,
+    #[doc = "Admins only: the status as the download server reports it"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub external_status: ::std::option::Option<::std::string::String>,
+    #[doc = "Opaque identifier"]
+    pub id: RequestTargetId,
+    #[doc = "Admins only: the download server's name"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub instance_name: ::std::option::Option<::std::string::String>,
+    #[doc = "Admins only: the download server holding this target"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub integration_id: ::std::option::Option<::std::string::String>,
+    #[doc = "Admins only: the download server's kind"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub integration_kind: ::std::option::Option<::std::string::String>,
+    pub is_anime: bool,
+    #[doc = "Admins only: why the download server failed this target"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub last_error: ::std::option::Option<::std::string::String>,
+    pub quality: ::std::string::String,
+    #[doc = "Opaque identifier"]
+    pub request_id: RequestTargetRequestId,
+    #[doc = "Admins only: the routing rule that sent this target to its server, as named when it was sent"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub route_name: ::std::option::Option<::std::string::String>,
+    pub status: ::std::string::String,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub updated_at: ::chrono::DateTime<::chrono::offset::Utc>,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct RequestTargetId(::std::string::String);
+impl ::std::ops::Deref for RequestTargetId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<RequestTargetId> for ::std::string::String {
+    fn from(value: RequestTargetId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for RequestTargetId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for RequestTargetId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RequestTargetId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for RequestTargetId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct RequestTargetRequestId(::std::string::String);
+impl ::std::ops::Deref for RequestTargetRequestId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<RequestTargetRequestId> for ::std::string::String {
+    fn from(value: RequestTargetRequestId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for RequestTargetRequestId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for RequestTargetRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RequestTargetRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for RequestTargetRequestId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
 }
 #[doc = "`Season`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
@@ -4408,6 +5873,70 @@ pub struct SelectedTracksV3 {
     pub audio: ::std::option::Option<TrackIdentityV3>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub subtitle: ::std::option::Option<TrackIdentityV3>,
+}
+#[doc = "`ServerCollectionLibrary`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct ServerCollectionLibrary {
+    pub collections: ::std::vec::Vec<LibraryCollectionCard>,
+    #[doc = "Opaque identifier"]
+    pub library_id: ServerCollectionLibraryLibraryId,
+    pub library_name: ::std::string::String,
+    pub total_count: i64,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct ServerCollectionLibraryLibraryId(::std::string::String);
+impl ::std::ops::Deref for ServerCollectionLibraryLibraryId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<ServerCollectionLibraryLibraryId> for ::std::string::String {
+    fn from(value: ServerCollectionLibraryLibraryId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for ServerCollectionLibraryLibraryId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for ServerCollectionLibraryLibraryId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ServerCollectionLibraryLibraryId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for ServerCollectionLibraryLibraryId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`ServerCollectionsOutputBody`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct ServerCollectionsOutputBody {
+    pub libraries: ::std::vec::Vec<ServerCollectionLibrary>,
 }
 #[doc = "`ServerIdentity`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
@@ -4677,6 +6206,209 @@ impl<'de> ::serde::Deserialize<'de> for SettingValueProfileId {
 pub struct SettingValueWrite {
     #[doc = "The value to store; validated and normalized against the key's value_schema"]
     pub value: ::serde_json::Value,
+}
+#[doc = "`Shuffle`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct Shuffle {
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub created_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[doc = "The item to play now"]
+    pub current: CatalogItem,
+    #[doc = "Shuffle id"]
+    pub id: ShuffleId,
+    #[doc = "The item that plays after current. It equals current only when the scope has one playable item"]
+    pub next: CatalogItem,
+    pub scope: ShuffleScope,
+    #[doc = "RFC 3339 instant in UTC with millisecond precision"]
+    pub updated_at: ::chrono::DateTime<::chrono::offset::Utc>,
+}
+#[doc = "`ShuffleCapability`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct ShuffleCapability {
+    #[doc = "Whether the current principal may use the capability"]
+    pub allowed: bool,
+    #[doc = "Opaque revision of this document"]
+    pub revision: ::std::string::String,
+    #[doc = "Scope kinds createShuffle accepts. Empty, never null"]
+    pub scope_kinds: ::std::vec::Vec<::std::string::String>,
+    #[doc = "Support and configuration state, not health"]
+    pub state: ::std::string::String,
+}
+#[doc = "Shuffle id"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct ShuffleId(::std::string::String);
+impl ::std::ops::Deref for ShuffleId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<ShuffleId> for ::std::string::String {
+    fn from(value: ShuffleId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for ShuffleId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for ShuffleId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ShuffleId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for ShuffleId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`ShuffleScope`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct ShuffleScope {
+    #[doc = "The library ID, series or season content ID, or collection ID"]
+    pub id: ::std::string::String,
+    #[doc = "library plays the movies and episodes of one library; series plays a series' episodes; season plays one season's episodes; library_collection and user_collection play a collection's movies and its series' episodes. Specials play like any other episode"]
+    pub kind: ::std::string::String,
+    #[doc = "A season scope's series title; absent for other scopes"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub parent_title: ::std::option::Option<::std::string::String>,
+    #[doc = "The scope's name when the shuffle started"]
+    pub title: ::std::string::String,
+}
+#[doc = "`ShuffleScopeRequest`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct ShuffleScopeRequest {
+    #[doc = "The library ID, series or season content ID, or collection ID"]
+    pub id: ShuffleScopeRequestId,
+    pub kind: ::std::string::String,
+}
+#[doc = "The library ID, series or season content ID, or collection ID"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct ShuffleScopeRequestId(::std::string::String);
+impl ::std::ops::Deref for ShuffleScopeRequestId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<ShuffleScopeRequestId> for ::std::string::String {
+    fn from(value: ShuffleScopeRequestId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for ShuffleScopeRequestId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for ShuffleScopeRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ShuffleScopeRequestId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for ShuffleScopeRequestId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`SkipShuffleItemRequest`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct SkipShuffleItemRequest {
+    #[doc = "The content ID of the next item to skip. The shuffle picks another only while this item is still next, so a retry after a lost response changes nothing"]
+    pub next_content_id: SkipShuffleItemRequestNextContentId,
+}
+#[doc = "The content ID of the next item to skip. The shuffle picks another only while this item is still next, so a retry after a lost response changes nothing"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct SkipShuffleItemRequestNextContentId(::std::string::String);
+impl ::std::ops::Deref for SkipShuffleItemRequestNextContentId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<SkipShuffleItemRequestNextContentId> for ::std::string::String {
+    fn from(value: SkipShuffleItemRequestNextContentId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for SkipShuffleItemRequestNextContentId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for SkipShuffleItemRequestNextContentId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for SkipShuffleItemRequestNextContentId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for SkipShuffleItemRequestNextContentId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
 }
 #[doc = "`StartDeviceLoginInputBody`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
@@ -5242,6 +6974,84 @@ pub struct WatchSubtitleSignature {
     pub language: ::std::option::Option<::std::string::String>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub source: ::std::option::Option<::std::string::String>,
+}
+#[doc = "`WatchTrickplay`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct WatchTrickplay {
+    #[doc = "When the sheet URLs stop working; read the previews again for fresh ones"]
+    pub expires_at: ::chrono::DateTime<::chrono::offset::Utc>,
+    #[doc = "Opaque identifier"]
+    pub file_id: WatchTrickplayFileId,
+    #[doc = "Media time each thumbnail covers: thumbnail i shows what plays from i*interval_ms to (i+1)*interval_ms"]
+    pub interval_ms: i64,
+    #[doc = "Every sheet, in order. Sheet s holds thumbnails s*tile_columns*tile_rows onward, left to right and top to bottom; every sheet has the full grid, black after the last thumbnail"]
+    pub sheets: ::std::vec::Vec<WatchTrickplaySheet>,
+    pub thumbnail_count: i64,
+    #[doc = "Pixels"]
+    pub thumbnail_height: i64,
+    #[doc = "Pixels"]
+    pub thumbnail_width: i64,
+    #[doc = "Thumbnails across a sheet"]
+    pub tile_columns: i64,
+    #[doc = "Thumbnails down a sheet"]
+    pub tile_rows: i64,
+}
+#[doc = "Opaque identifier"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct WatchTrickplayFileId(::std::string::String);
+impl ::std::ops::Deref for WatchTrickplayFileId {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<WatchTrickplayFileId> for ::std::string::String {
+    fn from(value: WatchTrickplayFileId) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for WatchTrickplayFileId {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for WatchTrickplayFileId {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for WatchTrickplayFileId {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for WatchTrickplayFileId {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "`WatchTrickplaySheet`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct WatchTrickplaySheet {
+    pub index: i64,
+    #[doc = "A JPEG image; the URL carries its own authorization"]
+    pub url: ::std::string::String,
 }
 #[doc = " Error types."]
 pub mod error {

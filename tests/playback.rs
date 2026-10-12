@@ -4,7 +4,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use silo_omarchy::api::types::{Decision, Marker, MarkerKind};
-use silo_omarchy::playback::{Access, Command, Headers, Input, Replan, Sample, Session};
+use silo_omarchy::playback::tracks::{self, Choice, Kind, Track};
+use silo_omarchy::playback::{
+    Access, Command, Headers, Input, Operation, Replan, STILL_WATCHING_AFTER, Sample, Session,
+};
 use silo_omarchy::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -107,11 +110,25 @@ fn the_position_in_a_report_is_the_source_position() {
 }
 
 #[test]
-fn a_closed_window_sends_the_stop_report_and_closes_the_player() {
+fn an_mpv_shutdown_sends_the_stop_report_and_closes_the_player() {
     let mut session = playing(None);
     session.step(Input::Position(300.0), at(1));
     assert_eq!(session.step(Input::Shutdown, at(2)), vec![stop(300.0, 1), Command::ClosePlayer]);
     assert_eq!(session.step(Input::Tick, at(60)), vec![], "an ended session sends nothing more");
+}
+
+// Back in the Player view and a closed Library window both end the session with `Input::End`, then the
+// controller closes the player.
+#[test]
+fn back_in_the_player_view_and_a_closed_library_window_send_the_stop_report_once() {
+    let mut session = playing(None);
+    session.step(Input::Position(300.0), at(1));
+    session.step(Input::Paused(true), at(2));
+    let paused = Sample { sequence: 1, position: 300.0, paused: true };
+    let stop = Command::Stop { session_id: SESSION.into(), sample: Some(paused) };
+    assert_eq!(session.step(Input::End, at(3)), vec![stop]);
+    assert_eq!(session.step(Input::Tick, at(60)), vec![], "an ended session sends nothing more");
+    assert_eq!(session.step(Input::End, at(61)), vec![], "the controller ends the session once");
 }
 
 #[test]
@@ -162,12 +179,6 @@ fn an_unplayable_item_shows_the_server_message() {
     assert!(matches!(&commands[..], [Command::ShowError(text), Command::ClosePlayer] if text.contains("queued")));
 }
 
-#[test]
-fn the_controller_gets_the_theme_when_it_is_ready() {
-    let mut session = playing(None);
-    assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme, Command::ShowMarkers(vec![])]);
-}
-
 /// Starts a session with `settings` on the fixture plan (direct play), whose audio is in `audio_language`, and
 /// loads the file. Returns the subtitle commands.
 fn load_with(settings: ServerSettings, audio_language: &str) -> Vec<Command> {
@@ -210,7 +221,7 @@ fn foreign_audio_shows_the_subtitles_of_the_profile_language_when_the_file_loads
 fn audio_in_the_profile_language_shows_only_the_forced_track() {
     let settings = ServerSettings { audio_language: Some("en".into()), ..ServerSettings::default() };
     // The track is in the file that mpv plays, so mpv shows it from there: the first embedded subtitle track.
-    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(1)]);
+    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(Some(1))]);
     let settings = ServerSettings { show_forced_subtitles: false, ..settings };
     assert_eq!(load_with(settings, "en"), vec![]);
 }
@@ -229,7 +240,7 @@ fn a_track_that_needs_a_burn_in_shows_from_the_file_in_direct_play_and_else_not_
         ..ServerSettings::default()
     };
     // French is the third embedded track of the fixture.
-    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(3)]);
+    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(Some(3))]);
     assert_eq!(load_with_delivery(settings, "en", "server_transcode_hls"), vec![]);
 }
 
@@ -331,8 +342,10 @@ fn always_does_not_skip_again_after_the_undo_prompt_times_out() {
 fn credits_and_recap_skip_only_when_the_server_settings_say_so() {
     let markers = vec![marker(MarkerKind::Recap, 100.0, 130.0), marker(MarkerKind::Credits, 500.0, 520.0)];
     let mut session = with_markers(ServerSettings::default(), markers.clone());
-    assert_eq!(session.step(Input::Position(0.5), at(1)), vec![]);
-    assert_eq!(session.step(Input::Position(400.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(0.5), at(1)), vec![prompt("Skip recap")]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(30.0), prompt("")]);
+    assert_eq!(session.step(Input::Position(400.0), at(3)), vec![prompt("Skip credits")]);
+    assert_eq!(session.step(Input::Action, at(4)), vec![Command::Seek(420.0), prompt("")]);
     let settings = ServerSettings { auto_skip_credits: true, auto_skip_recap: true, ..ServerSettings::default() };
     let mut session = with_markers(settings, markers);
     assert_eq!(session.step(Input::Position(0.5), at(1)), vec![Command::Seek(30.0)]);
@@ -340,10 +353,30 @@ fn credits_and_recap_skip_only_when_the_server_settings_say_so() {
 }
 
 #[test]
-fn a_preview_marker_does_nothing() {
+fn a_preview_marker_offers_skip_preview_and_the_action_seeks_to_its_end() {
     let settings = ServerSettings { auto_skip_credits: true, auto_skip_recap: true, ..ServerSettings::default() };
     let mut session = with_markers(settings, vec![marker(MarkerKind::Preview, 200.0, 220.0)]);
-    assert_eq!(session.step(Input::Position(105.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(99.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(100.0), at(1)), vec![prompt("Skip preview")], "no automatic skip");
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(120.0), prompt("")]);
+    session.step(Input::Position(120.0), at(2));
+    assert_eq!(session.step(Input::Position(105.0), at(3)), vec![], "a skipped preview is not offered again");
+}
+
+#[test]
+fn skip_preview_hides_when_playback_leaves_the_preview_or_after_five_seconds() {
+    let mut session = with_markers(ServerSettings::default(), vec![marker(MarkerKind::Preview, 200.0, 220.0)]);
+    session.step(Input::Position(100.0), at(1));
+    assert_eq!(session.step(Input::Position(130.0), at(2)), vec![prompt("")]);
+    session.step(Input::Position(110.0), at(3));
+    assert_eq!(session.step(Input::Tick, at(8)), vec![prompt("")]);
+}
+
+#[test]
+fn credits_to_the_end_with_no_next_episode_offer_skip_credits() {
+    let mut session = end_credits(ServerSettings::default());
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Skip credits")]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(1000.0), prompt("")]);
 }
 
 fn end_credits(settings: ServerSettings) -> Session {
@@ -351,10 +384,8 @@ fn end_credits(settings: ServerSettings) -> Session {
 }
 
 #[test]
-fn credits_to_the_end_of_the_file_offer_the_next_episode_when_one_exists() {
-    let mut session = end_credits(ServerSettings::default());
-    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![], "no next episode, no prompt");
-    let mut session = end_credits(ServerSettings::default());
+fn credits_to_the_end_of_the_file_offer_the_next_episode_when_autoplay_is_off() {
+    let mut session = end_credits(ServerSettings { auto_play_next: false, ..ServerSettings::default() });
     session.step(Input::NextEpisode, at(0));
     assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next episode")]);
     assert_eq!(session.step(Input::Action, at(2)), vec![prompt(""), stop(1050.0, 1), Command::PlayNext]);
@@ -377,7 +408,7 @@ fn a_normal_end_plays_the_next_episode_when_autoplay_is_on() {
     let mut session = with_markers(ServerSettings::default(), vec![]);
     session.step(Input::NextEpisode, at(0));
     session.step(Input::Position(998.0), at(1));
-    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(1100.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![up_next(None), stop(1100.0, 1), Command::PlayNext]);
 
     let settings = ServerSettings { auto_play_next: false, ..ServerSettings::default() };
     let mut session = with_markers(settings, vec![]);
@@ -389,6 +420,179 @@ fn a_normal_end_plays_the_next_episode_when_autoplay_is_on() {
     session.step(Input::NextEpisode, at(0));
     session.step(Input::Position(500.0), at(1));
     assert_eq!(session.step(Input::EndOfFile, at(2)), vec![Command::Refresh], "an Early end");
+}
+
+// Shuffle (#62).
+
+#[test]
+fn a_shuffled_item_plays_the_next_pick_at_its_end_also_with_autoplay_off() {
+    let settings = ServerSettings { auto_play_next: false, ..ServerSettings::default() };
+    let mut session = with_markers(settings, vec![]);
+    session.step(Input::Shuffle, at(0));
+    session.step(Input::Position(998.0), at(1));
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![up_next(None), stop(1100.0, 1), Command::PlayNext]);
+}
+
+#[test]
+fn skip_ends_the_shuffled_item_at_its_position_and_plays_the_next_pick() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::Shuffle, at(0));
+    session.step(Input::Position(300.0), at(1));
+    assert_eq!(session.step(Input::Next, at(2)), vec![stop(400.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::Tick, at(30)), vec![], "the session ended");
+}
+
+#[test]
+fn credits_to_the_end_of_a_shuffled_item_show_up_next_also_with_autoplay_off() {
+    let mut session = end_credits(ServerSettings { auto_play_next: false, ..ServerSettings::default() });
+    session.step(Input::Shuffle, at(0));
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![up_next(Some(10))]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![up_next(None), stop(1050.0, 1), Command::PlayNext]);
+}
+
+// Up Next and Still watching (#52).
+
+fn up_next(seconds: Option<u64>) -> Command {
+    Command::UpNext(seconds)
+}
+
+/// A session at the end credits (player time 940 to 1000) of an episode with a next episode, with autoplay on.
+fn credits_with_next() -> Session {
+    let mut session = end_credits(ServerSettings::default());
+    session.step(Input::NextEpisode, at(0));
+    session
+}
+
+#[test]
+fn up_next_counts_down_from_ten_seconds_at_the_end_credits_and_then_plays_the_next_episode() {
+    let mut session = credits_with_next();
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![up_next(Some(10))], "no Skip prompt with it");
+    assert_eq!(session.step(Input::Position(951.0), at(2)), vec![], "the card shows once");
+    assert_eq!(session.step(Input::Tick, at(2)), vec![up_next(Some(9))]);
+    // A progress report is due at 10 s.
+    assert_eq!(session.step(Input::Tick, at(9)), vec![up_next(Some(2))]);
+    assert_eq!(session.step(Input::Tick, at(11)), vec![up_next(None), stop(1051.0, 1), Command::PlayNext]);
+    assert_eq!(session.auto_plays(), 1, "the countdown played the next episode, not the user");
+}
+
+#[test]
+fn play_now_on_the_up_next_card_plays_the_next_episode_at_once() {
+    let mut session = credits_with_next();
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(session.step(Input::Action, at(3)), vec![up_next(None), stop(1050.0, 1), Command::PlayNext]);
+    assert_eq!(session.auto_plays(), 0, "the user played it");
+}
+
+#[test]
+fn a_cancelled_up_next_card_does_not_play_the_next_episode_at_the_end() {
+    let mut session = credits_with_next();
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(session.step(Input::CancelUpNext, at(2)), vec![up_next(None)]);
+    assert_eq!(session.step(Input::Tick, at(30)).iter().filter(|c| **c == Command::PlayNext).count(), 0);
+    assert_eq!(session.step(Input::Position(990.0), at(31)), vec![], "the card does not come back");
+    session.step(Input::Position(999.0), at(32));
+    assert!(session.step(Input::EndOfFile, at(33)).ends_with(&[Command::ClosePlayer]));
+}
+
+#[test]
+fn up_next_hides_when_playback_leaves_the_credits_and_starts_again_on_the_next_entry() {
+    let mut session = credits_with_next();
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(session.step(Input::Position(500.0), at(3)), vec![up_next(None)]);
+    assert_eq!(session.step(Input::Tick, at(20)).iter().filter(|c| **c == Command::PlayNext).count(), 0);
+    assert_eq!(session.step(Input::Position(960.0), at(21)), vec![up_next(Some(10))]);
+}
+
+#[test]
+fn without_end_credits_up_next_shows_ten_seconds_before_the_end() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(989.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(990.0), at(2)), vec![up_next(Some(10))]);
+}
+
+#[test]
+fn up_next_shows_only_when_the_next_episode_plays_by_itself() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    assert_eq!(session.step(Input::Position(995.0), at(1)), vec![], "no next episode");
+    let mut session = with_markers(ServerSettings { auto_play_next: false, ..ServerSettings::default() }, vec![]);
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(995.0), at(1)), vec![], "autoplay is off");
+}
+
+/// `credits_with_next` after `count` episodes in a row played by themselves.
+fn after_auto_plays(count: u32) -> Session {
+    let mut session = Session::new(None, ServerSettings::default()).with_auto_plays(count);
+    let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
+    let Decision::Playable { markers, .. } = &mut decision else { unreachable!() };
+    *markers = vec![marker(MarkerKind::Credits, 1040.0, 1100.0)];
+    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Duration(1000.0), at(0));
+    session.step(Input::NextEpisode, at(0));
+    session
+}
+
+#[test]
+fn after_three_episodes_with_no_input_still_watching_pauses_in_place_of_the_next_episode() {
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER - 1);
+    session.step(Input::Position(950.0), at(1));
+    assert!(session.step(Input::Tick, at(11)).ends_with(&[Command::PlayNext]), "the third episode plays");
+    assert_eq!(session.auto_plays(), STILL_WATCHING_AFTER);
+
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(
+        session.step(Input::Tick, at(11)),
+        vec![up_next(None), Command::SetPause(true), Command::StillWatching(true)]
+    );
+    session.step(Input::Paused(true), at(11));
+    assert!(!session.step(Input::Tick, at(30)).contains(&Command::PlayNext), "playback waits for the answer");
+    assert_eq!(session.step(Input::Position(951.0), at(12)), vec![], "no Up Next card while it asks");
+}
+
+#[test]
+fn continue_on_still_watching_plays_the_next_episode_and_starts_the_count_again() {
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+    session.step(Input::Position(950.0), at(1));
+    session.step(Input::Tick, at(11));
+    session.step(Input::Paused(true), at(11));
+    let paused = Sample { sequence: 1, position: 1050.0, paused: true };
+    assert_eq!(
+        session.step(Input::Action, at(20)),
+        vec![
+            Command::SetPause(false),
+            Command::StillWatching(false),
+            Command::Stop { session_id: SESSION.into(), sample: Some(paused) },
+            Command::PlayNext,
+        ]
+    );
+    assert_eq!(session.auto_plays(), 0);
+}
+
+#[test]
+fn still_watching_at_the_end_of_the_file_keeps_the_duration_for_the_stop_report_on_back() {
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+    session.step(Input::Position(999.0), at(1));
+    assert_eq!(
+        session.step(Input::EndOfFile, at(2)),
+        vec![up_next(None), Command::SetPause(true), Command::StillWatching(true)]
+    );
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![], "mpv can report the end twice");
+    assert_eq!(session.step(Input::End, at(3)), vec![Command::StillWatching(false), stop(1100.0, 1)]);
+}
+
+#[test]
+fn any_input_of_the_user_starts_the_count_of_episodes_again() {
+    for input in [Input::Active, Input::PlayPause, Input::SeekBy(10.0), Input::CancelUpNext] {
+        let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+        session.step(input, at(1));
+        assert_eq!(session.auto_plays(), 0);
+    }
+    let mut session = after_auto_plays(1);
+    session.step(Input::Tick, at(1));
+    session.step(Input::Position(10.0), at(2));
+    assert_eq!(session.auto_plays(), 1, "the time and mpv events are not input of the user");
 }
 
 #[test]
@@ -484,7 +688,74 @@ fn replan(position: f64) -> Command {
         attempted_plan_keys: vec!["v3:f0144c47fa349e3e".into()],
         selected_tracks: serde_json::json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
         position,
+        operation: Operation::FailureRecovery,
+        quality: "original".into(),
     })
+}
+
+/// The quality change replan of the session of `failed_at`, at `position`.
+fn quality_change(label: &str, position: f64) -> Command {
+    let Command::Replan(failure) = replan(position) else { unreachable!() };
+    Command::Replan(Replan {
+        attempted_plan_keys: vec![],
+        operation: Operation::QualityChange,
+        quality: label.into(),
+        ..failure
+    })
+}
+
+#[test]
+fn a_quality_step_replans_at_the_position_and_plays_the_new_plan_in_the_same_session() {
+    let mut session = failed_at(3600.0);
+    assert_eq!(
+        session.step(Input::PickQuality("1080p-medium".into()), at(2)),
+        vec![quality_change("1080p-medium", 3600.0)]
+    );
+    assert_eq!(session.quality(), "original", "the step plays only once the server answers");
+    // The transcode starts at source 3600 s, which is player time 0.
+    assert_eq!(session.step(Input::Replanned(Some(replanned())), at(3)), vec![load(&transcode(), headers(), 0.0)]);
+    assert_eq!(session.quality(), "1080p-medium");
+    session.step(Input::FileLoaded, at(4));
+    session.step(Input::Position(30.0), at(5));
+    assert_eq!(session.step(Input::Shutdown, at(6)), vec![stop(3630.0, 1), Command::ClosePlayer]);
+}
+
+#[test]
+fn a_failed_quality_step_keeps_the_plan_that_plays() {
+    let mut session = failed_at(3600.0);
+    session.step(Input::PickQuality("720p-low".into()), at(2));
+    assert_eq!(session.step(Input::Replanned(None), at(3)), vec![], "no Lost connection: the old stream still plays");
+    assert_eq!(session.quality(), "original");
+    assert_eq!(session.step(Input::LoadFailed, at(4)), vec![Command::Refresh], "the recovery chain starts as usual");
+}
+
+#[test]
+fn the_quality_that_plays_needs_no_replan_and_a_recovery_keeps_the_chosen_quality() {
+    let mut session = failed_at(3600.0);
+    assert_eq!(session.step(Input::PickQuality("original".into()), at(2)), vec![]);
+    session.step(Input::PickQuality("1080p-medium".into()), at(2));
+    session.step(Input::Replanned(Some(replanned())), at(3));
+    session.step(Input::FileLoaded, at(4));
+    session.step(Input::Position(30.0), at(5));
+    session.step(Input::LoadFailed, at(6));
+    session.step(Input::Refreshed(Some(refreshed(6))), at(7));
+    let commands = session.step(Input::LoadFailed, at(8));
+    let [Command::Replan(Replan { operation: Operation::FailureRecovery, quality, .. })] = &commands[..] else {
+        panic!("{commands:?}");
+    };
+    assert_eq!(quality, "1080p-medium");
+}
+
+#[test]
+fn a_version_switch_ends_the_session_at_the_position_and_starts_the_other_file_there() {
+    let mut session = playing(None);
+    session.step(Input::Position(300.0), at(1));
+    assert_eq!(session.step(Input::SwitchVersion("42".into()), at(2)), vec![], "file 42 plays already");
+    assert_eq!(
+        session.step(Input::SwitchVersion("43".into()), at(2)),
+        vec![stop(300.0, 1), Command::PlayVersion { file_id: "43".into(), position: Some(300.0) }]
+    );
+    assert_eq!(session.step(Input::Tick, at(60)), vec![], "the new file plays in a new session");
 }
 
 /// The replan answer of the own fixture: a transcode from 3600 s.
@@ -613,4 +884,107 @@ fn mpris_previous_plays_the_previous_episode_only_when_it_exists() {
     assert!(session.can_go_previous());
     assert_eq!(session.step(Input::Previous, at(3)), vec![stop(400.0, 1), Command::PlayPrevious]);
     assert!(!session.can_go_previous(), "the session ended");
+}
+
+// The Track picker.
+
+/// The mpv track list of an episode: English audio (it plays) and Japanese audio, an English forced subtitle
+/// track and a Japanese one.
+/// `japanese_first` swaps the audio ids, as the next file can order its tracks in another way.
+fn track_list(japanese_first: bool) -> Vec<Track> {
+    let (eng, jpn) = if japanese_first { (2, 1) } else { (1, 2) };
+    tracks::parse(&format!(
+        r#"[{{"id":1,"type":"video","codec":"h264","selected":true}},
+        {{"id":{eng},"type":"audio","lang":"eng","codec":"aac","selected":true}},
+        {{"id":{jpn},"type":"audio","lang":"jpn","codec":"aac"}},
+        {{"id":1,"type":"sub","lang":"eng","forced":true,"codec":"ass"}},
+        {{"id":2,"type":"sub","lang":"jpn","codec":"subrip"}}]"#
+    ))
+}
+
+#[test]
+fn a_pick_in_the_track_picker_selects_the_track_in_mpv_and_off_hides_the_subtitles() {
+    let mut session = playing(None);
+    session.step(Input::Tracks(track_list(false)), at(1));
+    assert_eq!(session.step(Input::PickTrack { kind: Kind::Audio, id: Some(2) }, at(2)), vec![Command::SelectAudio(2)]);
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: Some(2) }, at(3)),
+        vec![Command::SelectSubtitle(Some(2))]
+    );
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(4)),
+        vec![Command::SelectSubtitle(None)]
+    );
+    assert_eq!(session.tracks(), &track_list(false)[..], "the picker lists what mpv reports");
+}
+
+/// The next episode after a session in which the user picked `picks`. The next plan is direct play with Japanese
+/// audio. Returns the next session after its file loaded, and the subtitle commands of the load.
+fn next_episode(picks: &[(Kind, Option<i64>)]) -> (Session, Vec<Command>) {
+    let mut first = playing(None);
+    first.step(Input::Tracks(track_list(false)), at(1));
+    for (kind, id) in picks {
+        first.step(Input::PickTrack { kind: *kind, id: *id }, at(2));
+    }
+    let mut next = Session::new(None, ServerSettings::default()).with_carry(first.carry());
+    let mut decision = decision(|_| {});
+    let Decision::Playable { audio_language, .. } = &mut decision else { unreachable!() };
+    *audio_language = Some("ja".into());
+    next.step(Input::Started { decision, access: access() }, at(10));
+    let commands = next.step(Input::FileLoaded, at(10)).into_iter();
+    let subtitles = commands.filter(|c| matches!(c, Command::AddSubtitle { .. } | Command::SelectSubtitle(_)));
+    (next, subtitles.collect())
+}
+
+#[test]
+fn the_audio_choice_carries_to_the_next_episode_by_language() {
+    let (mut next, _) = next_episode(&[(Kind::Audio, Some(2))]);
+    // In the next file, Japanese is track 1.
+    assert_eq!(next.step(Input::Tracks(track_list(true)), at(11)), vec![Command::SelectAudio(1)]);
+    assert_eq!(next.step(Input::Tracks(track_list(true)), at(12)), vec![], "the carry-over picks only once");
+    // The episode after it gets the same choice, also with no new pick.
+    assert_eq!(next.carry().audio, Some(Choice::Track { language: Some("jpn".into()), forced: false }));
+}
+
+#[test]
+fn an_audio_track_that_already_plays_is_not_selected_again() {
+    let (mut next, _) = next_episode(&[(Kind::Audio, Some(1))]);
+    assert_eq!(next.step(Input::Tracks(track_list(false)), at(11)), vec![]);
+}
+
+#[test]
+fn the_subtitle_choice_carries_to_the_next_episode_by_language_and_forced_state() {
+    // The forced English track matches the forced English track of the next plan, its first embedded track.
+    let (_, subtitles) = next_episode(&[(Kind::Sub, Some(1))]);
+    assert_eq!(subtitles, vec![Command::SelectSubtitle(Some(1))]);
+    // Japanese is the second embedded track of the next plan.
+    let (_, subtitles) = next_episode(&[(Kind::Sub, Some(2))]);
+    assert_eq!(subtitles, vec![Command::SelectSubtitle(Some(2))]);
+}
+
+#[test]
+fn subtitles_turned_off_stay_off_in_the_next_episode() {
+    // With Japanese audio, the default rule shows the English subtitles.
+    let (_, subtitles) = next_episode(&[]);
+    assert_eq!(subtitles.len(), 1, "{subtitles:?}");
+    let (_, subtitles) = next_episode(&[(Kind::Sub, None)]);
+    assert_eq!(subtitles, vec![]);
+}
+
+#[test]
+fn a_reload_keeps_the_picked_tracks() {
+    let mut session = playing(None);
+    session.step(Input::Tracks(track_list(false)), at(1));
+    session.step(Input::PickTrack { kind: Kind::Audio, id: Some(2) }, at(2));
+    session.step(Input::PickTrack { kind: Kind::Sub, id: Some(2) }, at(2));
+    session.step(Input::LoadFailed, at(3));
+    let reload = session.step(Input::Refreshed(Some(access())), at(4));
+    assert!(matches!(&reload[..], [Command::Load { .. }]), "{reload:?}");
+    let loaded = session.step(Input::FileLoaded, at(5));
+    assert_eq!(loaded, vec![Command::ShowMarkers(vec![]), Command::SelectSubtitle(Some(2))], "no sidecar of the start");
+    // mpv reports the tracks of the reloaded file, with the tracks of the start.
+    assert_eq!(
+        session.step(Input::Tracks(track_list(false)), at(6)),
+        vec![Command::SelectAudio(2), Command::SelectSubtitle(Some(2))]
+    );
 }

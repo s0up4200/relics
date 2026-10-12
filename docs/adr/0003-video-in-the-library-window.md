@@ -1,0 +1,5 @@
+# Video plays in the Library window through a Wayland child surface
+
+The app plays video inside the Library window. The app creates a Wayland child surface under the GPUI window, and libmpv draws into it with the OpenGL render API. GPUI draws the controls over the video and gets all input. This replaces the own Wayland window of ADR 0001 (libmpv still runs in the app process) and the Lua controller of ADR 0002 (the app still owns the skip logic).
+
+We looked at three other routes. GPUI cannot draw an outside GPU texture on Linux at our version, so a shared texture needs a GPUI fork. CPU frames shown as GPUI images work, but at 4K each frame is about 33 MB with color conversion on the CPU. A separate window that Hyprland places over the app does not put the video in the app. We accept that the render API uses mpv's `gpu` renderer, not `gpu-next`, so the app loses HDR passthrough. The route depends on two GPUI behaviors that are not documented: access to the window's Wayland surface and a transparent window background.

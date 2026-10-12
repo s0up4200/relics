@@ -3,24 +3,19 @@
 //! session and turns mpv events into Playback session inputs.
 #![allow(clippy::disallowed_types)]
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::ffi::c_void;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use libmpv2::events::{Event, PropertyData};
+use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
 use libmpv2::{Format, Mpv, mpv_end_file_reason};
 
-use crate::api::types::Marker;
-use crate::playback::Input;
+use crate::playback::{Input, tracks};
 
 pub use libmpv2::Error;
 
-/// The app id of the Player window. Omarchy floats each window whose app id contains
-/// `mpv`, so do not rename it.
-pub const APP_ID: &str = "silo-player";
-
-/// One mpv handle, which owns the Player window. Drop it to close the window.
+/// One mpv handle. The Player view draws its video (`video`). Drop it to stop playback.
 pub struct Player {
     mpv: Arc<Mpv>,
     events: Option<JoinHandle<()>>,
@@ -28,7 +23,7 @@ pub struct Player {
 
 impl Player {
     /// Starts mpv. `hwdec` is the hardware decoding mode, `auto-safe` or `no`. `options`
-    /// are more mpv options, for example `vo=null` in the tests. A thread reads the mpv
+    /// are more mpv options, for example `vo=libmpv` for the Player view or `vo=null` in the tests. A thread reads the mpv
     /// events and gives each one to `on_input` as a Playback session input. The last
     /// input is `Shutdown`.
     pub fn open(
@@ -37,26 +32,19 @@ impl Player {
         on_input: impl Fn(Input) + Send + 'static,
     ) -> Result<Self, Error> {
         let mpv = Mpv::with_initializer(|init| {
-            init.set_option("wayland-app-id", APP_ID)?;
-            init.set_option("fullscreen", true)?;
             init.set_option("hwdec", hwdec)?;
             init.set_option("load-scripts", false)?;
-            // The Lua controller draws the controls, so the built-in controller and OSD bar are off.
+            // The Player view draws the controls, so the built-in controller and OSD bar are off.
             init.set_option("osc", false)?;
             init.set_option("osd-bar", false)?;
             // mpv keeps a track change for the next file. A track change must apply only to
             // the Playback session that plays now.
             init.set_option("reset-on-next-file", "aid,sid")?;
             // At the end of a file, mpv keeps the last frame and reports `eof-reached` instead of an end-file
-            // event. The window stays after a failed load. So the "Lost connection" text shows in the window.
+            // event. mpv stays open after a failed load, so the Player view can show "Lost connection".
             init.set_option("keep-open", "yes")?;
-            init.set_option("force-window", "yes")?;
             // Without this, the built-in ytdl hook opens a failed URL again without the headers.
             init.set_option("ytdl", false)?;
-            // libmpv turns off the keys and the window close by default. q and the close
-            // button must reach mpv, so that they end in a Shutdown event.
-            init.set_option("input-default-bindings", true)?;
-            init.set_option("input-vo-keyboard", true)?;
             for (name, value) in options {
                 init.set_option(name, *value)?;
             }
@@ -66,6 +54,8 @@ impl Player {
         mpv.observe_property("duration", Format::Double, 0)?;
         mpv.observe_property("pause", Format::Flag, 0)?;
         mpv.observe_property("eof-reached", Format::Flag, 0)?;
+        // As a string: observing `track-list` as a node panics the event thread in libmpv2.
+        mpv.observe_property("track-list", Format::String, 0)?;
         let mpv = Arc::new(mpv);
         let events = std::thread::spawn({
             let mpv = mpv.clone();
@@ -99,28 +89,17 @@ impl Player {
         self.mpv.command("async", &["sub-add", url, "select", title, language])
     }
 
-    /// Shows the subtitle track `sid` of the file that plays.
-    pub fn select_subtitle(&self, sid: i64) -> Result<(), Error> {
-        self.mpv.set_property("sid", sid)
+    /// Shows the subtitle track `sid` of the file that plays. `None` hides the subtitles.
+    pub fn select_subtitle(&self, sid: Option<i64>) -> Result<(), Error> {
+        match sid {
+            Some(sid) => self.mpv.set_property("sid", sid),
+            None => self.mpv.set_property("sid", "no"),
+        }
     }
 
-    /// Sends the theme colors, as `#RRGGBB`, to the Lua controller.
-    pub fn send_theme(&self, accent: &str, foreground: &str, background: &str) -> Result<(), Error> {
-        self.mpv.command("script-message", &["silo-theme", accent, foreground, background])
-    }
-
-    /// Sends the Markers, in player time, to the Lua controller as `kind:start:end,kind:start:end`.
-    pub fn show_markers(&self, markers: &[Marker]) -> Result<(), Error> {
-        let list: Vec<String> = markers
-            .iter()
-            .map(|marker| format!("{}:{}:{}", String::from(marker.kind.clone()), marker.start, marker.end))
-            .collect();
-        self.mpv.command("script-message", &["silo-markers", &list.join(",")])
-    }
-
-    /// Shows the Skip prompt with `label`. An empty label hides it.
-    pub fn show_prompt(&self, label: &str) -> Result<(), Error> {
-        self.mpv.command("script-message", &["silo-prompt", label])
+    /// Plays the audio track `aid` of the file that plays.
+    pub fn select_audio(&self, aid: i64) -> Result<(), Error> {
+        self.mpv.set_property("aid", aid)
     }
 
     /// Seeks to `position`, in player time.
@@ -133,10 +112,39 @@ impl Player {
         self.mpv.set_property("pause", paused)
     }
 
-    /// Runs one mpv input command, for example `["keypress", "a"]`. The tests use it.
-    pub fn command(&self, args: &[&str]) -> Result<(), Error> {
-        let (name, args) = args.split_first().expect("a command has a name");
-        self.mpv.command(name, args)
+    /// Changes the volume by `delta` percent. mpv keeps it between 0 and `volume-max`.
+    pub fn add_volume(&self, delta: f64) -> Result<(), Error> {
+        self.mpv.command("add", &["volume", &delta.to_string()])
+    }
+
+    pub fn toggle_mute(&self) -> Result<(), Error> {
+        self.mpv.command("cycle", &["mute"])
+    }
+
+    /// The subtitle delay in seconds. A positive delay shows the subtitles later.
+    pub fn sub_delay(&self) -> Result<f64, Error> {
+        self.mpv.get_property("sub-delay")
+    }
+
+    /// Changes the subtitle delay by `delta` seconds.
+    pub fn add_sub_delay(&self, delta: f64) -> Result<(), Error> {
+        self.mpv.command("add", &["sub-delay", &delta.to_string()])
+    }
+
+    /// Sets the subtitle delay to `seconds`. mpv keeps it from one file to the next.
+    pub fn set_sub_delay(&self, seconds: f64) -> Result<(), Error> {
+        self.mpv.set_property("sub-delay", seconds)
+    }
+
+    /// The volume in percent, and whether the audio is muted.
+    pub fn volume(&self) -> Result<(f64, bool), Error> {
+        Ok((self.mpv.get_property("volume")?, self.mpv.get_property("mute")?))
+    }
+
+    /// The handle that the render thread of the Player view draws the video with. Open the Player with
+    /// `vo=libmpv`, and make the render context before the first load, else mpv plays no video.
+    pub fn video(&self) -> Video {
+        Video(self.mpv.clone())
     }
 
     /// Reads an mpv property as text. The tests use it.
@@ -145,23 +153,25 @@ impl Player {
     }
 }
 
-/// Finds `silo-controls.lua`, the Lua controller of the Player window. `var` reads an
-/// environment variable. The search order is `$SILO_OMARCHY_DATA`, then
-/// `$XDG_DATA_HOME/silo-omarchy`, then `silo-omarchy` in each `$XDG_DATA_DIRS` entry,
-/// with the XDG defaults when a variable is not set.
-pub fn find_controls(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    // The XDG spec treats an empty variable as not set.
-    let var = |name: &str| var(name).filter(|value| !value.is_empty());
-    let data_home = var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| var("HOME").map(|home| Path::new(&home).join(".local/share")));
-    let data_dirs = var("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
-    var("SILO_OMARCHY_DATA")
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(data_home.into_iter().chain(std::env::split_paths(&data_dirs)).map(|dir| dir.join("silo-omarchy")))
-        .map(|dir| dir.join("silo-controls.lua"))
-        .find(|path| path.is_file())
+/// The mpv handle of the render thread of the Player view.
+pub struct Video(Arc<Mpv>);
+
+impl Video {
+    /// Makes the OpenGL render context. Call it on the render thread, with the GL context current. Drop the
+    /// render context on the same thread, before the Player.
+    pub fn render_context<C: 'static>(
+        &self,
+        get_proc_address: fn(&C, &str) -> *mut c_void,
+        gl: C,
+        wl_display: *const c_void,
+    ) -> Result<RenderContext<'_>, Error> {
+        self.0.create_render_context([
+            RenderParam::ApiType(RenderParamApiType::OpenGl),
+            RenderParam::InitParams(OpenGLInitParams { get_proc_address, ctx: gl }),
+            // VA-API decoding needs the Wayland display to share the frames with OpenGL.
+            RenderParam::WaylandDisplay(wl_display),
+        ])
+    }
 }
 
 /// One `name=value` item of an mpv key-value list. The `%length%` prefix quotes the value,
@@ -201,10 +211,9 @@ fn read_events(mpv: &Mpv, on_input: impl Fn(Input)) {
                 ("duration", PropertyData::Double(duration)) => Input::Duration(duration),
                 ("pause", PropertyData::Flag(paused)) => Input::Paused(paused),
                 ("eof-reached", PropertyData::Flag(true)) => Input::EndOfFile,
+                ("track-list", PropertyData::Str(json)) => Input::Tracks(tracks::parse(json)),
                 _ => continue,
             },
-            Some(Ok(Event::ClientMessage(message))) if message == ["silo-ready"] => Input::ControlsReady,
-            Some(Ok(Event::ClientMessage(message))) if message == ["silo-action"] => Input::Action,
             // libmpv2 turns an end of file with an error into an error event. This is how a
             // failed load, such as a 401 on the stream URL, arrives.
             Some(Err(_)) => Input::LoadFailed,

@@ -1,21 +1,27 @@
-//! The Library page. The Recommended tab shows the rows of the Library like Home. The Library tab shows the
-//! poster grid, with a bar of pills (sort, filters, A to Z, and Series/Episodes on a Shows library) and a chip
-//! for each active filter. The page keeps its sort and filters while the app runs.
+//! The Library page. The Recommended tab shows the rows of the Library like Home, and the Collections tab its
+//! collections. The Library tab shows the poster grid, with a bar of pills (sort, filters, A to Z,
+//! Series/Episodes on a Shows library, and Shuffle) and a chip for each active filter. The page keeps its sort
+//! and filters while the app runs.
 
 use std::sync::Arc;
 
 use chrono::Datelike as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
+use crate::click::Clickable as _;
+use crate::collections::{Collections, OpenCollection, Scope};
+use crate::filter_panel::{self, Chip, Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
+use crate::player::start_shuffle;
 
 /// A Shows library: its grid lists series, or episodes in Episodes mode.
 pub fn is_shows(library_type: &str) -> bool {
@@ -26,6 +32,7 @@ pub fn is_shows(library_type: &str) -> bool {
 enum Tab {
     Recommended,
     Library,
+    Collections,
 }
 
 /// A control of the bar, in the order that h and l move through them.
@@ -36,22 +43,8 @@ enum Control {
     Filter,
     Letter,
     Mode,
-    Chip(Choice),
-    ClearAll,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuKind {
-    Sort,
-    Filter,
-    Letter,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Menu {
-    kind: MenuKind,
-    /// The focused entry.
-    row: usize,
+    Shuffle,
+    Chip(Chip),
 }
 
 pub struct LibraryPage {
@@ -61,23 +54,31 @@ pub struct LibraryPage {
     tab: Tab,
     /// The rows of the Recommended tab, made when the tab opens first.
     recommended: Option<Entity<Home>>,
+    /// The collection rows of the Collections tab, made when the tab opens first.
+    collections: Option<Entity<Collections>>,
     grid: Entity<Grid>,
     browse: Browse,
-    genres: Vec<String>,
+    /// The filter values of the Library, for the filter panel.
+    facets: Facets,
     /// The bar has the keyboard focus.
     in_bar: bool,
     /// The focused control of the bar.
     bar: usize,
-    menu: Option<Menu>,
+    /// The open sort, filter or A to Z panel.
+    menu: Option<Panel>,
     /// The page has the keyboard focus.
     active: bool,
-    _genres: Task<()>,
+    /// Why the last Shuffle failed.
+    shuffle_error: Option<String>,
+    _shuffle: Task<()>,
+    _facets: Task<()>,
     _events: Vec<Subscription>,
 }
 
 impl EventEmitter<Play> for LibraryPage {}
 impl EventEmitter<Open> for LibraryPage {}
 impl EventEmitter<OpenGrid> for LibraryPage {}
+impl EventEmitter<OpenCollection> for LibraryPage {}
 
 impl LibraryPage {
     pub fn new(client: Arc<Client>, library: wire::UserLibrary, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -89,18 +90,24 @@ impl LibraryPage {
             cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
             cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),
         ];
-        let genres = cx.spawn({
+        let facets = cx.spawn({
             let (client, id) = (client.clone(), library.id.to_string());
-            async move |this, cx| match client.genres(&id).await {
-                Ok(genres) => {
+            async move |this, cx| match client.filters(Some(&id)).await {
+                Ok(filters) => {
                     this.update(cx, |this, cx| {
-                        this.genres = genres;
+                        this.facets = filters.into();
+                        if let Some(menu) = &mut this.menu {
+                            menu.facets = this.facets.clone();
+                        }
                         cx.notify();
                     })
                     .ok();
                 }
-                // The filter menu works without genres.
-                Err(err) => eprintln!("silo-omarchy: cannot read the genres of library {id}: {err}"),
+                // The filter panel works without the values: it has no genre, language, studio, network or
+                // country section then.
+                Err(err) => {
+                    eprintln!("silo-omarchy: cannot read the filter values of library {id}: {err}")
+                }
             }
         });
         Self {
@@ -109,14 +116,17 @@ impl LibraryPage {
             shows,
             tab: Tab::Library,
             recommended: None,
+            collections: None,
             grid,
             browse,
-            genres: Vec::new(),
+            facets: Facets::default(),
             in_bar: false,
-            bar: 2,
+            bar: 3,
             menu: None,
             active: false,
-            _genres: genres,
+            shuffle_error: None,
+            _shuffle: Task::ready(()),
+            _facets: facets,
             _events: events,
         }
     }
@@ -138,6 +148,12 @@ impl LibraryPage {
                 cx.notify();
             });
         }
+        if let Some(collections) = &self.collections {
+            collections.update(cx, |collections, cx| {
+                collections.active = content && tab == Tab::Collections;
+                cx.notify();
+            });
+        }
         self.grid.update(cx, |grid, cx| {
             grid.active = content && tab == Tab::Library;
             cx.notify();
@@ -146,27 +162,17 @@ impl LibraryPage {
     }
 
     fn controls(&self) -> Vec<Control> {
-        let mut controls = vec![Control::Tab(Tab::Recommended), Control::Tab(Tab::Library)];
+        let mut controls =
+            vec![Control::Tab(Tab::Recommended), Control::Tab(Tab::Library), Control::Tab(Tab::Collections)];
         if self.tab == Tab::Library {
             controls.extend([Control::Sort, Control::Filter, Control::Letter]);
             if self.shows {
                 controls.push(Control::Mode);
             }
-            let chips = self.browse.chips();
-            if !chips.is_empty() {
-                controls.extend(chips.into_iter().map(Control::Chip));
-                controls.push(Control::ClearAll);
-            }
+            controls.push(Control::Shuffle);
+            controls.extend(Chip::all(&self.browse).into_iter().map(Control::Chip));
         }
         controls
-    }
-
-    fn choices(&self, kind: MenuKind) -> Vec<Choice> {
-        match kind {
-            MenuKind::Sort => Choice::sort_menu(),
-            MenuKind::Filter => Choice::filter_menu(&self.genres, chrono::Local::now().year().into()),
-            MenuKind::Letter => Choice::letter_menu(),
-        }
     }
 
     /// Loads the grid again with the sort and filters.
@@ -186,11 +192,17 @@ impl LibraryPage {
             self._events.push(cx.subscribe(&home, |_, _, open: &OpenGrid, cx| cx.emit(open.clone())));
             self.recommended = Some(home);
         }
+        if tab == Tab::Collections && self.collections.is_none() {
+            let scope = Scope::Library(self.library.id.to_string());
+            let collections = cx.new(|cx| Collections::new(self.client.clone(), scope, cx));
+            self._events.push(cx.subscribe(&collections, |_, _, open: &OpenCollection, cx| cx.emit(open.clone())));
+            self.collections = Some(collections);
+        }
         self.sync(cx);
     }
 
     fn activate(&mut self, control: Control, window: &mut Window, cx: &mut Context<Self>) {
-        let menu = |kind| Some(Menu { kind, row: 0 });
+        let menu = |kind| Some(Panel::new(kind, self.facets.clone(), chrono::Local::now().year().into()));
         match control {
             Control::Tab(tab) => self.open_tab(tab, window, cx),
             Control::Sort => self.menu = menu(MenuKind::Sort),
@@ -200,47 +212,42 @@ impl LibraryPage {
                 self.browse.episodes = !self.browse.episodes;
                 self.apply(cx);
             }
-            Control::Chip(chip) => {
-                self.browse.remove(&chip);
-                self.apply(cx);
+            Control::Shuffle => {
+                self.shuffle_error = None;
+                let (client, id) = (self.client.clone(), self.library.id.to_string());
+                self._shuffle = start_shuffle(client, "library", id, cx, |this, err| this.shuffle_error = Some(err));
             }
-            Control::ClearAll => {
-                self.browse.clear();
+            Control::Chip(chip) => {
+                chip.remove(&mut self.browse);
                 self.apply(cx);
             }
         }
         cx.notify();
     }
 
-    /// Picks the focused entry of the open menu. The filter menu stays open, so that the user can pick more.
-    fn choose(&mut self, row: usize, cx: &mut Context<Self>) {
-        let Some(menu) = &self.menu else {
-            return;
-        };
-        let kind = menu.kind;
-        let Some(choice) = self.choices(kind).get(row).cloned() else {
-            return;
-        };
-        self.browse.choose(&choice);
-        if kind != MenuKind::Filter {
-            self.menu = None;
+    /// Gives a key or a click to the open panel, and loads the grid again when the sort or a filter changed.
+    fn step_menu(
+        &mut self,
+        act: impl FnOnce(&mut Panel, &mut Browse) -> Outcome,
+        cx: &mut Context<Self>,
+    ) -> Option<Outcome> {
+        let (outcome, changed) = filter_panel::step(&mut self.menu, &mut self.browse, act)?;
+        if changed {
+            self.apply(cx);
         }
-        self.apply(cx);
+        cx.notify();
+        Some(outcome)
     }
 
-    /// Handles a key. Returns false when the page does not use it, for example h or Left at the left edge.
-    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(Menu { kind, row }) = self.menu {
-            let last = self.choices(kind).len().saturating_sub(1);
-            match key {
-                Key::Down | Key::Right => self.menu = Some(Menu { kind, row: (row + 1).min(last) }),
-                Key::Up | Key::Left => self.menu = Some(Menu { kind, row: row.saturating_sub(1) }),
-                Key::Other("enter") => self.choose(row, cx),
-                Key::Other("escape" | "backspace") => self.menu = None,
-                _ => return false,
-            }
-            cx.notify();
-            return true;
+    fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.step_menu(|menu, browse| menu.click(row, browse), cx);
+    }
+
+    /// Handles a key. `typed` is the text that the key types, for a text field of the filter panel. Returns
+    /// false when the page does not use the key, for example h or Left at the left edge.
+    pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, typed, browse), cx) {
+            return outcome != Outcome::Unused;
         }
         if self.in_bar {
             let controls = self.controls();
@@ -266,6 +273,13 @@ impl LibraryPage {
                 }
                 key == Key::Up
             }
+            Tab::Collections => {
+                let collections = self.collections.clone();
+                if collections.is_some_and(|c| c.update(cx, |c, cx| c.key(key, cx))) {
+                    return true;
+                }
+                key == Key::Up
+            }
             Tab::Library => match self.grid.update(cx, |grid, cx| grid.key(key, cx)) {
                 Move::OutTop => true,
                 Move::OutLeft => return false,
@@ -284,8 +298,10 @@ impl LibraryPage {
         };
         if into_bar {
             self.in_bar = true;
-            if self.tab == Tab::Recommended {
-                self.bar = 0;
+            match self.tab {
+                Tab::Recommended => self.bar = 0,
+                Tab::Collections => self.bar = 2,
+                Tab::Library => {}
             }
             self.sync(cx);
         }
@@ -293,26 +309,15 @@ impl LibraryPage {
     }
 
     fn pill(&self, index: usize, label: SharedString, on: bool, cx: &Context<Self>) -> AnyElement {
-        let t = cx.omarchy();
         let focused = self.active && self.in_bar && self.bar == index;
-        div()
-            .id(("library-bar", index))
-            .px(px(18.))
-            .py(px(9.))
-            .rounded_full()
-            .text_size(px(14.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .bg(if on { t.foreground } else { gpui::hsla(0., 0., 1., 0.1) })
-            .text_color(if on { t.background } else { t.foreground })
-            .border_2()
-            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+        bar_pill(("library-bar", index), label, on, focused, cx.omarchy())
             .on_click(cx.listener(move |this, _, window, cx| {
+                this.in_bar = true;
                 this.bar = index;
                 if let Some(control) = this.controls().get(index).cloned() {
                     this.activate(control, window, cx);
                 }
             }))
-            .child(label)
             .into_any_element()
     }
 
@@ -322,9 +327,14 @@ impl LibraryPage {
         let (label, on): (SharedString, bool) = match control {
             &Control::Tab(tab) => {
                 let focused = self.active && self.in_bar && self.bar == index;
-                let label = if tab == Tab::Recommended { "Recommended" } else { "Library" };
+                let label = match tab {
+                    Tab::Recommended => "Recommended",
+                    Tab::Library => "Library",
+                    Tab::Collections => "Collections",
+                };
                 return div()
                     .id(("library-tab", index))
+                    .clickable()
                     .pb(px(4.))
                     .text_size(px(14.))
                     .text_color(if focused {
@@ -342,7 +352,11 @@ impl LibraryPage {
                     } else {
                         gpui::transparent_black()
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_tab(tab, window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.in_bar = true;
+                        this.bar = index;
+                        this.open_tab(tab, window, cx);
+                    }))
                     .child(label)
                     .into_any_element();
             }
@@ -359,52 +373,10 @@ impl LibraryPage {
                 None => ("A–Z".into(), false),
             },
             Control::Mode => ((if b.episodes { "Episodes" } else { "Series" }).into(), false),
-            Control::Chip(Choice::Letter(Some(letter))) => (format!("Starts with {letter} ×").into(), false),
-            Control::Chip(chip) => (format!("{} ×", chip.label()).into(), false),
-            Control::ClearAll => ("Clear all".into(), false),
+            Control::Chip(chip) => (chip.label().into(), false),
+            Control::Shuffle => ("Shuffle".into(), false),
         };
         self.pill(index, label, on, cx)
-    }
-
-    fn menu(&self, menu: &Menu, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy();
-        let title = match menu.kind {
-            MenuKind::Sort => "Sort",
-            MenuKind::Filter => "Filters",
-            MenuKind::Letter => "A to Z",
-        };
-        let entries = self.choices(menu.kind).into_iter().enumerate().map(|(row, choice)| {
-            let on = self.browse.is_chosen(&choice);
-            let focused = self.active && row == menu.row;
-            div()
-                .id(("library-menu", row))
-                .px(px(14.))
-                .py(px(6.))
-                .rounded_full()
-                .text_size(px(13.))
-                .bg(if on { t.foreground } else { gpui::hsla(0., 0., 1., 0.08) })
-                .text_color(if on { t.background } else { t.foreground })
-                .border_2()
-                .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .on_click(cx.listener(move |this, _, _, cx| this.choose(row, cx)))
-                .child(choice.label())
-        });
-        div()
-            .p(px(16.))
-            .rounded(px(12.))
-            .bg(t.surface)
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.))
-                    .items_baseline()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child(title))
-                    .child(div().text_size(px(12.)).text_color(t.secondary).child("Enter picks · Esc closes")),
-            )
-            .child(div().flex().flex_wrap().gap(px(8.)).children(entries))
     }
 }
 
@@ -416,7 +388,7 @@ impl Render for LibraryPage {
             let element = self.control(index, control, cx);
             match control {
                 Control::Tab(_) => tabs.push(element),
-                Control::Chip(_) | Control::ClearAll => chips.push(element),
+                Control::Chip(_) => chips.push(element),
                 _ => pills.push(element),
             }
         }
@@ -445,6 +417,9 @@ impl Render for LibraryPage {
                     .items_center()
                     .gap(px(8.))
                     .children(pills)
+                    .children(
+                        self.shuffle_error.clone().map(|err| div().text_size(px(13.)).text_color(t.danger).child(err)),
+                    )
                     .child(div().flex_1())
                     .children(count.map(|count| div().text_size(px(13.)).text_color(t.secondary).child(count))),
             );
@@ -452,12 +427,16 @@ impl Render for LibraryPage {
                 header = header.child(div().flex().flex_wrap().gap(px(8.)).children(chips));
             }
             if let Some(menu) = &self.menu {
-                header = header.child(self.menu(menu, cx));
+                header = header.child(menu.render(&self.browse, self.active, cx, Self::click_menu));
             }
         }
         let content = match (self.tab, &self.recommended) {
             (Tab::Recommended, Some(home)) => home.clone().into_any_element(),
             (Tab::Recommended, None) => div().into_any_element(),
+            (Tab::Collections, _) => match &self.collections {
+                Some(collections) => collections.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             (Tab::Library, _) if empty && self.browse.chips().is_empty() => {
                 div().px(px(40.)).text_color(t.secondary).child("This Library is empty.").into_any_element()
             }
@@ -477,6 +456,19 @@ impl Render for LibraryPage {
                 .into_any_element(),
             (Tab::Library, _) => div().size_full().px(px(40.)).child(self.grid.clone()).into_any_element(),
         };
-        div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(content))
+        div().size_full().flex().flex_col().child(header).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                // A click in the content moves the focus from the bar to the content.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.in_bar = false;
+                        this.sync(cx);
+                    }),
+                )
+                .child(content),
+        )
     }
 }

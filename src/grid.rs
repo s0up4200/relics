@@ -1,11 +1,11 @@
 //! The poster grid of a catalog query. It loads the next page with the cursor when the focus or the scroll
-//! comes near the end. The Library page uses it, and Search and the Person grid can use it with their own query.
+//! comes near the end. The Library page uses it, and Search and the Person page can use it with their own query.
 
 use std::sync::Arc;
 
 use gpui::{
-    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    Render, RenderImage, ScrollStrategy, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, Render, RenderImage, ScrollStrategy, StatefulInteractiveElement as _, Styled, Subscription, Task,
     UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
@@ -13,11 +13,14 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::browse::Paging;
-use crate::home::{Open, Play, short_line};
+use crate::click::Clickable as _;
+use crate::filter_panel::bar_pill;
+use crate::home::{Open, Play, card};
 use crate::keys::Key;
+use crate::player::start_shuffle;
 
 pub const POSTER_WIDTH: f32 = 150.;
-const POSTER_HEIGHT: f32 = 225.;
+pub const POSTER_HEIGHT: f32 = 225.;
 const GAP: f32 = 12.;
 
 /// The number of grid columns in `width` pixels.
@@ -61,10 +64,24 @@ pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
     }
 }
 
+/// Where the Items of a grid come from.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A catalog query, with the cursor of the first page.
+    Query(Box<wire::CatalogQuery>),
+    /// The Items of a collection of a Library.
+    Collection { library_id: String, id: String },
+}
+
+impl From<wire::CatalogQuery> for Source {
+    fn from(query: wire::CatalogQuery) -> Self {
+        Source::Query(Box::new(query))
+    }
+}
+
 pub struct Grid {
     client: Arc<Client>,
-    /// The query of the first page.
-    query: wire::CatalogQuery,
+    source: Source,
     paging: Paging,
     thumbs: Vec<Option<Arc<RenderImage>>>,
     /// The focused card.
@@ -84,11 +101,11 @@ impl EventEmitter<Play> for Grid {}
 impl EventEmitter<Open> for Grid {}
 
 impl Grid {
-    pub fn new(client: Arc<Client>, query: wire::CatalogQuery, window: &Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Arc<Client>, source: impl Into<Source>, window: &Window, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.drop_thumbs(cx)).detach();
         let mut grid = Self {
             client,
-            query,
+            source: source.into(),
             paging: Paging::default(),
             thumbs: Vec::new(),
             focus: 0,
@@ -107,7 +124,7 @@ impl Grid {
     /// Starts again with a new query, for example after a filter change.
     pub fn set_query(&mut self, query: wire::CatalogQuery, cx: &mut Context<Self>) {
         self.drop_thumbs(cx);
-        self.query = query;
+        self.source = query.into();
         self.paging = Paging::default();
         self.focus = 0;
         self.loading = None;
@@ -128,29 +145,37 @@ impl Grid {
 
     /// The query loaded, and nothing matches it.
     pub fn is_empty(&self) -> bool {
-        self.paging.items.is_empty() && self.paging.next_query(&self.query).is_none()
+        self.paging.items.is_empty() && self.paging.next_cursor().is_none()
     }
 
     /// Loads the next page, unless a load runs or the last page is in.
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self.paging.next_query(&self.query) else {
+        let Some(cursor) = self.paging.next_cursor() else {
             return;
         };
         if self.loading.is_some() {
             return;
         }
         self.error = None;
-        let (client, image_size) = (self.client.clone(), self.image_size);
+        let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
         self.loading = Some(cx.spawn(async move |this, cx| {
-            let result = client.query_catalog(&query, image_size).await;
+            let result = match source {
+                Source::Query(query) => {
+                    let query = wire::CatalogQuery { cursor, ..*query };
+                    client.query_catalog(&query, image_size).await.map(|p| (p.items, Some(p.total), p.page))
+                }
+                Source::Collection { library_id, id } => client
+                    .library_collection_items(&library_id, &id, cursor.as_deref())
+                    .await
+                    .map(|p| (p.items, None, p.page)),
+            };
             this.update(cx, |this, cx| {
                 this.loading = None;
                 match result {
-                    Ok(page) => {
-                        this.thumbs.extend(
-                            page.items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)),
-                        );
-                        this.paging.add(page);
+                    Ok((items, total, page)) => {
+                        this.thumbs
+                            .extend(items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)));
+                        this.paging.add(items, total, page);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
                     // The Library window shows Offline or the sign-in screen. The grid keeps what it shows.
@@ -198,7 +223,6 @@ impl Grid {
     }
 
     fn card(&self, index: usize, item: &wire::CatalogItem, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy();
         let focused = self.active && index == self.focus;
         let url = item
             .poster_url
@@ -208,11 +232,8 @@ impl Grid {
         let thumb = self.thumbs.get(index).cloned().flatten();
         div()
             .id(("grid-card", index))
-            .w(px(POSTER_WIDTH))
+            .clickable()
             .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.focus = index;
                 if let Some(item) = this.paging.items.get(index) {
@@ -220,31 +241,7 @@ impl Grid {
                 }
                 cx.notify();
             }))
-            .child(
-                div()
-                    .relative()
-                    .w(px(POSTER_WIDTH))
-                    .h(px(POSTER_HEIGHT))
-                    .rounded(px(12.))
-                    .overflow_hidden()
-                    .bg(t.surface)
-                    .border_2()
-                    .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                    .child(div().absolute().inset_0().child(artwork::image(
-                        url.map(String::from),
-                        thumb,
-                        POSTER_WIDTH,
-                    ))),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if focused { t.bright } else { t.foreground })
-                    .truncate()
-                    .child(item.title.clone()),
-            )
-            .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
+            .child(card(item, url.map(String::from), thumb, (POSTER_WIDTH, POSTER_HEIGHT), focused, cx.omarchy()))
     }
 }
 
@@ -301,11 +298,21 @@ impl Render for Grid {
     }
 }
 
-/// A page with a title and the grid of one catalog query: the titles of a Person, the Watchlist, the History,
-/// or the full list of a row ("View all").
+/// A page with a title and the grid of one source: the Watchlist, the History, the full list of a row
+/// ("View all"), or the Items of a collection. A collection page has a Shuffle pill above the grid.
 pub struct GridPage {
+    client: Arc<Client>,
     title: String,
     grid: Entity<Grid>,
+    /// The id of the collection, which a Shuffle shuffles. `None` on a page with no Shuffle.
+    collection: Option<String>,
+    /// The Shuffle pill has the keyboard focus.
+    in_bar: bool,
+    /// The page has the keyboard focus.
+    active: bool,
+    /// Why the last Shuffle failed.
+    shuffle_error: Option<String>,
+    _shuffle: Task<()>,
     _events: Vec<Subscription>,
 }
 
@@ -316,28 +323,81 @@ impl GridPage {
     pub fn new(
         client: Arc<Client>,
         title: String,
-        query: wire::CatalogQuery,
+        source: impl Into<Source>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let grid = cx.new(|cx| Grid::new(client, query, window, cx));
+        let source = source.into();
+        let collection = match &source {
+            Source::Collection { id, .. } => Some(id.clone()),
+            Source::Query(_) => None,
+        };
+        let grid = cx.new(|cx| Grid::new(client.clone(), source, window, cx));
         let events = vec![
             cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
             cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),
         ];
-        Self { title, grid, _events: events }
+        Self {
+            client,
+            title,
+            grid,
+            collection,
+            in_bar: false,
+            active: false,
+            shuffle_error: None,
+            _shuffle: Task::ready(()),
+            _events: events,
+        }
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        self.grid.update(cx, |grid, cx| {
-            grid.active = active;
+        self.active = active;
+        self.sync(cx);
+    }
+
+    /// Gives the focus ring to the Shuffle pill or to the grid.
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let grid = self.active && !self.in_bar;
+        self.grid.update(cx, |g, cx| {
+            g.active = grid;
             cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn shuffle(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.collection.clone() else {
+            return;
+        };
+        self.shuffle_error = None;
+        self._shuffle = start_shuffle(self.client.clone(), "library_collection", id, cx, |this, err| {
+            this.shuffle_error = Some(err)
         });
     }
 
-    /// Handles a key. Returns false when the key leaves the grid or the grid does not use it.
+    /// Handles a key. Returns false when the key leaves the page or the page does not use it. Up from the top
+    /// row of the grid goes to the Shuffle pill, and Down from it goes back.
     pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
-        matches!(self.grid.update(cx, |grid, cx| grid.key(key, cx)), Move::To(_))
+        if self.in_bar {
+            match key {
+                Key::Down => {
+                    self.in_bar = false;
+                    self.sync(cx);
+                }
+                Key::Other("enter") => self.shuffle(cx),
+                _ => return false,
+            }
+            return true;
+        }
+        match self.grid.update(cx, |grid, cx| grid.key(key, cx)) {
+            Move::To(_) => true,
+            Move::OutTop if self.collection.is_some() => {
+                self.in_bar = true;
+                self.sync(cx);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -351,6 +411,24 @@ impl Render for GridPage {
             div().size_full().px(px(40.)).child(self.grid.clone()).into_any_element()
         };
         let count = grid.total().map(|total| format!("{total} titles"));
+        let shuffle = self.collection.as_ref().map(|_| {
+            div()
+                .px(px(40.))
+                .pb(px(18.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(bar_pill("grid-shuffle", "Shuffle".into(), false, self.active && self.in_bar, &t).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.in_bar = true;
+                        this.sync(cx);
+                        this.shuffle(cx);
+                    }),
+                ))
+                .children(
+                    self.shuffle_error.clone().map(|err| div().text_size(px(13.)).text_color(t.danger).child(err)),
+                )
+        });
         div()
             .size_full()
             .flex()
@@ -374,7 +452,21 @@ impl Render for GridPage {
                         count.map(|count| div().pb(px(6.)).text_size(px(13.)).text_color(t.secondary).child(count)),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(content))
+            .children(shuffle)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    // A click in the grid moves the focus from the Shuffle pill to the grid.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.in_bar = false;
+                            this.sync(cx);
+                        }),
+                    )
+                    .child(content),
+            )
     }
 }
 

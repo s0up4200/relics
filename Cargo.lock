@@ -6059,15 +6059,19 @@ dependencies = [
  "gpui-pre-http-client",
  "gpui-pre-reqwest-client",
  "image",
+ "khronos-egl",
  "libmpv2",
  "mpris-server",
  "oo7",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thumbhash",
  "toml 0.8.23",
  "uuid",
+ "wayland-backend",
+ "wayland-client",
 ]
 
 [[package]]

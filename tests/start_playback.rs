@@ -7,7 +7,7 @@ use common::{Log, fixture, json};
 use futures::executor::block_on;
 use serde_json::{Value, json};
 use silo_omarchy::api::{Client, Decision, types};
-use silo_omarchy::playback::{Replan, Sample};
+use silo_omarchy::playback::{Operation, Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -17,6 +17,7 @@ fn fake(start: &'static str) -> (Client, Log) {
     let (http, seen) = common::http(move |req| {
         let (status, body) = match (req.method.as_str(), req.path.as_str()) {
             ("GET", "catalog/items/movie:heat-1995/versions") => (200, fixture("list_catalog_item_versions_ok.json")),
+            ("GET", "catalog/items/movie:two-files/versions") => (200, two_versions()),
             ("GET", "playback/capabilities") => (200, fixture("playback_capability_available.json")),
             ("GET", "markers/files/120") => (200, markers()),
             ("GET", "catalog/series/series:severance/seasons/1/episodes?image_size=small") => {
@@ -51,6 +52,16 @@ fn markers() -> String {
     body.to_string()
 }
 
+/// The versions fixture with a second file, 121.
+fn two_versions() -> String {
+    let mut body: Value = serde_json::from_str(&fixture("list_catalog_item_versions_ok.json")).unwrap();
+    let mut second = body["items"][0].clone();
+    second["file_id"] = json!("121");
+    second["resolution"] = json!("1080p");
+    body["items"].as_array_mut().unwrap().push(second);
+    body.to_string()
+}
+
 /// Season 2 of the fixture series: episode 1 has only an unreadable file, episode 2 plays.
 fn season_two() -> String {
     let mut body: Value = serde_json::from_str(&fixture("list_catalog_item_episodes_ok.json")).unwrap();
@@ -80,6 +91,19 @@ fn the_start_request_matches_the_snapshot() {
     body["client_playback_context"]["app_version"] = json!("<version>");
     let snapshot: Value = serde_json::from_str(&fixture("../../snapshots/start_request.json")).unwrap();
     assert_eq!(body, snapshot, "the start request changed:\n{}", serde_json::to_string_pretty(&body).unwrap());
+}
+
+#[test]
+fn the_start_request_asks_for_the_chosen_version_and_keeps_it() {
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_version("movie:two-files", Some("121"), None)).unwrap();
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!((&body["file_id"], &body["allow_alternate_versions"]), (&json!("121"), &json!(false)));
+    // With no choice, the first version plays and the server can pick another one.
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_version("movie:two-files", None, None)).unwrap();
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!((&body["file_id"], body.get("allow_alternate_versions")), (&json!("120"), None));
 }
 
 #[test]
@@ -209,6 +233,8 @@ fn a_replan_sends_the_failed_plan_and_the_last_good_position() {
         attempted_plan_keys: vec!["v3:f0144c47fa349e3e".into()],
         selected_tracks: json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
         position: 3600.0,
+        operation: Operation::FailureRecovery,
+        quality: "original".into(),
     };
     let Decision::Playable { plan, .. } = block_on(client.replan(&replan)).unwrap() else {
         panic!("not playable");
@@ -229,6 +255,31 @@ fn a_replan_sends_the_failed_plan_and_the_last_good_position() {
     let start = body_of(&seen, "POST", "playback/start");
     assert_eq!(body["client_capabilities"], start["client_capabilities"]);
     assert_eq!(body["client_features"], start["client_features"]);
+}
+
+#[test]
+fn a_quality_step_replans_with_its_label_and_no_failure() {
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    let replan = Replan {
+        session_id: SESSION.into(),
+        attempt_id: "attempt".into(),
+        failed_plan_id: "plan:478677870860e5e5108c18bff749b34b".into(),
+        plan_attempt_key: "v3:f0144c47fa349e3e".into(),
+        attempted_plan_keys: vec![],
+        selected_tracks: json!({}),
+        position: 1800.0,
+        operation: Operation::QualityChange,
+        quality: "1080p-medium".into(),
+    };
+    block_on(client.replan(&replan)).unwrap();
+    let body = body_of(&seen, "POST", "/replan");
+    assert_eq!(body["operation"], json!("quality_change"));
+    assert_eq!(body["quality_preference"], json!("1080p-medium"));
+    assert_eq!(body["position_seconds"], json!(1800.0));
+    assert_eq!((&body["attempted_plan_keys"], &body["attempt_count"]), (&json!([]), &json!(1)));
+    assert!(body.get("failure").is_none(), "nothing failed");
+    assert_eq!(body_of(&seen, "POST", "playback/start")["quality_preference"], json!("original"));
 }
 
 #[test]

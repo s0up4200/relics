@@ -19,7 +19,7 @@ use types::Marker;
 pub use types::{Decision, Problem};
 
 use crate::artwork::Rung;
-use crate::playback::{Access, Replan, Sample};
+use crate::playback::{Access, Operation, Replan, Sample};
 use crate::settings::{self, ServerSettings};
 
 /// A Silo server that the user added. The app knows it by `id`, the stable id that
@@ -225,11 +225,21 @@ pub struct Client {
     /// The `client_features` of the last start request. A replan sends the same list.
     features: Mutex<Vec<&'static str>>,
     on_trouble: Mutex<Box<dyn Fn(Trouble) + Send + Sync>>,
-    /// The Item of each Playback session that this client started: its content id and duration in seconds.
+    /// The Item of each Playback session that this client started.
     // ponytail: never pruned; one small entry for each Item played in this run.
-    sessions: Mutex<HashMap<String, (String, i64)>>,
+    sessions: Mutex<HashMap<String, SessionItem>>,
     /// The last position of each Item whose report failed, keyed by Profile id and content id.
     pending: Mutex<HashMap<(String, String), Pending>>,
+}
+
+/// The Item of a Playback session.
+#[derive(Clone)]
+struct SessionItem {
+    content_id: String,
+    /// Seconds.
+    duration: i64,
+    /// The file from the Version picker. A new start after an ended session asks for it again.
+    file_id: Option<String>,
 }
 
 /// A position that the server did not get. `sync_progress` sends it.
@@ -494,14 +504,20 @@ impl Client {
         Ok(self.media_access())
     }
 
-    /// Asks the server for a new plan after the plan in `replan` failed (operation `failure_recovery`).
+    /// Asks the server for a new plan in the same Playback session: after the plan in `replan` failed, or for
+    /// another step of the Quality ladder, at the position of `replan`.
     pub async fn replan(&self, replan: &Replan) -> Result<Decision, Error> {
         let installation_id = self.installation_id.lock().unwrap().clone();
         let mut body = client_description(&self.features.lock().unwrap());
         let keys = &replan.attempted_plan_keys;
+        let operation = match replan.operation {
+            Operation::FailureRecovery => "failure_recovery",
+            Operation::QualityChange => "quality_change",
+        };
         // The server takes at most 16 keys and a count of at most 8.
-        let fields = serde_json::json!({
-            "operation": "failure_recovery",
+        let mut fields = serde_json::json!({
+            "operation": operation,
+            "quality_preference": replan.quality,
             "installation_id": installation_id,
             "playback_attempt_id": replan.attempt_id,
             "replan_request_id": uuid::Uuid::new_v4().to_string(),
@@ -512,8 +528,10 @@ impl Client {
             "attempt_count": keys.len().clamp(1, 8),
             "position_seconds": replan.position.max(0.0),
             "selected_tracks": replan.selected_tracks,
-            "failure": { "classification": "network_degraded" },
         });
+        if replan.operation == Operation::FailureRecovery {
+            fields["failure"] = serde_json::json!({ "classification": "network_degraded" });
+        }
         body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         let path = format!("playback/{}/replan", replan.session_id);
         let decision: wire::PlaybackDecision = match self.call(Method::POST, &path, Some(body)).await {
@@ -522,11 +540,11 @@ impl Client {
             Err(Error::Problem(problem))
                 if matches!(problem.code(), "playback_session_ended" | "playback_session_not_found") =>
             {
-                let content_id = self.sessions.lock().unwrap().get(&replan.session_id).map(|(id, _)| id.clone());
-                let Some(content_id) = content_id else {
+                let item = self.sessions.lock().unwrap().get(&replan.session_id).cloned();
+                let Some(item) = item else {
                     return Err(Error::Problem(problem));
                 };
-                return self.start_playback(&content_id, Some(replan.position.max(0.0))).await;
+                return self.start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0))).await;
             }
             result => result?,
         };
@@ -551,9 +569,28 @@ impl Client {
     /// Starts a Playback session for the Item `content_id`. With no `start_position`, the
     /// server starts at the saved resume point of the Profile.
     pub async fn start_playback(&self, content_id: &str, start_position: Option<f64>) -> Result<Decision, Error> {
+        self.start_version(content_id, None, start_position).await
+    }
+
+    /// The file versions of the Item `content_id`. The first one is the default.
+    pub async fn versions(&self, content_id: &str) -> Result<Vec<wire::FileVersion>, Error> {
         let versions: wire::FileVersionCollection =
             self.call(Method::GET, &format!("catalog/items/{content_id}/versions"), None).await?;
-        let Some(version) = versions.items.first() else {
+        Ok(versions.items)
+    }
+
+    /// Starts a Playback session like `start_playback`, for the file version `file_id` from the Version picker.
+    /// The server then keeps that file, also for a quality change and a failure recovery. With no `file_id`, or
+    /// a file that the Item no longer has, the first version plays and the server can pick another one.
+    pub async fn start_version(
+        &self,
+        content_id: &str,
+        file_id: Option<&str>,
+        start_position: Option<f64>,
+    ) -> Result<Decision, Error> {
+        let versions = self.versions(content_id).await?;
+        let chosen = file_id.and_then(|id| versions.iter().find(|v| *v.file_id == *id));
+        let Some(version) = chosen.or(versions.first()) else {
             return Ok(Decision::Unavailable {
                 reason: "no_file".into(),
                 message: "This Item has no file to play".into(),
@@ -573,10 +610,18 @@ impl Client {
         if let Some(position) = start_position {
             body["start_position"] = position.into();
         }
+        if chosen.is_some() {
+            body["allow_alternate_versions"] = false.into();
+        }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
         if let Decision::Playable { session_id, plan, audio_language, markers, attempt_id } = &mut decision {
-            self.sessions.lock().unwrap().insert(session_id.clone(), (content_id.to_string(), version.duration));
+            let item = SessionItem {
+                content_id: content_id.to_string(),
+                duration: version.duration,
+                file_id: chosen.map(|v| v.file_id.to_string()),
+            };
+            self.sessions.lock().unwrap().insert(session_id.clone(), item);
             self.absolute_urls(plan)?;
             *attempt_id = attempt;
             *audio_language = audio_language_of(version, plan);
@@ -700,7 +745,7 @@ impl Client {
         result: Result<wire::PlaybackMutation, Error>,
     ) -> Result<(), Error> {
         let item = self.sessions.lock().unwrap().get(session_id).cloned();
-        let (Some((content_id, duration)), Some(sample)) = (item, sample) else {
+        let (Some(SessionItem { content_id, duration, .. }), Some(sample)) = (item, sample) else {
             return result.map(drop);
         };
         let key = (self.auth.lock().unwrap().profile_id.clone().unwrap_or_default(), content_id);
@@ -895,10 +940,12 @@ impl Client {
         self.call(Method::POST, &format!("catalog/query?image_size={image_size}"), Some(body)).await
     }
 
-    /// The genres of the Items in a Library, for the filter menu.
-    pub async fn genres(&self, library_id: &str) -> Result<Vec<String>, Error> {
-        let path = format!("catalog/filters?library_id={library_id}&skip_technical=true");
-        Ok(self.call::<wire::CatalogFilters>(Method::GET, &path, None).await?.genres)
+    /// The filter values (genres, languages, studios, networks, countries) of the Items in a Library, or in the
+    /// whole catalog when `library_id` is `None`, for the filter panel.
+    pub async fn filters(&self, library_id: Option<&str>) -> Result<wire::CatalogFilters, Error> {
+        let pairs: Vec<_> =
+            library_id.map(|id| ("library_id", id)).into_iter().chain([("skip_technical", "true")]).collect();
+        self.call(Method::GET, &with_query("catalog/filters", &pairs), None).await
     }
 
     // Detail page (#30).
@@ -908,9 +955,9 @@ impl Client {
         self.call(Method::GET, &format!("catalog/items/{id}?image_size={image_size}"), None).await
     }
 
-    /// The seasons of a series, in the server order, without artwork.
-    pub async fn seasons(&self, series_id: &str) -> Result<Vec<wire::Season>, Error> {
-        let path = format!("catalog/series/{series_id}/seasons?include_artwork=false");
+    /// The seasons of a series, in the server order, with the poster of each season.
+    pub async fn seasons(&self, series_id: &str, image_size: Rung) -> Result<Vec<wire::Season>, Error> {
+        let path = format!("catalog/series/{series_id}/seasons?image_size={image_size}");
         Ok(self.call::<wire::SeasonCollection>(Method::GET, &path, None).await?.items)
     }
 
@@ -924,11 +971,164 @@ impl Client {
 
     /// The first 20 people with movie or series credits whose name matches `text`.
     pub async fn people(&self, text: &str) -> Result<Vec<wire::Person>, Error> {
-        let mut url = Url::parse("query:").map_err(|_| Error::InvalidUrl)?;
-        url.query_pairs_mut().append_pair("q", text).append_pair("limit", "20").append_pair("media_scope", "video");
-        let path = format!("catalog/people?{}", url.query().unwrap_or_default());
+        let path = with_query("catalog/people", &[("q", text), ("limit", "20"), ("media_scope", "video")]);
         Ok(self.call::<wire::PersonCollection>(Method::GET, &path, None).await?.items)
     }
+
+    // Spec #40. Each later ticket builds on these calls.
+
+    /// One person, for the Person page. The titles of the person come from `query_catalog` with `person_id`.
+    pub async fn person(&self, id: &str) -> Result<wire::Person, Error> {
+        self.call(Method::GET, &format!("catalog/people/{id}"), None).await
+    }
+
+    /// Adds the Item to the favorites of the Profile, or removes it.
+    pub async fn set_favorite(&self, item_id: &str, on: bool) -> Result<(), Error> {
+        let method = if on { Method::PUT } else { Method::DELETE };
+        self.call(method, &format!("favorites/{item_id}"), None).await
+    }
+
+    /// Gives the Item 1 to 5 stars, or clears the rating with `None`.
+    pub async fn set_rating(&self, item_id: &str, stars: Option<u8>) -> Result<(), Error> {
+        let path = format!("ratings/{item_id}");
+        match stars {
+            Some(stars) => self.call(Method::PUT, &path, Some(serde_json::json!({ "rating": stars }))).await,
+            None => self.call(Method::DELETE, &path, None).await,
+        }
+    }
+
+    /// Marks an Item, a season or a series as watched, or as unwatched.
+    pub async fn set_watched(&self, id: &str, on: bool) -> Result<(), Error> {
+        let method = if on { Method::POST } else { Method::DELETE };
+        self.call(method, &format!("watched/{id}"), None).await
+    }
+
+    /// The Items that are like `item_id`, for the More Like This row.
+    pub async fn similar(&self, item_id: &str) -> Result<Vec<wire::CatalogItem>, Error> {
+        let path = format!("recommendations/similar/{item_id}");
+        Ok(self.call::<wire::CatalogItemCollection>(Method::GET, &path, None).await?.items)
+    }
+
+    /// The personal collections of the Profile.
+    pub async fn collections(&self) -> Result<Vec<wire::PersonalCollection>, Error> {
+        Ok(self.call::<wire::PersonalCollectionCollection>(Method::GET, "collections", None).await?.items)
+    }
+
+    /// One page of the Items of a personal collection. `cursor` is the cursor of the previous page.
+    pub async fn collection_items(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::CollectionPersonalCollectionItem, Error> {
+        let path = with_query(&format!("collections/{id}/items"), &cursor_pair(cursor));
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// The server collections, grouped by Library.
+    pub async fn server_collections(&self) -> Result<Vec<wire::ServerCollectionLibrary>, Error> {
+        Ok(self.call::<wire::ServerCollectionsOutputBody>(Method::GET, "collections/server", None).await?.libraries)
+    }
+
+    /// The Collections tab of a Library.
+    pub async fn library_collections(&self, library_id: &str) -> Result<wire::LibraryCollectionTab, Error> {
+        self.call(Method::GET, &format!("library/{library_id}/collections"), None).await
+    }
+
+    /// One page of the Items of a collection of a Library. `cursor` is the cursor of the previous page.
+    pub async fn library_collection_items(
+        &self,
+        library_id: &str,
+        collection_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::CatalogItemCollection, Error> {
+        let path = with_query(&format!("library/{library_id}/collections/{collection_id}/items"), &cursor_pair(cursor));
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// Whether the Profile can shuffle, and which scope kinds the server takes.
+    pub async fn shuffle_capability(&self) -> Result<wire::ShuffleCapability, Error> {
+        self.call(Method::GET, "shuffles/capabilities", None).await
+    }
+
+    /// Starts a server shuffle. `kind` is `library`, `series`, `season`, `library_collection` or
+    /// `user_collection`, and `id` is the id of that scope.
+    pub async fn start_shuffle(&self, kind: &str, id: &str, image_size: Rung) -> Result<wire::Shuffle, Error> {
+        let body = serde_json::json!({ "scope": { "kind": kind, "id": id } });
+        self.call(Method::POST, &format!("shuffles?image_size={image_size}"), Some(body)).await
+    }
+
+    /// Moves the shuffle on after the Item `from_content_id` finished.
+    pub async fn advance_shuffle(
+        &self,
+        shuffle_id: &str,
+        from_content_id: &str,
+        image_size: Rung,
+    ) -> Result<wire::Shuffle, Error> {
+        let body = serde_json::json!({ "from_content_id": from_content_id });
+        self.call(Method::POST, &format!("shuffles/{shuffle_id}/advance?image_size={image_size}"), Some(body)).await
+    }
+
+    /// Replaces the next Item of the shuffle, `next_content_id`, with another one.
+    pub async fn skip_shuffle_item(
+        &self,
+        shuffle_id: &str,
+        next_content_id: &str,
+        image_size: Rung,
+    ) -> Result<wire::Shuffle, Error> {
+        let body = serde_json::json!({ "next_content_id": next_content_id });
+        self.call(Method::POST, &format!("shuffles/{shuffle_id}/skip?image_size={image_size}"), Some(body)).await
+    }
+
+    /// Whether requests are on for the Profile.
+    pub async fn request_status(&self) -> Result<wire::FeatureStatus, Error> {
+        self.call(Method::GET, "requests/status", None).await
+    }
+
+    /// One page of the titles that the user can request, for the search `text`. Pages start at 1.
+    pub async fn search_requests(&self, text: &str, page: u32) -> Result<wire::RequestMediaPage, Error> {
+        let path = with_query("requests/search", &[("q", text), ("page", &page.to_string())]);
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// Sends a request for a title that is not on the Server.
+    pub async fn create_request(&self, request: &wire::MediaRequestCreate) -> Result<wire::MediaRequest, Error> {
+        let body = serde_json::to_value(request).map_err(|err| Error::Decode(err.to_string()))?;
+        self.call(Method::POST, "requests", Some(body)).await
+    }
+
+    /// One page of the requests of the user. `cursor` is the cursor of the previous page.
+    pub async fn my_requests(&self, cursor: Option<&str>) -> Result<wire::MediaRequestCollection, Error> {
+        self.call(Method::GET, &with_query("requests/mine", &cursor_pair(cursor)), None).await
+    }
+
+    /// Cancels a request of the user.
+    pub async fn cancel_request(&self, id: &str) -> Result<wire::MediaRequest, Error> {
+        self.call(Method::POST, &format!("requests/{id}/cancel"), Some(serde_json::json!({}))).await
+    }
+
+    /// The seek thumbnails of the file `file_id` of the Item `content_id`, with absolute sheet URLs.
+    pub async fn trickplay(&self, content_id: &str, file_id: &str) -> Result<wire::WatchTrickplay, Error> {
+        let path = with_query(&format!("watch/{content_id}/trickplay"), &[("file_id", file_id)]);
+        let mut trickplay: wire::WatchTrickplay = self.call(Method::GET, &path, None).await?;
+        for sheet in &mut trickplay.sheets {
+            sheet.url = self.server.url.join(sheet.url.trim_start_matches('/')).map_err(|_| Error::InvalidUrl)?.into();
+        }
+        Ok(trickplay)
+    }
+}
+
+/// `path` with the query `pairs`, each one URL-encoded.
+fn with_query(path: &str, pairs: &[(&str, &str)]) -> String {
+    if pairs.is_empty() {
+        return path.to_string();
+    }
+    let mut url = Url::parse("query:").expect("a static URL");
+    url.query_pairs_mut().extend_pairs(pairs);
+    format!("{path}?{}", url.query().unwrap_or_default())
+}
+
+fn cursor_pair(cursor: Option<&str>) -> Vec<(&str, &str)> {
+    cursor.map(|cursor| ("cursor", cursor)).into_iter().collect()
 }
 
 /// The rows of a layout, in layout order, with the items of the matching section. A section that the
