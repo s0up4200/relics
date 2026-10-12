@@ -924,11 +924,164 @@ impl Client {
 
     /// The first 20 people with movie or series credits whose name matches `text`.
     pub async fn people(&self, text: &str) -> Result<Vec<wire::Person>, Error> {
-        let mut url = Url::parse("query:").map_err(|_| Error::InvalidUrl)?;
-        url.query_pairs_mut().append_pair("q", text).append_pair("limit", "20").append_pair("media_scope", "video");
-        let path = format!("catalog/people?{}", url.query().unwrap_or_default());
+        let path = with_query("catalog/people", &[("q", text), ("limit", "20"), ("media_scope", "video")]);
         Ok(self.call::<wire::PersonCollection>(Method::GET, &path, None).await?.items)
     }
+
+    // Spec #40. Each later ticket builds on these calls.
+
+    /// One person, for the Person page. The titles of the person come from `query_catalog` with `person_id`.
+    pub async fn person(&self, id: &str) -> Result<wire::Person, Error> {
+        self.call(Method::GET, &format!("catalog/people/{id}"), None).await
+    }
+
+    /// Adds the Item to the favorites of the Profile, or removes it.
+    pub async fn set_favorite(&self, item_id: &str, on: bool) -> Result<(), Error> {
+        let method = if on { Method::PUT } else { Method::DELETE };
+        self.call(method, &format!("favorites/{item_id}"), None).await
+    }
+
+    /// Gives the Item 1 to 5 stars, or clears the rating with `None`.
+    pub async fn set_rating(&self, item_id: &str, stars: Option<u8>) -> Result<(), Error> {
+        let path = format!("ratings/{item_id}");
+        match stars {
+            Some(stars) => self.call(Method::PUT, &path, Some(serde_json::json!({ "rating": stars }))).await,
+            None => self.call(Method::DELETE, &path, None).await,
+        }
+    }
+
+    /// Marks an Item, a season or a series as watched, or as unwatched.
+    pub async fn set_watched(&self, id: &str, on: bool) -> Result<(), Error> {
+        let method = if on { Method::POST } else { Method::DELETE };
+        self.call(method, &format!("watched/{id}"), None).await
+    }
+
+    /// The Items that are like `item_id`, for the More Like This row.
+    pub async fn similar(&self, item_id: &str) -> Result<Vec<wire::CatalogItem>, Error> {
+        let path = format!("recommendations/similar/{item_id}");
+        Ok(self.call::<wire::CatalogItemCollection>(Method::GET, &path, None).await?.items)
+    }
+
+    /// The personal collections of the Profile.
+    pub async fn collections(&self) -> Result<Vec<wire::PersonalCollection>, Error> {
+        Ok(self.call::<wire::PersonalCollectionCollection>(Method::GET, "collections", None).await?.items)
+    }
+
+    /// One page of the Items of a personal collection. `cursor` is the cursor of the previous page.
+    pub async fn collection_items(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::CollectionPersonalCollectionItem, Error> {
+        let path = with_query(&format!("collections/{id}/items"), &cursor_pair(cursor));
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// The server collections, grouped by Library.
+    pub async fn server_collections(&self) -> Result<Vec<wire::ServerCollectionLibrary>, Error> {
+        Ok(self.call::<wire::ServerCollectionsOutputBody>(Method::GET, "collections/server", None).await?.libraries)
+    }
+
+    /// The Collections tab of a Library.
+    pub async fn library_collections(&self, library_id: &str) -> Result<wire::LibraryCollectionTab, Error> {
+        self.call(Method::GET, &format!("library/{library_id}/collections"), None).await
+    }
+
+    /// One page of the Items of a collection of a Library. `cursor` is the cursor of the previous page.
+    pub async fn library_collection_items(
+        &self,
+        library_id: &str,
+        collection_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<wire::CatalogItemCollection, Error> {
+        let path = with_query(&format!("library/{library_id}/collections/{collection_id}/items"), &cursor_pair(cursor));
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// Whether the Profile can shuffle, and which scope kinds the server takes.
+    pub async fn shuffle_capability(&self) -> Result<wire::ShuffleCapability, Error> {
+        self.call(Method::GET, "shuffles/capabilities", None).await
+    }
+
+    /// Starts a server shuffle. `kind` is `library`, `series`, `season`, `library_collection` or
+    /// `user_collection`, and `id` is the id of that scope.
+    pub async fn start_shuffle(&self, kind: &str, id: &str, image_size: Rung) -> Result<wire::Shuffle, Error> {
+        let body = serde_json::json!({ "scope": { "kind": kind, "id": id } });
+        self.call(Method::POST, &format!("shuffles?image_size={image_size}"), Some(body)).await
+    }
+
+    /// Moves the shuffle on after the Item `from_content_id` finished.
+    pub async fn advance_shuffle(
+        &self,
+        shuffle_id: &str,
+        from_content_id: &str,
+        image_size: Rung,
+    ) -> Result<wire::Shuffle, Error> {
+        let body = serde_json::json!({ "from_content_id": from_content_id });
+        self.call(Method::POST, &format!("shuffles/{shuffle_id}/advance?image_size={image_size}"), Some(body)).await
+    }
+
+    /// Replaces the next Item of the shuffle, `next_content_id`, with another one.
+    pub async fn skip_shuffle_item(
+        &self,
+        shuffle_id: &str,
+        next_content_id: &str,
+        image_size: Rung,
+    ) -> Result<wire::Shuffle, Error> {
+        let body = serde_json::json!({ "next_content_id": next_content_id });
+        self.call(Method::POST, &format!("shuffles/{shuffle_id}/skip?image_size={image_size}"), Some(body)).await
+    }
+
+    /// Whether requests are on for the Profile.
+    pub async fn request_status(&self) -> Result<wire::FeatureStatus, Error> {
+        self.call(Method::GET, "requests/status", None).await
+    }
+
+    /// One page of the titles that the user can request, for the search `text`. Pages start at 1.
+    pub async fn search_requests(&self, text: &str, page: u32) -> Result<wire::RequestMediaPage, Error> {
+        let path = with_query("requests/search", &[("q", text), ("page", &page.to_string())]);
+        self.call(Method::GET, &path, None).await
+    }
+
+    /// Sends a request for a title that is not on the Server.
+    pub async fn create_request(&self, request: &wire::MediaRequestCreate) -> Result<wire::MediaRequest, Error> {
+        let body = serde_json::to_value(request).map_err(|err| Error::Decode(err.to_string()))?;
+        self.call(Method::POST, "requests", Some(body)).await
+    }
+
+    /// One page of the requests of the user. `cursor` is the cursor of the previous page.
+    pub async fn my_requests(&self, cursor: Option<&str>) -> Result<wire::MediaRequestCollection, Error> {
+        self.call(Method::GET, &with_query("requests/mine", &cursor_pair(cursor)), None).await
+    }
+
+    /// Cancels a request of the user.
+    pub async fn cancel_request(&self, id: &str) -> Result<wire::MediaRequest, Error> {
+        self.call(Method::POST, &format!("requests/{id}/cancel"), Some(serde_json::json!({}))).await
+    }
+
+    /// The seek thumbnails of the file `file_id` of the Item `content_id`, with absolute sheet URLs.
+    pub async fn trickplay(&self, content_id: &str, file_id: &str) -> Result<wire::WatchTrickplay, Error> {
+        let path = with_query(&format!("watch/{content_id}/trickplay"), &[("file_id", file_id)]);
+        let mut trickplay: wire::WatchTrickplay = self.call(Method::GET, &path, None).await?;
+        for sheet in &mut trickplay.sheets {
+            sheet.url = self.server.url.join(sheet.url.trim_start_matches('/')).map_err(|_| Error::InvalidUrl)?.into();
+        }
+        Ok(trickplay)
+    }
+}
+
+/// `path` with the query `pairs`, each one URL-encoded.
+fn with_query(path: &str, pairs: &[(&str, &str)]) -> String {
+    if pairs.is_empty() {
+        return path.to_string();
+    }
+    let mut url = Url::parse("query:").expect("a static URL");
+    url.query_pairs_mut().extend_pairs(pairs);
+    format!("{path}?{}", url.query().unwrap_or_default())
+}
+
+fn cursor_pair(cursor: Option<&str>) -> Vec<(&str, &str)> {
+    cursor.map(|cursor| ("cursor", cursor)).into_iter().collect()
 }
 
 /// The rows of a layout, in layout order, with the items of the matching section. A section that the

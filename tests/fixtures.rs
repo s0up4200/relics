@@ -31,7 +31,9 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
         AuthProviderCollection,
         CatalogBrowseCollection,
         CatalogFilters,
+        CatalogItemCollection,
         CatalogItemDetail,
+        CollectionPersonalCollectionItem,
         CollectionUserLibrary,
         DeviceLoginCancel,
         DeviceLoginCapability,
@@ -39,10 +41,15 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
         DeviceLoginStart,
         EffectiveSettingCollection,
         EpisodeCollection,
+        FeatureStatus,
         FileMarkers,
         FileVersionCollection,
+        LibraryCollectionTab,
+        MediaRequest,
+        MediaRequestCollection,
         Person,
         PersonCollection,
+        PersonalCollectionCollection,
         PlaybackCapabilities,
         PlaybackDecision,
         PlaybackMutation,
@@ -58,6 +65,7 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
         SettingValue,
         SystemInfo,
         TokenPair,
+        WatchTrickplay,
     )
 }
 
