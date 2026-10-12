@@ -17,6 +17,7 @@ use mpris_server::PlaybackStatus;
 use crate::api::types::Marker;
 use crate::api::{Client, wire};
 use crate::mpris::{self, Track};
+use crate::playback::tracks::{self, Carry};
 use crate::playback::{Command, Input, Session};
 use crate::settings::LocalSettings;
 use crate::video::Surface;
@@ -145,6 +146,8 @@ pub struct PlayerWindow {
     prompt: String,
     /// The Markers of the file in player time, for the seek bar of the Player view.
     markers: Vec<Marker>,
+    /// The series of the episode that plays. The Track picker choice carries to the next Item of the same series.
+    series: Option<String>,
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
@@ -185,6 +188,7 @@ impl PlayerWindow {
             position: None,
             prompt: String::new(),
             markers: Vec::new(),
+            series: None,
         }
     }
 
@@ -195,7 +199,13 @@ impl PlayerWindow {
         self.generation += 1;
         self.in_view = self.video.is_some();
         (self.position, self.prompt, self.markers) = (None, String::new(), Vec::new());
-        self.session = Some(Session::new(item.runtime, client.server_settings()));
+        let series = item.season.as_ref().map(|(id, _)| id.clone());
+        let carry = match &self.session {
+            Some(session) if series.is_some() && series == self.series => session.carry(),
+            _ => Carry::default(),
+        };
+        self.series = series;
+        self.session = Some(Session::new(item.runtime, client.server_settings()).with_carry(carry));
         self.client = Some(client.clone());
         // A new Item drops these tasks, so an older answer never reaches the new session.
         self.next = None;
@@ -248,6 +258,7 @@ impl PlayerWindow {
             };
             let (next, previous) = (episode(next), episode(previous));
             this.update(cx, |this, cx| {
+                this.series = Some(series_id);
                 if let Some(next) = next {
                     this.next = Some(next);
                     this.step(Input::NextEpisode, cx);
@@ -457,7 +468,12 @@ impl PlayerWindow {
             }
             Command::SelectSubtitle(sid) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.select_subtitle(sid)) {
-                    eprintln!("silo-omarchy: cannot show subtitle track {sid}: {err}");
+                    eprintln!("silo-omarchy: cannot show subtitle track {sid:?}: {err}");
+                }
+            }
+            Command::SelectAudio(aid) => {
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.select_audio(aid)) {
+                    eprintln!("silo-omarchy: cannot play audio track {aid}: {err}");
                 }
             }
             Command::ShowMarkers(markers) => {
@@ -557,6 +573,11 @@ impl PlayerWindow {
     /// The Markers of the file, in player time.
     pub fn markers(&self) -> &[Marker] {
         &self.markers
+    }
+
+    /// The tracks of the file, for the Track picker.
+    pub fn tracks(&self) -> &[tracks::Track] {
+        self.session.as_ref().map_or(&[], Session::tracks)
     }
 
     /// The volume in percent, and whether the audio is muted.

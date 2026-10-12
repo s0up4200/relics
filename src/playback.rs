@@ -10,6 +10,9 @@ use crate::api::wire;
 use crate::settings::{IntroSkipMode, ServerSettings};
 
 pub mod subtitles;
+pub mod tracks;
+
+use tracks::{Carry, Choice, Kind, Track};
 
 /// The time between two progress reports while the file is open, playing or paused.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -112,6 +115,13 @@ pub enum Input {
     Next,
     /// MPRIS Previous.
     Previous,
+    /// mpv reports the tracks of the file.
+    Tracks(Vec<Track>),
+    /// The user picked a track of `kind` in the Track picker. `None` turns the subtitles off.
+    PickTrack {
+        kind: Kind,
+        id: Option<i64>,
+    },
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -139,8 +149,10 @@ pub enum Command {
     SendTheme,
     /// Add the subtitle file at `url` to mpv and show it.
     AddSubtitle { url: String, title: String, language: String },
-    /// Show the subtitle track of the file with this mpv track id.
-    SelectSubtitle(i64),
+    /// Show the subtitle track with this mpv track id. `None` hides the subtitles.
+    SelectSubtitle(Option<i64>),
+    /// Play the audio track with this mpv track id.
+    SelectAudio(i64),
     /// Draw these Markers, in player time, on the seek bar.
     ShowMarkers(Vec<Marker>),
     /// Show the Skip prompt with this label. An empty label hides it.
@@ -217,6 +229,12 @@ pub struct Session {
     audio_language: Option<String>,
     /// The keys of the plans that failed.
     failed_keys: Vec<String>,
+    /// The tracks of the file, as mpv last reported them.
+    tracks: Vec<Track>,
+    /// The track choice of the Track picker, in this session or carried from the last episode.
+    carry: Carry,
+    /// The part of `carry` that mpv has not played yet in the file that loads.
+    pending: Carry,
 }
 
 /// The Skip prompt that shows now.
@@ -279,7 +297,26 @@ impl Session {
             load_start: 0.0,
             audio_language: None,
             failed_keys: Vec::new(),
+            tracks: Vec::new(),
+            carry: Carry::default(),
+            pending: Carry::default(),
         }
+    }
+
+    /// Starts the session with the track choice of the last episode of the same series.
+    pub fn with_carry(mut self, carry: Carry) -> Self {
+        self.carry = carry;
+        self
+    }
+
+    /// The track choice to carry to the next episode.
+    pub fn carry(&self) -> Carry {
+        self.carry.clone()
+    }
+
+    /// The tracks of the file, for the Track picker.
+    pub fn tracks(&self) -> &[Track] {
+        &self.tracks
     }
 
     pub fn step(&mut self, input: Input, now: SystemTime) -> Vec<Command> {
@@ -348,8 +385,12 @@ impl Session {
             Input::FileLoaded => {
                 self.loaded = true;
                 self.last_report = Some(now);
-                let subtitle = self.plan.as_ref().and_then(|plan| plan.subtitle.clone());
-                [Some(self.show_markers()), subtitle].into_iter().flatten().collect()
+                // The user turned the subtitles off in the Track picker.
+                let off = self.carry.subtitle == Some(Choice::Off);
+                let subtitle = self.plan.as_ref().and_then(|plan| plan.subtitle.clone()).filter(|_| !off);
+                let mut commands: Vec<Command> = [Some(self.show_markers()), subtitle].into_iter().flatten().collect();
+                commands.extend(self.play_carry());
+                commands
             }
             Input::Position(position) if self.loaded => {
                 self.position = Some(position);
@@ -435,6 +476,34 @@ impl Session {
                     self.recover()
                 }
             }
+            Input::Tracks(tracks) => {
+                self.tracks = tracks;
+                if self.loaded { self.play_carry() } else { Vec::new() }
+            }
+            Input::PickTrack { kind, id } => {
+                let track = id.and_then(|id| self.tracks.iter().find(|track| track.kind == kind && track.id == id));
+                let picked = if id.is_none() { Some(Choice::Off) } else { track.map(Choice::of) };
+                // A reload of the file shows the picked track of the file, not the sidecar of the start. A picked
+                // external track is that sidecar.
+                if let (Kind::Sub, Some(track), Some(plan)) = (kind, track, &mut self.plan)
+                    && !track.external
+                {
+                    plan.subtitle = Some(Command::SelectSubtitle(Some(track.id)));
+                }
+                let (choice, pending) = match kind {
+                    Kind::Audio => (&mut self.carry.audio, &mut self.pending.audio),
+                    Kind::Sub => (&mut self.carry.subtitle, &mut self.pending.subtitle),
+                    Kind::Other => return Vec::new(),
+                };
+                *pending = None;
+                if picked.is_some() {
+                    *choice = picked;
+                }
+                match kind {
+                    Kind::Audio => id.map(Command::SelectAudio).into_iter().collect(),
+                    _ => vec![Command::SelectSubtitle(id)],
+                }
+            }
             Input::LoadFailed => self.recover(),
             Input::Shutdown => self.finish(self.source_position(), true),
             Input::End => self.finish(self.source_position(), false),
@@ -465,7 +534,11 @@ impl Session {
     /// Makes `plan` the plan of the session. `markers` are in source time.
     fn adopt(&mut self, session_id: String, attempt_id: String, plan: &wire::PlaybackPlan, markers: Vec<Marker>) {
         let tracks = &plan.subtitle.inventory;
-        let chosen = subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
+        let default = || subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
+        let chosen = match &self.carry.subtitle {
+            Some(choice @ Choice::Track { .. }) => subtitles::carried(tracks, choice).or_else(default),
+            _ => default(),
+        };
         // Direct play streams the file itself, with each of its tracks. mpv counts the tracks of a kind from 1.
         let direct = Delivery::from(plan.delivery.clone()) == Delivery::OriginalHttp;
         let aid = plan.selected_tracks.audio.as_ref().and_then(|audio| audio.index).filter(|_| direct).map(|i| i + 1);
@@ -475,7 +548,7 @@ impl Session {
                 // tracks in the order of the file.
                 let before =
                     tracks.iter().filter(|t| t.source == "embedded" && t.combined_index < track.combined_index).count();
-                return Some(Command::SelectSubtitle(before as i64 + 1));
+                return Some(Command::SelectSubtitle(Some(before as i64 + 1)));
             }
             // ponytail: a track without a URL needs a burn-in replan (operation track_change), so it shows no
             // subtitles.
@@ -523,6 +596,9 @@ impl Session {
         self.load_start = start;
         self.mpv_expires = access.expires;
         self.renewed = false;
+        // mpv resets the tracks on each load, so the Track picker choice must play again in the new file.
+        self.pending = self.carry.clone();
+        self.tracks.clear();
         vec![Command::Load { url: plan.url.clone(), headers: access.headers.clone(), start, aid: plan.aid }]
     }
 
@@ -565,6 +641,27 @@ impl Session {
             Chain::Replanned => self.lose(),
             Chain::Refreshing | Chain::Replanning | Chain::Lost => Vec::new(),
         }
+    }
+
+    /// Plays the tracks of the Track picker choice that the loaded file has and that do not play yet. Each kind
+    /// plays once per load, so that a later pick of the user stays.
+    fn play_carry(&mut self) -> Vec<Command> {
+        let mut commands = Vec::new();
+        for kind in [Kind::Audio, Kind::Sub] {
+            let pending = if kind == Kind::Audio { &mut self.pending.audio } else { &mut self.pending.subtitle };
+            let Some(choice) = pending else { continue };
+            let found = self.tracks.iter().find(|t| t.kind == kind && choice.matches(t.lang.as_deref(), t.forced));
+            let Some(track) = found else { continue };
+            if !track.selected {
+                commands.push(if kind == Kind::Audio {
+                    Command::SelectAudio(track.id)
+                } else {
+                    Command::SelectSubtitle(Some(track.id))
+                });
+            }
+            *pending = None;
+        }
+        commands
     }
 
     fn lose(&mut self) -> Vec<Command> {

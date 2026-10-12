@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use silo_omarchy::api::types::{Marker, MarkerKind};
 use silo_omarchy::mpv::{Player, find_controls};
 use silo_omarchy::playback::Input;
+use silo_omarchy::playback::tracks::Kind;
 
 /// One request that the stub got: the path, the `Authorization` header and the device name header.
 #[derive(Debug, Clone)]
@@ -365,7 +366,45 @@ fn direct_play_plays_the_chosen_audio_track_and_shows_an_embedded_subtitle_track
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
     wait_for_property(&player, "current-tracks/audio/lang", "jpn");
     assert_eq!(player.property("sid").unwrap(), "no");
-    player.select_subtitle(1).unwrap();
+    player.select_subtitle(Some(1)).unwrap();
     wait_for_property(&player, "current-tracks/sub/lang", "eng");
     assert_eq!(player.property("track-list/count").unwrap(), "4", "no second copy of the subtitle track");
+}
+
+/// The (id, language, selected) of each track of `kind`.
+fn tracks_of(input: &Input, kind: Kind) -> Vec<(i64, String, bool)> {
+    let Input::Tracks(tracks) = input else { return vec![] };
+    let of_kind = tracks.iter().filter(|track| track.kind == kind);
+    of_kind.map(|track| (track.id, track.lang.clone().unwrap_or_default(), track.selected)).collect()
+}
+
+#[test]
+fn mpv_reports_the_track_list_and_a_pick_by_id_selects_the_audio_and_subtitle_track() {
+    let stub = stub(usize::MAX);
+    let (player, rx) = open();
+    player.load(&format!("{}/tracks.mkv", stub.url), &headers(), 0.0, None).unwrap();
+    let audio = |eng, jpn| vec![(1, "eng".to_string(), eng), (2, "jpn".to_string(), jpn)];
+    let first = wait_for(&rx, |input| tracks_of(input, Kind::Audio) == audio(true, false));
+    let Input::Tracks(tracks) = first else { unreachable!() };
+    let sub = tracks.iter().find(|track| track.kind == Kind::Sub).expect("the embedded subtitle track");
+    assert_eq!(
+        (sub.id, sub.lang.as_deref(), sub.codec.as_deref(), sub.external),
+        (1, Some("eng"), Some("subrip"), false)
+    );
+    let eng = tracks.iter().find(|track| track.kind == Kind::Audio).unwrap();
+    assert_eq!((eng.codec.as_deref(), eng.channels), (Some("aac"), Some(1)));
+
+    player.select_audio(2).unwrap();
+    wait_for(&rx, |input| tracks_of(input, Kind::Audio) == audio(false, true));
+    player.select_subtitle(Some(1)).unwrap();
+    wait_for(&rx, |input| tracks_of(input, Kind::Sub) == [(1, "eng".to_string(), true)]);
+    player.select_subtitle(None).unwrap();
+    wait_for(&rx, |input| tracks_of(input, Kind::Sub) == [(1, "eng".to_string(), false)]);
+
+    player.add_subtitle(&format!("{}/sample.vtt", stub.url), "English", "eng").unwrap();
+    let added = wait_for(&rx, |input| tracks_of(input, Kind::Sub).len() == 2);
+    let Input::Tracks(tracks) = added else { unreachable!() };
+    let external = tracks.iter().find(|track| track.kind == Kind::Sub && track.id == 2).unwrap();
+    assert!(external.external && external.selected, "{external:?}");
+    assert_eq!(external.title.as_deref(), Some("English"));
 }

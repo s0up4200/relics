@@ -13,7 +13,7 @@ use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamA
 use libmpv2::{Format, Mpv, mpv_end_file_reason};
 
 use crate::api::types::Marker;
-use crate::playback::Input;
+use crate::playback::{Input, tracks};
 
 pub use libmpv2::Error;
 
@@ -67,6 +67,8 @@ impl Player {
         mpv.observe_property("duration", Format::Double, 0)?;
         mpv.observe_property("pause", Format::Flag, 0)?;
         mpv.observe_property("eof-reached", Format::Flag, 0)?;
+        // As a string: observing `track-list` as a node panics the event thread in libmpv2.
+        mpv.observe_property("track-list", Format::String, 0)?;
         let mpv = Arc::new(mpv);
         let events = std::thread::spawn({
             let mpv = mpv.clone();
@@ -100,9 +102,17 @@ impl Player {
         self.mpv.command("async", &["sub-add", url, "select", title, language])
     }
 
-    /// Shows the subtitle track `sid` of the file that plays.
-    pub fn select_subtitle(&self, sid: i64) -> Result<(), Error> {
-        self.mpv.set_property("sid", sid)
+    /// Shows the subtitle track `sid` of the file that plays. `None` hides the subtitles.
+    pub fn select_subtitle(&self, sid: Option<i64>) -> Result<(), Error> {
+        match sid {
+            Some(sid) => self.mpv.set_property("sid", sid),
+            None => self.mpv.set_property("sid", "no"),
+        }
+    }
+
+    /// Plays the audio track `aid` of the file that plays.
+    pub fn select_audio(&self, aid: i64) -> Result<(), Error> {
+        self.mpv.set_property("aid", aid)
     }
 
     /// Sends the theme colors, as `#RRGGBB`, to the Lua controller.
@@ -243,6 +253,7 @@ fn read_events(mpv: &Mpv, on_input: impl Fn(Input)) {
                 ("duration", PropertyData::Double(duration)) => Input::Duration(duration),
                 ("pause", PropertyData::Flag(paused)) => Input::Paused(paused),
                 ("eof-reached", PropertyData::Flag(true)) => Input::EndOfFile,
+                ("track-list", PropertyData::Str(json)) => Input::Tracks(tracks::parse(json)),
                 _ => continue,
             },
             Some(Ok(Event::ClientMessage(message))) if message == ["silo-ready"] => Input::ControlsReady,

@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use silo_omarchy::api::types::{Decision, Marker, MarkerKind};
+use silo_omarchy::playback::tracks::{self, Choice, Kind, Track};
 use silo_omarchy::playback::{Access, Command, Headers, Input, Replan, Sample, Session};
 use silo_omarchy::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 
@@ -224,7 +225,7 @@ fn foreign_audio_shows_the_subtitles_of_the_profile_language_when_the_file_loads
 fn audio_in_the_profile_language_shows_only_the_forced_track() {
     let settings = ServerSettings { audio_language: Some("en".into()), ..ServerSettings::default() };
     // The track is in the file that mpv plays, so mpv shows it from there: the first embedded subtitle track.
-    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(1)]);
+    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(Some(1))]);
     let settings = ServerSettings { show_forced_subtitles: false, ..settings };
     assert_eq!(load_with(settings, "en"), vec![]);
 }
@@ -243,7 +244,7 @@ fn a_track_that_needs_a_burn_in_shows_from_the_file_in_direct_play_and_else_not_
         ..ServerSettings::default()
     };
     // French is the third embedded track of the fixture.
-    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(3)]);
+    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(Some(3))]);
     assert_eq!(load_with_delivery(settings, "en", "server_transcode_hls"), vec![]);
 }
 
@@ -647,4 +648,107 @@ fn mpris_previous_plays_the_previous_episode_only_when_it_exists() {
     assert!(session.can_go_previous());
     assert_eq!(session.step(Input::Previous, at(3)), vec![stop(400.0, 1), Command::PlayPrevious]);
     assert!(!session.can_go_previous(), "the session ended");
+}
+
+// The Track picker.
+
+/// The mpv track list of an episode: English audio (it plays) and Japanese audio, an English forced subtitle
+/// track and a Japanese one.
+/// `japanese_first` swaps the audio ids, as the next file can order its tracks in another way.
+fn track_list(japanese_first: bool) -> Vec<Track> {
+    let (eng, jpn) = if japanese_first { (2, 1) } else { (1, 2) };
+    tracks::parse(&format!(
+        r#"[{{"id":1,"type":"video","codec":"h264","selected":true}},
+        {{"id":{eng},"type":"audio","lang":"eng","codec":"aac","selected":true}},
+        {{"id":{jpn},"type":"audio","lang":"jpn","codec":"aac"}},
+        {{"id":1,"type":"sub","lang":"eng","forced":true,"codec":"ass"}},
+        {{"id":2,"type":"sub","lang":"jpn","codec":"subrip"}}]"#
+    ))
+}
+
+#[test]
+fn a_pick_in_the_track_picker_selects_the_track_in_mpv_and_off_hides_the_subtitles() {
+    let mut session = playing(None);
+    session.step(Input::Tracks(track_list(false)), at(1));
+    assert_eq!(session.step(Input::PickTrack { kind: Kind::Audio, id: Some(2) }, at(2)), vec![Command::SelectAudio(2)]);
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: Some(2) }, at(3)),
+        vec![Command::SelectSubtitle(Some(2))]
+    );
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(4)),
+        vec![Command::SelectSubtitle(None)]
+    );
+    assert_eq!(session.tracks(), &track_list(false)[..], "the picker lists what mpv reports");
+}
+
+/// The next episode after a session in which the user picked `picks`. The next plan is direct play with Japanese
+/// audio. Returns the next session after its file loaded, and the subtitle commands of the load.
+fn next_episode(picks: &[(Kind, Option<i64>)]) -> (Session, Vec<Command>) {
+    let mut first = playing(None);
+    first.step(Input::Tracks(track_list(false)), at(1));
+    for (kind, id) in picks {
+        first.step(Input::PickTrack { kind: *kind, id: *id }, at(2));
+    }
+    let mut next = Session::new(None, ServerSettings::default()).with_carry(first.carry());
+    let mut decision = decision(|_| {});
+    let Decision::Playable { audio_language, .. } = &mut decision else { unreachable!() };
+    *audio_language = Some("ja".into());
+    next.step(Input::Started { decision, access: access() }, at(10));
+    let commands = next.step(Input::FileLoaded, at(10)).into_iter();
+    let subtitles = commands.filter(|c| matches!(c, Command::AddSubtitle { .. } | Command::SelectSubtitle(_)));
+    (next, subtitles.collect())
+}
+
+#[test]
+fn the_audio_choice_carries_to_the_next_episode_by_language() {
+    let (mut next, _) = next_episode(&[(Kind::Audio, Some(2))]);
+    // In the next file, Japanese is track 1.
+    assert_eq!(next.step(Input::Tracks(track_list(true)), at(11)), vec![Command::SelectAudio(1)]);
+    assert_eq!(next.step(Input::Tracks(track_list(true)), at(12)), vec![], "the carry-over picks only once");
+    // The episode after it gets the same choice, also with no new pick.
+    assert_eq!(next.carry().audio, Some(Choice::Track { language: Some("jpn".into()), forced: false }));
+}
+
+#[test]
+fn an_audio_track_that_already_plays_is_not_selected_again() {
+    let (mut next, _) = next_episode(&[(Kind::Audio, Some(1))]);
+    assert_eq!(next.step(Input::Tracks(track_list(false)), at(11)), vec![]);
+}
+
+#[test]
+fn the_subtitle_choice_carries_to_the_next_episode_by_language_and_forced_state() {
+    // The forced English track matches the forced English track of the next plan, its first embedded track.
+    let (_, subtitles) = next_episode(&[(Kind::Sub, Some(1))]);
+    assert_eq!(subtitles, vec![Command::SelectSubtitle(Some(1))]);
+    // Japanese is the second embedded track of the next plan.
+    let (_, subtitles) = next_episode(&[(Kind::Sub, Some(2))]);
+    assert_eq!(subtitles, vec![Command::SelectSubtitle(Some(2))]);
+}
+
+#[test]
+fn subtitles_turned_off_stay_off_in_the_next_episode() {
+    // With Japanese audio, the default rule shows the English subtitles.
+    let (_, subtitles) = next_episode(&[]);
+    assert_eq!(subtitles.len(), 1, "{subtitles:?}");
+    let (_, subtitles) = next_episode(&[(Kind::Sub, None)]);
+    assert_eq!(subtitles, vec![]);
+}
+
+#[test]
+fn a_reload_keeps_the_picked_tracks() {
+    let mut session = playing(None);
+    session.step(Input::Tracks(track_list(false)), at(1));
+    session.step(Input::PickTrack { kind: Kind::Audio, id: Some(2) }, at(2));
+    session.step(Input::PickTrack { kind: Kind::Sub, id: Some(2) }, at(2));
+    session.step(Input::LoadFailed, at(3));
+    let reload = session.step(Input::Refreshed(Some(access())), at(4));
+    assert!(matches!(&reload[..], [Command::Load { .. }]), "{reload:?}");
+    let loaded = session.step(Input::FileLoaded, at(5));
+    assert_eq!(loaded, vec![Command::ShowMarkers(vec![]), Command::SelectSubtitle(Some(2))], "no sidecar of the start");
+    // mpv reports the tracks of the reloaded file, with the tracks of the start.
+    assert_eq!(
+        session.step(Input::Tracks(track_list(false)), at(6)),
+        vec![Command::SelectAudio(2), Command::SelectSubtitle(Some(2))]
+    );
 }

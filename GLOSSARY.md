@@ -113,6 +113,10 @@ The button that the Player view shows over the video while playback is inside a 
 The app state when the active Server does not answer, or answers 503. The app keeps its tokens and retries. It never signs the user out.
 _Avoid_: disconnected, down
 
+**Track picker**:
+The list in the Player view where the user picks the audio track or the subtitle track.
+_Avoid_: track menu, cycle
+
 **Version picker**:
 The list on the detail page where the user picks which file version of an Item plays.
 _Avoid_: quality picker

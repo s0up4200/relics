@@ -10,7 +10,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
     StatefulInteractiveElement as _, Styled, Subscription, Task, Window, canvas, div, px, relative,
 };
 use gpui_omarchy::{ActiveTheme as _, IconName, icon};
@@ -18,6 +18,7 @@ use gpui_omarchy::{ActiveTheme as _, IconName, icon};
 use crate::click::Clickable as _;
 use crate::keys::Key;
 use crate::playback::Input;
+use crate::playback::tracks::{Kind, Track};
 use crate::player::PlayerWindow;
 use crate::video::Surface;
 
@@ -52,7 +53,45 @@ pub struct PlayerView {
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The view made the window fullscreen, so it leaves fullscreen when it closes.
     fullscreen: bool,
+    /// The picker that shows over the video.
+    picker: Option<Picker>,
     _player: Subscription,
+}
+
+/// The lists that the Player view shows over the video. A new list is one more variant, with its arms in `title`,
+/// `rows` and `pick`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum List {
+    /// The Track picker for the audio.
+    Audio,
+    /// The Track picker for the subtitles, with Off at the top.
+    Subtitles,
+}
+
+impl List {
+    fn title(self) -> &'static str {
+        match self {
+            List::Audio => "Audio",
+            List::Subtitles => "Subtitles",
+        }
+    }
+}
+
+/// An open list and its keyboard focus.
+struct Picker {
+    list: List,
+    focus: usize,
+    scroll: ScrollHandle,
+}
+
+/// One row of a picker.
+pub struct Row {
+    pub label: String,
+    /// The second line, for example the codec and the channels.
+    pub detail: String,
+    pub tags: Vec<&'static str>,
+    /// The row plays now.
+    pub current: bool,
 }
 
 impl PlayerView {
@@ -69,6 +108,7 @@ impl PlayerView {
             scrolled: 0.0,
             bar: Rc::default(),
             fullscreen: false,
+            picker: None,
             _player: observe,
         }
     }
@@ -129,16 +169,85 @@ impl PlayerView {
     /// Esc leaves fullscreen, then goes Back. A picker or a panel over the controls must close first: check it
     /// here, before fullscreen.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.is_fullscreen() {
+        if self.picker.take().is_some() {
+            cx.notify();
+        } else if window.is_fullscreen() {
             self.toggle_fullscreen(window);
         } else {
             self.back(cx);
         }
     }
 
+    /// The rows of `list` and the value that a pick of each one sends.
+    fn rows(&self, list: List, cx: &Context<Self>) -> Vec<(Option<i64>, Row)> {
+        let tracks = self.player.read(cx).tracks();
+        match list {
+            List::Audio => track_rows(tracks, Kind::Audio),
+            List::Subtitles => track_rows(tracks, Kind::Sub),
+        }
+    }
+
+    /// Picks row `index` of the open list, and closes it.
+    fn pick(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(list) = self.picker.take().map(|picker| picker.list) else {
+            return;
+        };
+        cx.notify();
+        let Some((id, _)) = self.rows(list, cx).into_iter().nth(index) else {
+            return;
+        };
+        match list {
+            List::Audio => self.step(Input::PickTrack { kind: Kind::Audio, id }, cx),
+            List::Subtitles => self.step(Input::PickTrack { kind: Kind::Sub, id }, cx),
+        }
+    }
+
+    /// Opens `list` with the focus on the row that plays now, or closes it when it shows.
+    fn toggle(&mut self, list: List, cx: &mut Context<Self>) {
+        if self.picker.as_ref().is_some_and(|picker| picker.list == list) {
+            self.picker = None;
+        } else {
+            let focus = self.rows(list, cx).iter().position(|(_, row)| row.current).unwrap_or(0);
+            let scroll = ScrollHandle::new();
+            scroll.scroll_to_item(focus);
+            self.picker = Some(Picker { list, focus, scroll });
+        }
+        cx.notify();
+    }
+
+    /// The keys of an open picker: Up, Down and Enter. Returns false for a key that the picker does not use.
+    fn picker_key(&mut self, key: &Key, cx: &mut Context<Self>) -> bool {
+        let Some(picker) = &self.picker else {
+            return false;
+        };
+        let (list, focus) = (picker.list, picker.focus);
+        let last = self.rows(list, cx).len().saturating_sub(1);
+        let focus = match key {
+            Key::Up => focus.saturating_sub(1),
+            Key::Down => (focus + 1).min(last),
+            Key::Other("enter") => {
+                self.pick(focus, cx);
+                return true;
+            }
+            _ => return false,
+        };
+        if let Some(picker) = &mut self.picker {
+            picker.focus = focus;
+            picker.scroll.scroll_to_item(focus);
+        }
+        cx.notify();
+        true
+    }
+
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.wake(cx);
-        match Key::parse(&event.keystroke.key) {
+        let key = Key::parse(&event.keystroke.key);
+        if self.picker_key(&key, cx) {
+            return cx.stop_propagation();
+        }
+        match key {
+            Key::Other("a") => self.toggle(List::Audio, cx),
+            Key::Other("s") => self.toggle(List::Subtitles, cx),
             Key::Other("space") => self.step(Input::PlayPause, cx),
             Key::Left => self.step(Input::SeekBy(-SEEK_STEP), cx),
             Key::Right => self.step(Input::SeekBy(SEEK_STEP), cx),
@@ -177,6 +286,10 @@ impl PlayerView {
     /// A click pauses or plays, after the double-click time. A double-click toggles fullscreen.
     fn click_video(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.wake(cx);
+        // A click next to an open picker only closes it.
+        if self.picker.take().is_some() {
+            return cx.notify();
+        }
         if event.click_count() >= 2 {
             self._click = None;
             return self.toggle_fullscreen(window);
@@ -284,6 +397,10 @@ impl PlayerView {
             .child(self.button("player-play", play, cx, |this, _, cx| this.step(Input::PlayPause, cx)))
             .child(div().text_color(t.secondary).child(time))
             .child(div().flex_1())
+            .child(self.button("player-audio", IconName::AudioLines, cx, |this, _, cx| this.toggle(List::Audio, cx)))
+            .child(
+                self.button("player-subtitles", IconName::Captions, cx, |this, _, cx| this.toggle(List::Subtitles, cx)),
+            )
             .child(self.button("player-mute", mute.0, cx, |this, _, cx| this.toggle_mute(cx)))
             .child(div().w(px(48.)).text_color(t.secondary).child(mute.1))
             .child(self.button("player-fullscreen", full, cx, |this, window, _| this.toggle_fullscreen(window)));
@@ -302,6 +419,70 @@ impl PlayerView {
             .child(seek)
             .child(row);
         [top.into_any_element(), bottom.into_any_element()]
+    }
+
+    /// The open picker over the video, above the bottom bar. A click on a row moves the focus to it and picks it,
+    /// as Enter does.
+    fn picker(&self, picker: &Picker, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let rows = self.rows(picker.list, cx).into_iter().enumerate().map(|(i, (_, row))| {
+            let tags = row.tags.into_iter().map(|tag| {
+                div().px(px(6.)).rounded(px(4.)).bg(t.inset).text_size(px(11.)).text_color(t.secondary).child(tag)
+            });
+            div()
+                .id(("picker-row", i))
+                .clickable()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .when(i == picker.focus, |row| row.bg(t.selection))
+                // The mark of the row that plays now.
+                .child(div().w(px(16.)).when(row.current, |mark| mark.child(icon(IconName::Check).size(px(16.)))))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div().flex().flex_wrap().gap(px(6.)).text_color(t.bright).child(row.label).children(tags),
+                        )
+                        .when(!row.detail.is_empty(), |text| {
+                            text.child(div().text_size(px(12.)).text_color(t.secondary).child(row.detail))
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.wake(cx);
+                    if let Some(picker) = &mut this.picker {
+                        picker.focus = i;
+                    }
+                    this.pick(i, cx);
+                }))
+        });
+        div()
+            .id("picker")
+            .absolute()
+            .right(px(16.))
+            .bottom(px(96.))
+            .w(px(360.))
+            .max_h(relative(0.6))
+            .flex()
+            .flex_col()
+            .p(px(8.))
+            .rounded(px(12.))
+            .bg(t.surface)
+            .child(div().px(px(12.)).py(px(6.)).text_color(t.secondary).child(picker.list.title()))
+            .child(
+                div()
+                    .id("picker-rows")
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&picker.scroll)
+                    .children(rows),
+            )
     }
 
     /// The Skip prompt over the video. A click does what Enter does.
@@ -351,7 +532,23 @@ impl Render for PlayerView {
             .child(div().id("video").absolute().size_full().on_click(cx.listener(Self::click_video)))
             .children(prompt.map(|label| self.prompt(label, cx)))
             .when(self.controls, |view| view.children(self.controls(window, cx)))
+            .children(self.picker.as_ref().map(|picker| self.picker(picker, cx)))
     }
+}
+
+/// The Track picker rows of the tracks of `kind`, with the mpv track id that a pick sends. The subtitle list
+/// starts with Off, whose pick sends `None`.
+pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Row)> {
+    let of_kind = || tracks.iter().filter(move |track| track.kind == kind);
+    let rows = of_kind().map(|track| {
+        let row = Row { label: track.label(), detail: track.detail(), tags: track.tags(), current: track.selected };
+        (Some(track.id), row)
+    });
+    let off = (kind == Kind::Sub).then(|| {
+        let current = !of_kind().any(|track| track.selected);
+        (None, Row { label: "Off".into(), detail: String::new(), tags: Vec::new(), current })
+    });
+    off.into_iter().chain(rows).collect()
 }
 
 /// A time as `1:02:03`, or `2:03` under one hour.
@@ -378,7 +575,24 @@ pub fn seek_target(x: f32, width: f32, duration: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{clock, marker_span, seek_target};
+    use super::{clock, marker_span, seek_target, track_rows};
+    use crate::playback::tracks::{Kind, parse};
+
+    #[test]
+    fn the_subtitle_list_starts_with_off_and_marks_the_track_that_plays() {
+        let tracks = parse(
+            r#"[{"id":1,"type":"audio","lang":"eng","selected":true},{"id":2,"type":"audio","lang":"jpn"},
+                {"id":1,"type":"sub","lang":"eng"},{"id":2,"type":"sub","lang":"jpn","selected":true}]"#,
+        );
+        let subtitles = track_rows(&tracks, Kind::Sub);
+        let ids: Vec<_> = subtitles.iter().map(|(id, row)| (*id, row.label.as_str(), row.current)).collect();
+        assert_eq!(ids, [(None, "Off", false), (Some(1), "eng", false), (Some(2), "jpn", true)]);
+        let audio = track_rows(&tracks, Kind::Audio);
+        let ids: Vec<_> = audio.iter().map(|(id, row)| (*id, row.current)).collect();
+        assert_eq!(ids, [(Some(1), true), (Some(2), false)], "no Off row for audio");
+        let off = track_rows(&parse(r#"[{"id":1,"type":"sub"}]"#), Kind::Sub);
+        assert!(off[0].1.current, "Off plays when no subtitle track does");
+    }
 
     #[test]
     fn the_time_shows_hours_only_from_one_hour() {

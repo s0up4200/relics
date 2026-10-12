@@ -11,7 +11,7 @@ use silo_omarchy::library::LibraryWindow;
 // The sidebar and Player view icons that the default gpui-kit bundle does not have.
 gpui_kit::assets::icon_assets!(
     SidebarIcons,
-    [House, Film, Tv, Layers, Bookmark, RotateCcwClock, Minimize, Volume2, VolumeX]
+    [House, Film, Tv, Layers, Bookmark, RotateCcwClock, Minimize, Volume2, VolumeX, AudioLines, Captions]
 );
 
 /// The default gpui-kit assets and the sidebar icons.
