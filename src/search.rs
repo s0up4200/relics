@@ -17,9 +17,9 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache};
-use crate::browse::{Browse, Choice, PAGE_SIZE, SortField};
+use crate::browse::{Browse, PAGE_SIZE, SortField};
 use crate::click::Clickable as _;
-use crate::filter_panel::{Facets, MenuKind, Outcome, Panel, bar_pill};
+use crate::filter_panel::{self, Chip, Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Open, Play};
 use crate::keys::Key;
@@ -153,8 +153,7 @@ enum Focus {
 enum Control {
     Sort,
     Filter,
-    Chip(Choice),
-    ClearAll,
+    Chip(Chip),
 }
 
 pub struct Search {
@@ -294,11 +293,7 @@ impl Search {
 
     fn controls(&self) -> Vec<Control> {
         let mut controls = vec![Control::Sort, Control::Filter];
-        let chips = self.browse.chips();
-        if !chips.is_empty() {
-            controls.extend(chips.into_iter().map(Control::Chip));
-            controls.push(Control::ClearAll);
-        }
+        controls.extend(Chip::all(&self.browse).into_iter().map(Control::Chip));
         controls
     }
 
@@ -321,34 +316,29 @@ impl Search {
             Control::Sort => self.menu = menu(MenuKind::Sort),
             Control::Filter => self.menu = menu(MenuKind::Filter),
             Control::Chip(chip) => {
-                self.browse.remove(&chip);
-                self.apply(cx);
-            }
-            Control::ClearAll => {
-                self.browse.clear();
+                chip.remove(&mut self.browse);
                 self.apply(cx);
             }
         }
         self.set_focus(Focus::Bar(index), cx);
     }
 
-    /// Closes the panel after a sort pick or Esc, and loads the titles again when the sort or a filter changed.
-    fn after_menu(&mut self, outcome: Outcome, before: Browse, cx: &mut Context<Self>) {
-        if outcome == Outcome::Closed {
-            self.menu = None;
-        }
-        if self.browse != before {
+    /// Gives a key or a click to the open panel, and loads the titles again when the sort or a filter changed.
+    fn step_menu(
+        &mut self,
+        act: impl FnOnce(&mut Panel, &mut Browse) -> Outcome,
+        cx: &mut Context<Self>,
+    ) -> Option<Outcome> {
+        let (outcome, changed) = filter_panel::step(&mut self.menu, &mut self.browse, act)?;
+        if changed {
             self.apply(cx);
         }
         self.set_focus(self.focus, cx);
+        Some(outcome)
     }
 
     fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
-        let before = self.browse.clone();
-        if let Some(menu) = &mut self.menu {
-            let outcome = menu.click(row, &mut self.browse);
-            self.after_menu(outcome, before, cx);
-        }
+        self.step_menu(|menu, browse| menu.click(row, browse), cx);
     }
 
     fn has_titles(&self, cx: &gpui::App) -> bool {
@@ -474,10 +464,7 @@ impl Search {
     /// Handles a key. `typed` is the text that the key types. Returns false when the page does not use the key,
     /// for example Esc in an empty field.
     pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(menu) = &mut self.menu {
-            let before = self.browse.clone();
-            let outcome = menu.key(key, typed, &mut self.browse);
-            self.after_menu(outcome, before, cx);
+        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, typed, browse), cx) {
             return outcome != Outcome::Unused;
         }
         let focus = match self.focus {
@@ -578,8 +565,7 @@ impl Search {
                     0 => ("Filters".into(), false),
                     count => (format!("Filters · {count}").into(), true),
                 },
-                Control::Chip(chip) => (format!("{} ×", chip.chip_label()).into(), false),
-                Control::ClearAll => ("Clear all".into(), false),
+                Control::Chip(chip) => (chip.label().into(), false),
             };
             let focused = self.active && self.focus == Focus::Bar(index);
             let pill = bar_pill(("search-bar", index), label, on, focused, cx.omarchy())
@@ -590,7 +576,7 @@ impl Search {
                 .into_any_element();
             match control {
                 Control::Sort | Control::Filter => pills.push(pill),
-                Control::Chip(_) | Control::ClearAll => chips.push(pill),
+                Control::Chip(_) => chips.push(pill),
             }
         }
         (pills, chips)

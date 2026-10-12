@@ -9,7 +9,7 @@ use serde_json::json;
 use silo_omarchy::api::wire;
 use silo_omarchy::artwork::Rung;
 use silo_omarchy::browse::{self, Browse, Choice, Facet, Paging, SortField, Watch};
-use silo_omarchy::filter_panel::{Entry, Facets, MenuKind, Outcome, Panel, Text};
+use silo_omarchy::filter_panel::{self, Chip, Entry, Facets, MenuKind, Outcome, Panel, Text};
 use silo_omarchy::keys::Key;
 
 #[test]
@@ -321,6 +321,41 @@ fn a_facet_takes_one_value_and_each_new_filter_is_a_chip() {
         browse.remove(&chip);
     }
     assert_eq!(browse.filters, browse::Filters::default());
+}
+
+#[test]
+fn a_panel_step_closes_the_panel_and_tells_if_the_sort_or_a_filter_changed() {
+    let mut browse = Browse::default();
+    let mut menu = None;
+    assert_eq!(filter_panel::step(&mut menu, &mut browse, |_, _| Outcome::Changed), None);
+
+    menu = Some(Panel::new(MenuKind::Filter, facets(), 2026));
+    let step = filter_panel::step(&mut menu, &mut browse, |_, browse| {
+        browse.filters.hdr = true;
+        Outcome::Changed
+    });
+    assert_eq!(step, Some((Outcome::Changed, true)));
+    assert!(menu.is_some());
+
+    assert_eq!(filter_panel::step(&mut menu, &mut browse, |_, _| Outcome::Closed), Some((Outcome::Closed, false)));
+    assert!(menu.is_none());
+}
+
+#[test]
+fn the_bar_chips_end_with_clear_all_and_each_chip_removes_its_filter() {
+    let mut browse = Browse::default();
+    assert!(Chip::all(&browse).is_empty());
+
+    browse.filters.hdr = true;
+    browse.letter = Some('B');
+    let chips = Chip::all(&browse);
+    let labels: Vec<_> = chips.iter().map(Chip::label).collect();
+    assert_eq!(labels, ["HDR ×", "Starts with B ×", "Clear all"]);
+
+    chips[0].remove(&mut browse);
+    assert!(!browse.filters.hdr);
+    chips[2].remove(&mut browse);
+    assert!(browse.chips().is_empty());
 }
 
 fn facets() -> Facets {

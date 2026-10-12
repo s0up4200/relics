@@ -17,7 +17,7 @@ use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
 use crate::click::Clickable as _;
 use crate::collections::{Collections, OpenCollection, Scope};
-use crate::filter_panel::{Facets, MenuKind, Outcome, Panel, bar_pill};
+use crate::filter_panel::{self, Chip, Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
@@ -44,8 +44,7 @@ enum Control {
     Letter,
     Mode,
     Shuffle,
-    Chip(Choice),
-    ClearAll,
+    Chip(Chip),
 }
 
 pub struct LibraryPage {
@@ -171,11 +170,7 @@ impl LibraryPage {
                 controls.push(Control::Mode);
             }
             controls.push(Control::Shuffle);
-            let chips = self.browse.chips();
-            if !chips.is_empty() {
-                controls.extend(chips.into_iter().map(Control::Chip));
-                controls.push(Control::ClearAll);
-            }
+            controls.extend(Chip::all(&self.browse).into_iter().map(Control::Chip));
         }
         controls
     }
@@ -223,44 +218,35 @@ impl LibraryPage {
                 self._shuffle = start_shuffle(client, "library", id, cx, |this, err| this.shuffle_error = Some(err));
             }
             Control::Chip(chip) => {
-                self.browse.remove(&chip);
-                self.apply(cx);
-            }
-            Control::ClearAll => {
-                self.browse.clear();
+                chip.remove(&mut self.browse);
                 self.apply(cx);
             }
         }
         cx.notify();
     }
 
-    /// Closes the panel after a pick in the sort or A to Z menu or after Esc, and loads the grid again when the
-    /// sort or a filter changed.
-    fn after_menu(&mut self, outcome: Outcome, before: Browse, cx: &mut Context<Self>) {
-        if outcome == Outcome::Closed {
-            self.menu = None;
-        }
-        if self.browse != before {
+    /// Gives a key or a click to the open panel, and loads the grid again when the sort or a filter changed.
+    fn step_menu(
+        &mut self,
+        act: impl FnOnce(&mut Panel, &mut Browse) -> Outcome,
+        cx: &mut Context<Self>,
+    ) -> Option<Outcome> {
+        let (outcome, changed) = filter_panel::step(&mut self.menu, &mut self.browse, act)?;
+        if changed {
             self.apply(cx);
         }
         cx.notify();
+        Some(outcome)
     }
 
     fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
-        let before = self.browse.clone();
-        if let Some(menu) = &mut self.menu {
-            let outcome = menu.click(row, &mut self.browse);
-            self.after_menu(outcome, before, cx);
-        }
+        self.step_menu(|menu, browse| menu.click(row, browse), cx);
     }
 
     /// Handles a key. `typed` is the text that the key types, for a text field of the filter panel. Returns
     /// false when the page does not use the key, for example h or Left at the left edge.
     pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let before = self.browse.clone();
-        if let Some(menu) = &mut self.menu {
-            let outcome = menu.key(key, typed, &mut self.browse);
-            self.after_menu(outcome, before, cx);
+        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, typed, browse), cx) {
             return outcome != Outcome::Unused;
         }
         if self.in_bar {
@@ -387,9 +373,8 @@ impl LibraryPage {
                 None => ("A–Z".into(), false),
             },
             Control::Mode => ((if b.episodes { "Episodes" } else { "Series" }).into(), false),
-            Control::Chip(chip) => (format!("{} ×", chip.chip_label()).into(), false),
+            Control::Chip(chip) => (chip.label().into(), false),
             Control::Shuffle => ("Shuffle".into(), false),
-            Control::ClearAll => ("Clear all".into(), false),
         };
         self.pill(index, label, on, cx)
     }
@@ -403,7 +388,7 @@ impl Render for LibraryPage {
             let element = self.control(index, control, cx);
             match control {
                 Control::Tab(_) => tabs.push(element),
-                Control::Chip(_) | Control::ClearAll => chips.push(element),
+                Control::Chip(_) => chips.push(element),
                 _ => pills.push(element),
             }
         }

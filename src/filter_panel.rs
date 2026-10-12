@@ -80,6 +80,55 @@ pub fn bar_pill(id: impl Into<ElementId>, label: SharedString, on: bool, focused
         .child(label)
 }
 
+/// A chip pill of the bar above a grid: one chosen filter, or Clear all.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Chip {
+    One(Choice),
+    ClearAll,
+}
+
+impl Chip {
+    /// A chip for each chosen filter, then Clear all. Empty when no filter is chosen.
+    pub fn all(browse: &Browse) -> Vec<Chip> {
+        let mut chips: Vec<_> = browse.chips().into_iter().map(Chip::One).collect();
+        if !chips.is_empty() {
+            chips.push(Chip::ClearAll);
+        }
+        chips
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Chip::One(choice) => format!("{} ×", choice.chip_label()),
+            Chip::ClearAll => "Clear all".into(),
+        }
+    }
+
+    /// Removes the filter of the chip, or all filters for Clear all.
+    pub fn remove(&self, browse: &mut Browse) {
+        match self {
+            Chip::One(choice) => browse.remove(choice),
+            Chip::ClearAll => browse.clear(),
+        }
+    }
+}
+
+/// Gives a key or a click (`act`) to the open panel, and closes the panel on `Outcome::Closed`. Returns the
+/// outcome and whether the sort or a filter changed, so that the caller knows if the grid must load again.
+/// Returns `None` when no panel is open.
+pub fn step(
+    menu: &mut Option<Panel>,
+    browse: &mut Browse,
+    act: impl FnOnce(&mut Panel, &mut Browse) -> Outcome,
+) -> Option<(Outcome, bool)> {
+    let before = browse.clone();
+    let outcome = act(menu.as_mut()?, browse);
+    if outcome == Outcome::Closed {
+        *menu = None;
+    }
+    Some((outcome, *browse != before))
+}
+
 /// The filter values that the server lists for a Library or for the catalog.
 #[derive(Debug, Clone, Default)]
 pub struct Facets {

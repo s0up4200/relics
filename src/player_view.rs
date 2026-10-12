@@ -78,7 +78,8 @@ pub enum List {
     Audio,
     /// The Track picker for the subtitles, with Off at the top.
     Subtitles,
-    /// The file versions and the steps of the Quality ladder.
+    /// Two parts in one list: a Version picker (the file versions of the Item) and the steps of the Quality ladder
+    /// of the file version that plays. The button and the title say Quality.
     Quality,
     /// The chapters of the file that plays.
     Chapters,
@@ -205,12 +206,22 @@ impl PlayerView {
         self.player.update(cx, |player, cx| player.back(cx));
     }
 
+    /// Closes the open picker, else the Playback info panel. Returns false when neither was open.
+    fn close_panels(&mut self, cx: &mut Context<Self>) -> bool {
+        let closed = self.picker.take().is_some() || std::mem::take(&mut self.info);
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+
     /// Esc leaves fullscreen, then goes Back. A picker or a panel over the controls must close first: check it
     /// here, before fullscreen. The Up Next card is cancelled before fullscreen too.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker.take().is_some() || std::mem::take(&mut self.info) {
-            cx.notify();
-        } else if self.player.read(cx).up_next().is_some() {
+        if self.close_panels(cx) {
+            return;
+        }
+        if self.player.read(cx).up_next().is_some() {
             self.step(Input::CancelUpNext, cx);
         } else if window.is_fullscreen() {
             self.toggle_fullscreen(window);
@@ -351,8 +362,8 @@ impl PlayerView {
     fn click_video(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.wake(cx);
         // A click next to an open picker or panel only closes it.
-        if self.picker.take().is_some() || std::mem::take(&mut self.info) {
-            return cx.notify();
+        if self.close_panels(cx) {
+            return;
         }
         if event.click_count() >= 2 {
             self._click = None;
