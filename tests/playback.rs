@@ -5,7 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use silo_omarchy::api::types::{Decision, Marker, MarkerKind};
 use silo_omarchy::playback::tracks::{self, Choice, Kind, Track};
-use silo_omarchy::playback::{Access, Command, Headers, Input, Operation, Replan, Sample, Session};
+use silo_omarchy::playback::{
+    Access, Command, Headers, Input, Operation, Replan, STILL_WATCHING_AFTER, Sample, Session,
+};
 use silo_omarchy::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -388,8 +390,8 @@ fn end_credits(settings: ServerSettings) -> Session {
 }
 
 #[test]
-fn credits_to_the_end_of_the_file_offer_the_next_episode_when_one_exists() {
-    let mut session = end_credits(ServerSettings::default());
+fn credits_to_the_end_of_the_file_offer_the_next_episode_when_autoplay_is_off() {
+    let mut session = end_credits(ServerSettings { auto_play_next: false, ..ServerSettings::default() });
     session.step(Input::NextEpisode, at(0));
     assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next episode")]);
     assert_eq!(session.step(Input::Action, at(2)), vec![prompt(""), stop(1050.0, 1), Command::PlayNext]);
@@ -412,7 +414,7 @@ fn a_normal_end_plays_the_next_episode_when_autoplay_is_on() {
     let mut session = with_markers(ServerSettings::default(), vec![]);
     session.step(Input::NextEpisode, at(0));
     session.step(Input::Position(998.0), at(1));
-    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(1100.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![up_next(None), stop(1100.0, 1), Command::PlayNext]);
 
     let settings = ServerSettings { auto_play_next: false, ..ServerSettings::default() };
     let mut session = with_markers(settings, vec![]);
@@ -434,7 +436,7 @@ fn a_shuffled_item_plays_the_next_pick_at_its_end_also_with_autoplay_off() {
     let mut session = with_markers(settings, vec![]);
     session.step(Input::Shuffle, at(0));
     session.step(Input::Position(998.0), at(1));
-    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(1100.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![up_next(None), stop(1100.0, 1), Command::PlayNext]);
 }
 
 #[test]
@@ -447,11 +449,156 @@ fn skip_ends_the_shuffled_item_at_its_position_and_plays_the_next_pick() {
 }
 
 #[test]
-fn credits_to_the_end_of_a_shuffled_item_offer_the_next_pick() {
-    let mut session = end_credits(ServerSettings::default());
+fn credits_to_the_end_of_a_shuffled_item_show_up_next_also_with_autoplay_off() {
+    let mut session = end_credits(ServerSettings { auto_play_next: false, ..ServerSettings::default() });
     session.step(Input::Shuffle, at(0));
-    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next in shuffle")]);
-    assert_eq!(session.step(Input::Action, at(2)), vec![prompt(""), stop(1050.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![up_next(Some(10))]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![up_next(None), stop(1050.0, 1), Command::PlayNext]);
+}
+
+// Up Next and Still watching (#52).
+
+fn up_next(seconds: Option<u64>) -> Command {
+    Command::UpNext(seconds)
+}
+
+/// A session at the end credits (player time 940 to 1000) of an episode with a next episode, with autoplay on.
+fn credits_with_next() -> Session {
+    let mut session = end_credits(ServerSettings::default());
+    session.step(Input::NextEpisode, at(0));
+    session
+}
+
+#[test]
+fn up_next_counts_down_from_ten_seconds_at_the_end_credits_and_then_plays_the_next_episode() {
+    let mut session = credits_with_next();
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![up_next(Some(10))], "no Skip prompt with it");
+    assert_eq!(session.step(Input::Position(951.0), at(2)), vec![], "the card shows once");
+    assert_eq!(session.step(Input::Tick, at(2)), vec![up_next(Some(9))]);
+    // A progress report is due at 10 s.
+    assert_eq!(session.step(Input::Tick, at(9)), vec![up_next(Some(2))]);
+    assert_eq!(session.step(Input::Tick, at(11)), vec![up_next(None), stop(1051.0, 1), Command::PlayNext]);
+    assert_eq!(session.auto_plays(), 1, "the countdown played the next episode, not the user");
+}
+
+#[test]
+fn play_now_on_the_up_next_card_plays_the_next_episode_at_once() {
+    let mut session = credits_with_next();
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(session.step(Input::Action, at(3)), vec![up_next(None), stop(1050.0, 1), Command::PlayNext]);
+    assert_eq!(session.auto_plays(), 0, "the user played it");
+}
+
+#[test]
+fn a_cancelled_up_next_card_does_not_play_the_next_episode_at_the_end() {
+    let mut session = credits_with_next();
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(session.step(Input::CancelUpNext, at(2)), vec![up_next(None)]);
+    assert_eq!(session.step(Input::Tick, at(30)).iter().filter(|c| **c == Command::PlayNext).count(), 0);
+    assert_eq!(session.step(Input::Position(990.0), at(31)), vec![], "the card does not come back");
+    session.step(Input::Position(999.0), at(32));
+    assert!(session.step(Input::EndOfFile, at(33)).ends_with(&[Command::ClosePlayer]));
+}
+
+#[test]
+fn up_next_hides_when_playback_leaves_the_credits_and_starts_again_on_the_next_entry() {
+    let mut session = credits_with_next();
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(session.step(Input::Position(500.0), at(3)), vec![up_next(None)]);
+    assert_eq!(session.step(Input::Tick, at(20)).iter().filter(|c| **c == Command::PlayNext).count(), 0);
+    assert_eq!(session.step(Input::Position(960.0), at(21)), vec![up_next(Some(10))]);
+}
+
+#[test]
+fn without_end_credits_up_next_shows_ten_seconds_before_the_end() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(989.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(990.0), at(2)), vec![up_next(Some(10))]);
+}
+
+#[test]
+fn up_next_shows_only_when_the_next_episode_plays_by_itself() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    assert_eq!(session.step(Input::Position(995.0), at(1)), vec![], "no next episode");
+    let mut session = with_markers(ServerSettings { auto_play_next: false, ..ServerSettings::default() }, vec![]);
+    session.step(Input::NextEpisode, at(0));
+    assert_eq!(session.step(Input::Position(995.0), at(1)), vec![], "autoplay is off");
+}
+
+/// `credits_with_next` after `count` episodes in a row played by themselves.
+fn after_auto_plays(count: u32) -> Session {
+    let mut session = Session::new(None, ServerSettings::default()).with_auto_plays(count);
+    let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
+    let Decision::Playable { markers, .. } = &mut decision else { unreachable!() };
+    *markers = vec![marker(MarkerKind::Credits, 1040.0, 1100.0)];
+    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Duration(1000.0), at(0));
+    session.step(Input::NextEpisode, at(0));
+    session
+}
+
+#[test]
+fn after_three_episodes_with_no_input_still_watching_pauses_in_place_of_the_next_episode() {
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER - 1);
+    session.step(Input::Position(950.0), at(1));
+    assert!(session.step(Input::Tick, at(11)).ends_with(&[Command::PlayNext]), "the third episode plays");
+    assert_eq!(session.auto_plays(), STILL_WATCHING_AFTER);
+
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+    session.step(Input::Position(950.0), at(1));
+    assert_eq!(
+        session.step(Input::Tick, at(11)),
+        vec![up_next(None), Command::SetPause(true), Command::StillWatching(true)]
+    );
+    session.step(Input::Paused(true), at(11));
+    assert!(!session.step(Input::Tick, at(30)).contains(&Command::PlayNext), "playback waits for the answer");
+    assert_eq!(session.step(Input::Position(951.0), at(12)), vec![], "no Up Next card while it asks");
+}
+
+#[test]
+fn continue_on_still_watching_plays_the_next_episode_and_starts_the_count_again() {
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+    session.step(Input::Position(950.0), at(1));
+    session.step(Input::Tick, at(11));
+    session.step(Input::Paused(true), at(11));
+    let paused = Sample { sequence: 1, position: 1050.0, paused: true };
+    assert_eq!(
+        session.step(Input::Action, at(20)),
+        vec![
+            Command::SetPause(false),
+            Command::StillWatching(false),
+            Command::Stop { session_id: SESSION.into(), sample: Some(paused) },
+            Command::PlayNext,
+        ]
+    );
+    assert_eq!(session.auto_plays(), 0);
+}
+
+#[test]
+fn still_watching_at_the_end_of_the_file_keeps_the_duration_for_the_stop_report_on_back() {
+    let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+    session.step(Input::Position(999.0), at(1));
+    assert_eq!(
+        session.step(Input::EndOfFile, at(2)),
+        vec![up_next(None), Command::SetPause(true), Command::StillWatching(true)]
+    );
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![], "mpv can report the end twice");
+    assert_eq!(session.step(Input::End, at(3)), vec![Command::StillWatching(false), stop(1100.0, 1)]);
+}
+
+#[test]
+fn any_input_of_the_user_starts_the_count_of_episodes_again() {
+    for input in [Input::Active, Input::PlayPause, Input::SeekBy(10.0), Input::CancelUpNext] {
+        let mut session = after_auto_plays(STILL_WATCHING_AFTER);
+        session.step(input, at(1));
+        assert_eq!(session.auto_plays(), 0);
+    }
+    let mut session = after_auto_plays(1);
+    session.step(Input::Tick, at(1));
+    session.step(Input::Position(10.0), at(2));
+    assert_eq!(session.auto_plays(), 1, "the time and mpv events are not input of the user");
 }
 
 #[test]

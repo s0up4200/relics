@@ -40,8 +40,8 @@ pub struct PlayItem {
     pub file_id: Option<String>,
     /// Start at this source position, for a version switch. It wins over `start_over`.
     start: Option<f64>,
-    /// The id of the server shuffle that picked the Item, and whether the shuffle has a next pick.
-    shuffle: Option<(String, bool)>,
+    /// The id of the server shuffle that picked the Item, and the title of its next pick when it has one.
+    shuffle: Option<(String, Option<String>)>,
 }
 
 impl From<&wire::CatalogItem> for PlayItem {
@@ -106,13 +106,23 @@ impl PlayItem {
 
     /// The current pick of a shuffle. A pick plays from the beginning, as in the web app.
     pub fn shuffled(shuffle: &wire::Shuffle) -> Self {
-        let next = shuffle.next.content_id != shuffle.current.content_id;
+        let next = &shuffle.next;
+        let next = (next.content_id != shuffle.current.content_id)
+            .then(|| next_label(next.season_number, next.episode_number, &next.title));
         Self { start_over: true, shuffle: Some((shuffle.id.to_string(), next)), ..Self::from(&shuffle.current) }
     }
 
     /// Where playback starts: `None` resumes at the saved position.
     pub fn start_position(&self) -> Option<f64> {
         self.start.or(self.start_over.then_some(0.))
+    }
+}
+
+/// The title of the next Item on the Up Next card: `S1:E2 · Title` for an episode.
+pub fn next_label(season: Option<i64>, episode: Option<i64>, title: &str) -> String {
+    match season.zip(episode) {
+        Some((season, episode)) => format!("S{season}:E{episode} · {title}"),
+        None => title.to_string(),
     }
 }
 
@@ -197,6 +207,14 @@ pub struct PlayerWindow {
     trickplay: Option<wire::WatchTrickplay>,
     /// Reads the seek thumbnails again before their URLs expire.
     _trickplay: Option<Task<()>>,
+    /// The seconds left on the Up Next card, while it shows.
+    up_next: Option<u64>,
+    /// The Still watching prompt shows.
+    still_watching: bool,
+    /// The title of the next episode or shuffle pick, for the Up Next card.
+    next_title: Option<String>,
+    /// How many Items in a row played by themselves up to the next Item that plays.
+    auto_plays: u32,
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
@@ -242,6 +260,10 @@ impl PlayerWindow {
             versions: Vec::new(),
             trickplay: None,
             _trickplay: None,
+            up_next: None,
+            still_watching: false,
+            next_title: None,
+            auto_plays: 0,
         }
     }
 
@@ -252,6 +274,7 @@ impl PlayerWindow {
         self.generation += 1;
         self.in_view = self.video.is_some();
         (self.position, self.prompt, self.markers) = (None, String::new(), Vec::new());
+        (self.up_next, self.still_watching) = (None, false);
         let series = item.season.as_ref().map(|(id, _)| id.clone());
         // A version switch plays the same Item again, so the choice carries too.
         let same = self.item.as_ref().is_some_and(|old| old.content_id == item.content_id);
@@ -269,17 +292,22 @@ impl PlayerWindow {
         self.series = series;
         self.item = Some(item.clone());
         (self.versions, self.trickplay, self._trickplay) = (Vec::new(), None, None);
-        self.session = Some(Session::new(item.runtime, client.server_settings()).with_carry(carry));
+        // Only the next Item of an automatic advance keeps the count; any other start is the user's.
+        let auto_plays = std::mem::take(&mut self.auto_plays);
+        self.session =
+            Some(Session::new(item.runtime, client.server_settings()).with_carry(carry).with_auto_plays(auto_plays));
         self.client = Some(client.clone());
         // A new Item drops these tasks, so an older answer never reaches the new session.
         self.next = None;
         self.previous = None;
         // A shuffle replaces the series order: Next plays the next pick, and Previous does nothing.
-        self.finding = match item.shuffle {
+        self.next_title = None;
+        self.finding = match &item.shuffle {
             Some((_, next)) => {
-                if next {
+                if next.is_some() {
                     self.step(Input::Shuffle, cx);
                 }
+                self.next_title.clone_from(next);
                 None
             }
             None => self.find_episodes(&client, &item, cx),
@@ -365,6 +393,8 @@ impl PlayerWindow {
                 client.next_episode(&series_id, season, &content_id),
                 client.previous_episode(&series_id, season, &content_id),
             );
+            let next_title = next.as_ref().ok().and_then(Option::as_ref);
+            let next_title = next_title.map(|e| next_label(Some(e.season_number), Some(e.episode_number), &e.title));
             let episode = |found: Result<Option<wire::Episode>, _>| match found {
                 Ok(found) => found.map(|episode| PlayItem::episode(series_id.clone(), episode)),
                 Err(err) => {
@@ -377,6 +407,7 @@ impl PlayerWindow {
                 this.series = Some(series_id);
                 if let Some(next) = next {
                     this.next = Some(next);
+                    this.next_title = next_title;
                     this.step(Input::NextEpisode, cx);
                 }
                 if let Some(previous) = previous {
@@ -482,7 +513,7 @@ impl PlayerWindow {
     /// Ends the Playback session and closes the Player window. The task ends when the
     /// server has the stop report. The Library window waits for it before the app quits.
     pub fn quit(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        (self.starting, self._trickplay) = (None, None);
+        (self.starting, self._trickplay, self.auto_plays) = (None, None, 0);
         self.step(Input::End, cx);
         self.close_mpv(cx);
         self.stopping.take().unwrap_or_else(|| Task::ready(()))
@@ -498,8 +529,8 @@ impl PlayerWindow {
         if let Input::Position(position) | Input::Seeked(position) = input {
             self.position = Some(position);
         }
-        // The tick each second redraws the Player view with the new position.
-        if self.in_view && !matches!(input, Input::Position(_)) {
+        // The tick each second redraws the Player view with the new position. A mouse move changes nothing to draw.
+        if self.in_view && !matches!(input, Input::Position(_) | Input::Active) {
             cx.notify();
         }
         // MPRIS reads the position when it needs it. The other inputs can change what MPRIS shows.
@@ -521,6 +552,7 @@ impl PlayerWindow {
                 self.duration = Some(duration);
                 true
             }
+            Input::Active => false,
             _ => true,
         };
         let Some(session) = &mut self.session else {
@@ -610,6 +642,7 @@ impl PlayerWindow {
                 }
             }
             Command::PlayNext => {
+                self.auto_plays = self.session.as_ref().map_or(0, Session::auto_plays);
                 match self.item.as_ref().and_then(|i| Some((i.shuffle.clone()?.0, i.content_id.clone()))) {
                     Some((id, from)) => self.advance(client, id, from, cx),
                     None => {
@@ -632,6 +665,15 @@ impl PlayerWindow {
             Command::SetPause(paused) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.set_pause(paused)) {
                     eprintln!("silo-omarchy: cannot pause or play: {err}");
+                }
+            }
+            Command::UpNext(left) => self.up_next = left,
+            Command::StillWatching(shows) => {
+                self.still_watching = shows;
+                // The Player window has no Still watching prompt, so the Lua controller shows it as a Skip prompt.
+                let label = if shows { "Still watching?" } else { "" };
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.show_prompt(label)) {
+                    eprintln!("silo-omarchy: cannot send the Still watching prompt to the player: {err}");
                 }
             }
             Command::ClosePlayer => self.close_mpv(cx),
@@ -715,6 +757,26 @@ impl PlayerWindow {
     /// The label of the Skip prompt that shows, or an empty text.
     pub fn prompt(&self) -> &str {
         &self.prompt
+    }
+
+    /// The seconds left before the next Item plays, while the Up Next card shows.
+    pub fn up_next(&self) -> Option<u64> {
+        self.up_next
+    }
+
+    /// The title of the next episode or shuffle pick, once it is known.
+    pub fn next_title(&self) -> Option<&str> {
+        self.next_title.as_deref()
+    }
+
+    /// The Item that plays is a shuffle pick.
+    pub fn in_shuffle(&self) -> bool {
+        self.item.as_ref().is_some_and(|item| item.shuffle.is_some())
+    }
+
+    /// The Still watching prompt shows.
+    pub fn still_watching(&self) -> bool {
+        self.still_watching
     }
 
     /// The Markers of the file, in player time.
@@ -883,7 +945,7 @@ fn hex(color: Hsla) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::PlayItem;
+    use super::{PlayItem, next_label};
     use crate::api::wire;
 
     fn detail(fields: serde_json::Value) -> wire::CatalogItemDetail {
@@ -951,8 +1013,14 @@ mod tests {
         let item = PlayItem::shuffled(&shuffle(1));
         assert_eq!(item.content_id, shuffle(1).current.content_id);
         assert_eq!(item.start_position(), Some(0.), "a pick does not resume");
-        assert_eq!(item.shuffle, Some(("s1".into(), true)));
+        assert_eq!(item.shuffle, Some(("s1".into(), Some(shuffle(1).next.title))));
         let only = PlayItem::shuffled(&shuffle(0));
-        assert_eq!(only.shuffle, Some(("s1".into(), false)), "a scope with one Item has no next pick");
+        assert_eq!(only.shuffle, Some(("s1".into(), None)), "a scope with one Item has no next pick");
+    }
+
+    #[test]
+    fn the_up_next_title_of_an_episode_has_its_season_and_number() {
+        assert_eq!(next_label(Some(1), Some(2), "Half Loop"), "S1:E2 · Half Loop");
+        assert_eq!(next_label(None, None, "Heat"), "Heat");
     }
 }

@@ -25,6 +25,13 @@ const NORMAL_END_FRACTION: f64 = 0.985;
 const PROMPT_TIME: Duration = Duration::from_secs(5);
 /// Credits that end this close to the end of the file, in seconds, run to the end of the file.
 const CREDITS_TO_END_SECONDS: f64 = 1.0;
+/// How long the Up Next card counts down before the next Item plays. Without end credits, the card shows this long
+/// before the end of the file.
+const UP_NEXT_TIME: Duration = Duration::from_secs(10);
+/// After this many Items in a row play by themselves with no input of the user, the Still watching prompt shows in
+/// place of the next one. It is the default of the `player.passout_threshold` setting of the settings contract.
+// ponytail: a fixed count; read the client_local setting when the app gets a Local setting for it.
+pub const STILL_WATCHING_AFTER: u32 = 3;
 /// Before each load, the app refreshes a token that has less time than this left.
 const REFRESH_BEFORE_LOAD: Duration = Duration::from_secs(4 * 3600);
 /// When the token in mpv has this much time left, the app refreshes it and reloads at the position.
@@ -144,6 +151,32 @@ pub enum Input {
     PickQuality(String),
     /// The user picked the file version with this file id.
     SwitchVersion(String),
+    /// The user cancelled the Up Next card: the next Item does not play at the end.
+    CancelUpNext,
+    /// The user pressed a key, clicked, scrolled or moved the mouse in the Player view.
+    Active,
+}
+
+impl Input {
+    /// The input comes from the user, so the user is not away.
+    fn is_user_input(&self) -> bool {
+        matches!(
+            self,
+            Input::Active
+                | Input::Action
+                | Input::Play
+                | Input::Pause
+                | Input::PlayPause
+                | Input::SeekBy(_)
+                | Input::SetPosition(_)
+                | Input::Next
+                | Input::Previous
+                | Input::PickTrack { .. }
+                | Input::PickQuality(_)
+                | Input::SwitchVersion(_)
+                | Input::CancelUpNext
+        )
+    }
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -194,6 +227,10 @@ pub enum Command {
     /// Start the file version `file_id` of the same Item at this source position, in the same Player view. The
     /// session has already ended. The replan request names no file, so a version switch is a new start.
     PlayVersion { file_id: String, position: Option<f64> },
+    /// Show the Up Next card with this many seconds left before the next Item plays. `None` hides it.
+    UpNext(Option<u64>),
+    /// Show or hide the Still watching prompt.
+    StillWatching(bool),
 }
 
 /// The recovery chain: a failure starts it, and each next failure goes one step on.
@@ -266,6 +303,14 @@ pub struct Session {
     quality: String,
     /// The step of a quality change replan that runs.
     changing: Option<String>,
+    /// The Up Next card shows, and the next Item plays at this time.
+    up_next: Option<SystemTime>,
+    /// The user cancelled the Up Next card, so the next Item does not play by itself.
+    cancelled: bool,
+    /// How many Items in a row played by themselves, with no input of the user, up to this one.
+    auto_plays: u32,
+    /// The Still watching prompt shows. The value is the final position for the stop report.
+    still_watching: Option<Option<f64>>,
 }
 
 /// The Skip prompt that shows now.
@@ -336,7 +381,22 @@ impl Session {
             pending: Carry::default(),
             quality: ORIGINAL.into(),
             changing: None,
+            up_next: None,
+            cancelled: false,
+            auto_plays: 0,
+            still_watching: None,
         }
+    }
+
+    /// Starts the session after `count` Items in a row played by themselves, with no input of the user.
+    pub fn with_auto_plays(mut self, count: u32) -> Self {
+        self.auto_plays = count;
+        self
+    }
+
+    /// How many Items in a row played by themselves, with no input of the user. The next Item starts with it.
+    pub fn auto_plays(&self) -> u32 {
+        self.auto_plays
     }
 
     /// Starts the session with the track choice of the last episode of the same series.
@@ -368,6 +428,9 @@ impl Session {
     pub fn step(&mut self, input: Input, now: SystemTime) -> Vec<Command> {
         if self.ended {
             return Vec::new();
+        }
+        if input.is_user_input() {
+            self.auto_plays = 0;
         }
         match input {
             Input::Started { decision, access } => match decision {
@@ -438,7 +501,11 @@ impl Session {
                 {
                     self.chain = Chain::Healthy;
                 }
-                self.enter(position, now)
+                let mut commands = self.enter(position, now);
+                if !self.ended {
+                    commands.extend(self.up_next(position, now));
+                }
+                commands
             }
             Input::Duration(duration) if self.loaded => {
                 self.duration = Some(duration);
@@ -450,6 +517,13 @@ impl Session {
             }
             Input::Tick => {
                 let mut commands = Vec::new();
+                if let Some(until) = self.up_next {
+                    if now >= until {
+                        return self.auto_advance(self.source_position());
+                    }
+                    let left = until.duration_since(now).unwrap_or_default().as_secs_f64().ceil() as u64;
+                    commands.push(Command::UpNext(Some(left)));
+                }
                 if self.prompt.as_ref().is_some_and(|prompt| now >= prompt.until) {
                     self.prompt = None;
                     commands.push(Command::ShowPrompt(String::new()));
@@ -465,6 +539,20 @@ impl Session {
                 commands.extend(self.recover());
                 commands
             }
+            Input::Action if self.still_watching.is_some() => {
+                let position = self.still_watching.unwrap_or_default();
+                let mut commands = vec![Command::SetPause(false)];
+                commands.extend(self.play_next(position));
+                commands
+            }
+            Input::Action if self.up_next.is_some() => self.play_next(self.source_position()),
+            Input::CancelUpNext => match self.up_next.take() {
+                Some(_) => {
+                    self.cancelled = true;
+                    vec![Command::UpNext(None)]
+                }
+                None => Vec::new(),
+            },
             Input::Action => match self.prompt.take() {
                 Some(Prompt { action: Action::Seek { to, marker }, .. }) => {
                     self.resolved.push(marker);
@@ -502,16 +590,17 @@ impl Session {
             {
                 vec![Command::Seek(position)]
             }
-            Input::Next if self.has_next => self.play_next(self.source_position()),
+            Input::Next if self.has_next => self.play_next(self.stop_position()),
             Input::Previous if self.has_previous => {
                 let mut commands = self.finish(self.source_position(), false);
                 commands.push(Command::PlayPrevious);
                 commands
             }
+            Input::EndOfFile if self.still_watching.is_some() => Vec::new(),
             Input::EndOfFile => {
                 let (position, normal) = self.end_position();
-                if normal && self.auto_next() {
-                    self.play_next(position)
+                if normal && self.auto_next() && !self.cancelled {
+                    self.auto_advance(position)
                 } else if normal {
                     self.finish(position, true)
                 } else {
@@ -579,8 +668,9 @@ impl Session {
                 commands
             }
             Input::LoadFailed => self.recover(),
-            Input::Shutdown => self.finish(self.source_position(), true),
-            Input::End => self.finish(self.source_position(), false),
+            Input::Shutdown => self.finish(self.stop_position(), true),
+            Input::End => self.finish(self.stop_position(), false),
+            Input::Active => Vec::new(),
             Input::Position(_)
             | Input::Duration(_)
             | Input::Seeked(_)
@@ -795,13 +885,14 @@ impl Session {
                     commands.extend([Command::Seek(end), self.show("Watch intro", undo, true, now)]);
                 }
             },
-            MarkerKind::Credits if to_end && self.has_next => {
-                if self.settings.auto_skip_credits && self.auto_next() {
-                    commands.extend(self.play_next(self.source_position()));
-                } else {
-                    let label = if self.shuffle { "Next in shuffle" } else { "Next episode" };
-                    commands.push(self.show(label, Action::Next, false, now));
+            // With autoplay, the Up Next card shows in these credits.
+            MarkerKind::Credits if to_end && self.has_next && self.auto_next() => {
+                if self.settings.auto_skip_credits {
+                    commands.extend(self.auto_advance(self.source_position()));
                 }
+            }
+            MarkerKind::Credits if to_end && self.has_next => {
+                commands.push(self.show("Next episode", Action::Next, false, now))
             }
             MarkerKind::Credits if !to_end && self.settings.auto_skip_credits => {
                 self.resolved.push(index);
@@ -841,6 +932,50 @@ impl Session {
         self.has_next && (self.shuffle || self.settings.auto_play_next)
     }
 
+    /// Shows the Up Next card when the position enters the end of the file, and hides it when the position leaves.
+    /// The end starts at the end credits, else `UP_NEXT_TIME` before the end of the file.
+    fn up_next(&mut self, position: f64, now: SystemTime) -> Vec<Command> {
+        let markers = self.plan.as_ref().map_or(&[][..], |plan| &plan.markers);
+        let start = self.player_duration().map(|duration| {
+            let credits = markers.iter().filter(|marker| {
+                matches!(marker.kind, MarkerKind::Credits) && marker.end >= duration - CREDITS_TO_END_SECONDS
+            });
+            credits.map(|marker| marker.start).fold(duration - UP_NEXT_TIME.as_secs_f64(), f64::min)
+        });
+        let inside = self.auto_next()
+            && !self.cancelled
+            && self.still_watching.is_none()
+            && start.is_some_and(|start| position >= start);
+        match (inside, self.up_next) {
+            (true, None) => {
+                self.up_next = Some(now + UP_NEXT_TIME);
+                vec![Command::UpNext(Some(UP_NEXT_TIME.as_secs()))]
+            }
+            (false, Some(_)) => {
+                self.up_next = None;
+                vec![Command::UpNext(None)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Plays the next Item with no input of the user: at the end of the file or of the Up Next countdown.
+    /// After `STILL_WATCHING_AFTER` of them in a row, it pauses and shows the Still watching prompt instead.
+    fn auto_advance(&mut self, position: Option<f64>) -> Vec<Command> {
+        if self.auto_plays < STILL_WATCHING_AFTER {
+            self.auto_plays += 1;
+            return self.play_next(position);
+        }
+        self.still_watching = Some(position);
+        let hide = self.up_next.take().map(|_| Command::UpNext(None));
+        hide.into_iter().chain([Command::SetPause(true), Command::StillWatching(true)]).collect()
+    }
+
+    /// The final position of a stop report: the position of the Still watching prompt while it shows.
+    fn stop_position(&self) -> Option<f64> {
+        self.still_watching.unwrap_or_else(|| self.source_position())
+    }
+
     /// Ends the session at `position` and plays the next episode in the same Player view or Player window.
     fn play_next(&mut self, position: Option<f64>) -> Vec<Command> {
         let mut commands = self.finish(position, false);
@@ -876,6 +1011,12 @@ impl Session {
         let mut commands = Vec::new();
         if self.prompt.take().is_some() || self.chain == Chain::Lost {
             commands.push(Command::ShowPrompt(String::new()));
+        }
+        if self.up_next.take().is_some() {
+            commands.push(Command::UpNext(None));
+        }
+        if self.still_watching.take().is_some() {
+            commands.push(Command::StillWatching(false));
         }
         let sample = position.map(|position| self.sample(position));
         commands.push(Command::Stop { session_id, sample });

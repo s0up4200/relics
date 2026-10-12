@@ -107,7 +107,15 @@ _Avoid_: config, device setting
 A time range in a file version that Silo labels `intro`, `credits`, `recap` or `preview`. A file version can have more than one marker of the same kind.
 
 **Skip prompt**:
-The button that the Player view shows over the video while playback is inside a marker. It offers "Skip intro", "Skip recap", "Skip credits", "Skip preview", "Watch intro" (after an automatic skip), or "Next episode" (when the credits run to the end of the file and the Item has a next episode). A recap or credits marker that the Server settings skip automatically shows no prompt. The Playback session decides when the prompt shows. The Player view only draws it, and a click on it does the same as Enter.
+The button that the Player view shows over the video while playback is inside a marker. It offers "Skip intro", "Skip recap", "Skip credits", "Skip preview", "Watch intro" (after an automatic skip), or "Next episode" (when the credits run to the end of the file, the Item has a next episode, and the next episode does not play by itself). A recap or credits marker that the Server settings skip automatically shows no prompt. The Playback session decides when the prompt shows. The Player view only draws it, and a click on it does the same as Enter.
+
+**Up Next card**:
+The card that the Player view shows near the end of an Item when the next episode or the next shuffle pick plays by itself. It starts at the end credits, or 10 seconds before the end of the file when the Item has no end credits. It shows the next title and a countdown of 10 seconds. Play now (Enter) plays the next Item at once. Cancel (Esc) hides the card, and the Player view then closes at the end of the file.
+_Avoid_: autoplay prompt, next episode overlay
+
+**Still watching prompt**:
+The prompt that pauses playback in place of the next Item after 3 Items in a row played by themselves with no input of the user. Continue (Enter) plays the next Item. Back stops playback. Any key, click or mouse move in the Player view, and any media key, starts the count again.
+_Avoid_: passout prompt, idle check
 
 **Offline**:
 The app state when the active Server does not answer, or answers 503. The app keeps its tokens and retries. It never signs the user out.

@@ -18,6 +18,7 @@ use gpui_omarchy::{ActiveTheme as _, IconName, icon};
 use crate::api::types::{Delivery, StreamProtocol};
 use crate::api::wire;
 use crate::click::Clickable as _;
+use crate::filter_panel::bar_pill;
 use crate::keys::Key;
 use crate::playback::Input;
 use crate::playback::tracks::{Kind, Track};
@@ -162,8 +163,10 @@ impl PlayerView {
         window.on_next_frame(move |_, _| video.hide());
     }
 
-    /// Shows the controls, and hides them after `CONTROLS_TIME` with no more input.
+    /// Shows the controls, and hides them after `CONTROLS_TIME` with no more input. The input also tells the
+    /// Playback session that the user is not away, for the Still watching prompt.
     fn wake(&mut self, cx: &mut Context<Self>) {
+        self.step(Input::Active, cx);
         self.controls = true;
         self._hide = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CONTROLS_TIME).await;
@@ -203,10 +206,12 @@ impl PlayerView {
     }
 
     /// Esc leaves fullscreen, then goes Back. A picker or a panel over the controls must close first: check it
-    /// here, before fullscreen.
+    /// here, before fullscreen. The Up Next card is cancelled before fullscreen too.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker.take().is_some() || std::mem::take(&mut self.info) {
             cx.notify();
+        } else if self.player.read(cx).up_next().is_some() {
+            self.step(Input::CancelUpNext, cx);
         } else if window.is_fullscreen() {
             self.toggle_fullscreen(window);
         } else {
@@ -313,7 +318,8 @@ impl PlayerView {
             Key::Down => self.add_volume(-VOLUME_STEP, cx),
             Key::Other("f") => self.toggle_fullscreen(window),
             Key::Other("m") => self.toggle_mute(cx),
-            // Takes the Skip prompt, or retries after "Lost connection".
+            // Takes the Skip prompt, Play now on the Up Next card, Continue on the Still watching prompt, or
+            // retries after "Lost connection".
             Key::Other("enter") => self.step(Input::Action, cx),
             Key::Other("escape") => self.escape(window, cx),
             Key::Other("backspace" | "q") => self.back(cx),
@@ -691,12 +697,98 @@ impl PlayerView {
     }
 }
 
+impl PlayerView {
+    /// A pill of the Up Next card or the Still watching prompt. A click does what its key does.
+    fn pill(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        on: bool,
+        cx: &Context<Self>,
+        click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> impl IntoElement {
+        bar_pill(id, label.into(), on, false, cx.omarchy()).on_click(cx.listener(move |this, _, _, cx| {
+            this.wake(cx);
+            click(this, cx);
+        }))
+    }
+
+    /// The Up Next card: the seconds left, the next title, Play now (= Enter) and Cancel (= Esc). A click on the
+    /// card does not pause.
+    fn up_next(&self, left: u64, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let player = self.player.read(cx);
+        let heading = if player.in_shuffle() { "Next in shuffle" } else { "Up next" };
+        div()
+            .id("up-next")
+            .absolute()
+            .right(px(32.))
+            .bottom(px(112.))
+            .w(px(340.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(16.))
+            .rounded(px(12.))
+            .bg(t.surface)
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(div().text_size(px(12.)).text_color(t.secondary).child(format!("{heading} in {left} s")))
+            .children(player.next_title().map(|title| div().truncate().text_color(t.bright).child(title.to_string())))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(self.pill("up-next-play", "Play now", true, cx, |this, cx| this.step(Input::Action, cx)))
+                    .child(
+                        self.pill("up-next-cancel", "Cancel", false, cx, |this, cx| this.step(Input::CancelUpNext, cx)),
+                    ),
+            )
+    }
+
+    /// The Still watching prompt in the middle of the view: Continue (= Enter) plays the next Item, Back (=
+    /// Backspace) stops playback. A click next to the prompt does nothing.
+    fn still_watching(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let next = self.player.read(cx).next_title().map(|title| format!("Next: {title}"));
+        let prompt =
+            div()
+                .w(px(380.))
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .p(px(24.))
+                .rounded(px(12.))
+                .bg(t.surface)
+                .child(div().text_size(px(18.)).text_color(t.bright).child("Are you still watching?"))
+                .children(next.map(|next| div().truncate().text_color(t.secondary).child(next)))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(self.pill("still-watching-continue", "Continue", true, cx, |this, cx| {
+                            this.step(Input::Action, cx)
+                        }))
+                        .child(self.pill("still-watching-back", "Back", false, cx, |this, cx| this.back(cx))),
+                );
+        div()
+            .id("still-watching")
+            .absolute()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(prompt)
+    }
+}
+
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.omarchy().clone();
         let player = self.player.read(cx);
         let started = player.position().is_some();
         let prompt = Some(player.prompt().to_string()).filter(|label| !label.is_empty());
+        let (up_next, still_watching) = (player.up_next(), player.still_watching());
         let video = self.video.clone();
         div()
             .id("player-view")
@@ -715,6 +807,8 @@ impl Render for PlayerView {
             .child(canvas(|_, _, _| (), move |bounds, _, window, _| video.place(bounds, window)).absolute().size_full())
             .child(div().id("video").absolute().size_full().on_click(cx.listener(Self::click_video)))
             .children(prompt.map(|label| self.prompt(label, cx)))
+            .children(up_next.map(|left| self.up_next(left, cx)))
+            .when(still_watching, |view| view.child(self.still_watching(cx)))
             .when(self.controls, |view| view.children(self.controls(window, cx)))
             .children(self.picker.as_ref().map(|picker| self.picker(picker, cx)))
             .when(self.info, |view| view.child(self.info(cx)))
