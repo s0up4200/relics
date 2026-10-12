@@ -945,9 +945,9 @@ impl Client {
         self.call(Method::GET, &format!("catalog/items/{id}?image_size={image_size}"), None).await
     }
 
-    /// The seasons of a series, in the server order, without artwork.
-    pub async fn seasons(&self, series_id: &str) -> Result<Vec<wire::Season>, Error> {
-        let path = format!("catalog/series/{series_id}/seasons?include_artwork=false");
+    /// The seasons of a series, in the server order, with the poster of each season.
+    pub async fn seasons(&self, series_id: &str, image_size: Rung) -> Result<Vec<wire::Season>, Error> {
+        let path = format!("catalog/series/{series_id}/seasons?image_size={image_size}");
         Ok(self.call::<wire::SeasonCollection>(Method::GET, &path, None).await?.items)
     }
 

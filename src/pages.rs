@@ -196,7 +196,7 @@ impl Pages {
             .push(cx.subscribe_in(view, window, |this, _, Open(item), window, cx| this.open_item(item, window, cx)));
     }
 
-    /// Opens the detail page of an Item. For an episode or a season, the page of its series with the season.
+    /// Opens the detail page of an Item. For a season, the page of its series with the season.
     fn open_item(&mut self, item: &wire::CatalogItem, window: &mut Window, cx: &mut Context<Self>) {
         let (id, season) = detail::target(item);
         let client = self.client.clone();

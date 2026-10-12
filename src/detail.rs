@@ -1,7 +1,8 @@
 //! The detail page of an Item: a hero with the backdrop, the poster, the type and the studio or network, the title
 //! logo or the title, the tagline, the metadata line, the quality badges, the ratings, the overview, the Directed by
-//! and Written by line, and the buttons. A series shows its seasons and a grid of 16:9 episode cards. Then come the
-//! Cast, Crew and Trailers sections. Each request asks for the artwork rung that the page needs at the window scale.
+//! and Written by line, and the buttons. A series shows its season cards and a grid of 16:9 episode cards. An
+//! episode shows the other episodes of its season under More Episodes. Then come the Cast, Crew and Trailers
+//! sections. Each request asks for the artwork rung that the page needs at the window scale.
 
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ const GAP: f32 = 14.;
 /// The left and right margin of the page.
 const MARGIN: f32 = 48.;
 const POSTER_WIDTH: f32 = 200.;
+const SEASON_WIDTH: f32 = 130.;
 const CAST_WIDTH: f32 = 110.;
 const TRAILER_WIDTH: f32 = 220.;
 const HERO_HEIGHT: f32 = 500.;
@@ -57,6 +59,7 @@ pub struct Detail {
     /// The Thumbhash of the backdrop, the poster and each cast photo.
     thumbs: Vec<Option<Arc<RenderImage>>>,
     episode_thumbs: Vec<Option<Arc<RenderImage>>>,
+    season_thumbs: Vec<Option<Arc<RenderImage>>>,
     scroll: ScrollHandle,
     artwork: Entity<ArtworkCache>,
     /// The artwork rung of the Item and of the episodes, at the window scale when the page opened.
@@ -78,7 +81,8 @@ impl Detail {
         let viewport = window.viewport_size().width.to_f64() as f32;
         let width = viewport - crate::pages::sidebar_width(viewport, true);
         cx.on_release(|this, cx| {
-            for thumb in this.thumbs.drain(..).chain(this.episode_thumbs.drain(..)).flatten() {
+            let thumbs = this.thumbs.drain(..).chain(this.episode_thumbs.drain(..)).chain(this.season_thumbs.drain(..));
+            for thumb in thumbs.flatten() {
                 cx.drop_image(thumb, None);
             }
         })
@@ -99,6 +103,7 @@ impl Detail {
             error: None,
             thumbs: Vec::new(),
             episode_thumbs: Vec::new(),
+            season_thumbs: Vec::new(),
             scroll: ScrollHandle::new(),
             artwork: artwork::global(cx),
             image_size: Rung::fit(Kind::Backdrop, width, scale)
@@ -113,7 +118,8 @@ impl Detail {
         detail
     }
 
-    /// Loads the Item, and the seasons of a series.
+    /// Loads the Item, the seasons of a series, and the episodes of the chosen season or of the season of an
+    /// episode.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.image_size);
@@ -121,7 +127,7 @@ impl Detail {
             let result: Result<_, Error> = async {
                 let item = client.item(&id, image_size).await?;
                 let (seasons, versions) = if item.type_ == "series" {
-                    (client.seasons(&id).await?, Vec::new())
+                    (client.seasons(&id, image_size).await?, Vec::new())
                 } else {
                     (Vec::new(), client.versions(&id).await?)
                 };
@@ -138,6 +144,13 @@ impl Detail {
                             .map(|hash| hash.as_deref().and_then(artwork::thumbhash))
                             .collect();
                         for old in std::mem::replace(&mut this.thumbs, thumbs).into_iter().flatten() {
+                            cx.drop_image(old, None);
+                        }
+                        let posters = seasons
+                            .iter()
+                            .map(|s| s.poster_thumbhash.as_deref().and_then(artwork::thumbhash))
+                            .collect();
+                        for old in std::mem::replace(&mut this.season_thumbs, posters).into_iter().flatten() {
                             cx.drop_image(old, None);
                         }
                         let number = this.wanted_season.take().or(item.play_season_number);
@@ -158,16 +171,21 @@ impl Detail {
         });
     }
 
-    /// Loads the episodes of the chosen season.
+    /// The series id and the season number of the episodes that the page lists.
+    fn listed_season(&self) -> Option<(String, i64)> {
+        episode_list(self.item.as_ref()?, self.seasons.get(self.season).map(|s| s.season_number))
+    }
+
+    /// Loads the episodes of the chosen season, or of the season of an episode.
     fn load_episodes(&mut self, cx: &mut Context<Self>) {
-        let Some(season) = self.seasons.get(self.season).map(|s| s.season_number) else {
+        let Some((id, season)) = self.listed_season() else {
             return;
         };
         for old in self.episode_thumbs.drain(..).flatten() {
             cx.drop_image(old, None);
         }
         self.episodes.clear();
-        let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.episode_size);
+        let (client, image_size) = (self.client.clone(), self.episode_size);
         self._episodes = cx.spawn(async move |this, cx| {
             let result = client.season_episodes(&id, season, image_size).await;
             this.update(cx, |this, cx| {
@@ -297,8 +315,8 @@ impl Detail {
     /// Plays an episode at its saved position, with the series, so that Next episode works.
     fn play_episode(&mut self, index: usize, cx: &mut Context<Self>) {
         self.focus = Focus::Episode(index);
-        if let Some(episode) = self.episodes.get(index) {
-            cx.emit(Play(PlayItem::episode(self.id.clone(), episode.clone())));
+        if let (Some(episode), Some((series, _))) = (self.episodes.get(index), self.listed_season()) {
+            cx.emit(Play(PlayItem::episode(series, episode.clone())));
         }
         cx.notify();
     }
@@ -470,57 +488,137 @@ impl Detail {
         div().px(px(MARGIN)).flex().flex_wrap().gap(px(8.)).children(pills).into_any_element()
     }
 
-    fn season_pills(&self, cx: &Context<Self>) -> AnyElement {
-        let pills = self.seasons.iter().enumerate().map(|(i, season)| {
-            self.pill(("detail-season", i), season.title.clone().into(), i == self.season, Focus::Season(i), cx)
-                .on_click(cx.listener(move |this, _, _, cx| this.choose_season(i, cx)))
-        });
-        div().px(px(MARGIN)).flex().flex_wrap().gap(px(8.)).children(pills).into_any_element()
-    }
-
-    fn episode_grid(&self, cx: &Context<Self>) -> AnyElement {
+    /// A card for each season: the poster, the title and the watched count. The chosen season has a light border.
+    fn season_cards(&self, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let cards = self.episodes.iter().enumerate().map(|(i, episode)| {
-            let focused = self.active && self.focus == Focus::Episode(i);
-            let thumb = self.episode_thumbs.get(i).cloned().flatten();
-            let progress = episode.user_data.as_ref().and_then(|d| progress(d.position_seconds, d.duration_seconds));
-            let mut art = div()
-                .relative()
-                .w(px(EPISODE_WIDTH))
-                .h(px(EPISODE_HEIGHT))
-                .rounded(px(10.))
-                .overflow_hidden()
-                .bg(t.surface)
-                .border_2()
-                .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .child(div().absolute().inset_0().child(artwork::image(
-                    self.url(&episode.still_url),
-                    thumb,
-                    EPISODE_WIDTH,
-                )));
-            if let Some(progress) = progress {
-                art = art.child(progress_bar(progress, t.accent));
-            }
+        let cards = self.seasons.iter().enumerate().map(|(i, season)| {
+            let focused = self.active && self.focus == Focus::Season(i);
+            let border = match (focused, i == self.season) {
+                (true, _) => t.accent,
+                (false, true) => t.foreground,
+                (false, false) => gpui::transparent_black(),
+            };
             div()
-                .id(("detail-episode", i))
+                .id(("detail-season", i))
                 .clickable()
-                .w(px(EPISODE_WIDTH))
+                .w(px(SEASON_WIDTH))
+                .flex_none()
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .on_click(cx.listener(move |this, _, _, cx| this.play_episode(i, cx)))
-                .child(art)
+                .on_click(cx.listener(move |this, _, _, cx| this.choose_season(i, cx)))
+                .child(
+                    div()
+                        .w(px(SEASON_WIDTH))
+                        .h(px(SEASON_WIDTH * 1.5))
+                        .rounded(px(10.))
+                        .overflow_hidden()
+                        .bg(t.surface)
+                        .border_2()
+                        .border_color(border)
+                        .child(artwork::image(
+                            self.url(&season.poster_url),
+                            self.season_thumbs.get(i).cloned().flatten(),
+                            SEASON_WIDTH,
+                        )),
+                )
                 .child(
                     div()
                         .text_size(px(13.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(if focused { t.bright } else { t.foreground })
                         .truncate()
-                        .child(format!("{}. {}", episode.episode_number, episode.title)),
+                        .child(season.title.clone()),
                 )
-                .child(div().text_size(px(12.)).text_color(t.secondary).child(format!("{}m", episode.runtime)))
+                .child(div().text_size(px(12.)).text_color(t.secondary).child(season_line(season)))
         });
-        div().px(px(MARGIN)).flex().flex_wrap().gap(px(GAP)).children(cards).into_any_element()
+        div()
+            .id("detail-seasons")
+            .px(px(MARGIN))
+            .flex()
+            .gap(px(GAP))
+            .overflow_x_scroll()
+            .children(cards)
+            .into_any_element()
+    }
+
+    /// The episode grid. On an episode page it has the More Episodes title.
+    fn episode_grid(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
+        let t = cx.omarchy();
+        let cards = self.episodes.iter().enumerate().map(|(i, episode)| self.episode_card(i, episode, cx));
+        div()
+            .px(px(MARGIN))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .children((item.type_ == "episode").then(|| {
+                div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child("More Episodes")
+            }))
+            .child(div().flex().flex_wrap().gap(px(GAP)).children(cards))
+            .into_any_element()
+    }
+
+    /// An episode card: the still with the quality badge and the progress, the number and the title, the runtime
+    /// and the air date, and two lines of the overview. The episode of an episode page has "Now viewing".
+    fn episode_card(&self, i: usize, episode: &wire::Episode, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let t = cx.omarchy();
+        let focused = self.active && self.focus == Focus::Episode(i);
+        let thumb = self.episode_thumbs.get(i).cloned().flatten();
+        let progress = episode.user_data.as_ref().and_then(|d| progress(d.position_seconds, d.duration_seconds));
+        let label = |text: String| {
+            div()
+                .absolute()
+                .top(px(8.))
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .bg(gpui::hsla(0., 0., 0., 0.7))
+                .text_size(px(10.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(gpui::white())
+                .child(text)
+        };
+        let badge = episode_badge(episode);
+        let mut art = div()
+            .relative()
+            .w(px(EPISODE_WIDTH))
+            .h(px(EPISODE_HEIGHT))
+            .rounded(px(10.))
+            .overflow_hidden()
+            .bg(t.surface)
+            .border_2()
+            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+            .child(div().absolute().inset_0().child(artwork::image(self.url(&episode.still_url), thumb, EPISODE_WIDTH)))
+            .children((!badge.is_empty()).then(|| label(badge).left(px(8.))))
+            .children((episode.content_id == self.id).then(|| label("NOW VIEWING".into()).right(px(8.))));
+        if let Some(progress) = progress {
+            art = art.child(progress_bar(progress, t.accent));
+        }
+        div()
+            .id(("detail-episode", i))
+            .clickable()
+            .w(px(EPISODE_WIDTH))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .on_click(cx.listener(move |this, _, _, cx| this.play_episode(i, cx)))
+            .child(art)
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if focused { t.bright } else { t.foreground })
+                    .truncate()
+                    .child(format!("{}. {}", episode.episode_number, episode.title)),
+            )
+            .child(div().text_size(px(12.)).text_color(t.secondary).child(episode_line(episode)))
+            .children(
+                episode
+                    .overview
+                    .clone()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| div().text_size(px(12.)).text_color(t.secondary).line_clamp(2).child(text)),
+            )
     }
 
     /// A cast or crew card: the photo, the name, and the character or the job. `thumb` is the index of its
@@ -665,10 +763,10 @@ impl Render for Detail {
                 page = page.child(self.version_pills(cx));
             }
             if !self.seasons.is_empty() {
-                page = page.child(self.season_pills(cx));
+                page = page.child(self.season_cards(cx));
             }
             if !self.episodes.is_empty() {
-                page = page.child(self.episode_grid(cx));
+                page = page.child(self.episode_grid(item, cx));
             }
             page = page.children(self.sections(item, cx));
         }
@@ -676,11 +774,57 @@ impl Render for Detail {
     }
 }
 
-/// The Item that Enter on a card opens, and the season to show: an episode or a season opens its series.
+/// The Item that Enter on a card opens, and the season to show: a season opens its series. An episode opens its own
+/// page, with More Episodes.
 pub fn target(item: &wire::CatalogItem) -> (String, Option<i64>) {
     match (&item.series_id, item.type_.as_str()) {
-        (Some(series), "episode" | "season") => (series.clone(), item.season_number),
+        (Some(series), "season") => (series.clone(), item.season_number),
         _ => (item.content_id.clone(), None),
+    }
+}
+
+/// The series id and the season number of the episodes that the page lists: the chosen season `season` of a series,
+/// or the season of an episode for its More Episodes row. A movie lists none.
+pub fn episode_list(item: &wire::CatalogItemDetail, season: Option<i64>) -> Option<(String, i64)> {
+    match item.type_.as_str() {
+        "series" => season.map(|season| (item.content_id.clone(), season)),
+        "episode" => item.series_id.clone().zip(item.season_number),
+        _ => None,
+    }
+}
+
+/// The line below the title of an episode card: the runtime and the air date, for example "57m · Feb 18, 2022".
+pub fn episode_line(episode: &wire::Episode) -> String {
+    let aired = episode.air_date.as_deref().and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
+    [Some(format!("{}m", episode.runtime)), aired.map(|date| date.format("%b %-d, %Y").to_string())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The quality badge of an episode, for example "4K DV", from the overlay that the server sends, else from the first
+/// file. "" when neither has the resolution or the dynamic range.
+pub fn episode_badge(episode: &wire::Episode) -> String {
+    let (size, range) = match (&episode.overlay_summary, episode.files.first()) {
+        (Some(overlay), _) => {
+            let range = overlay.hdr.as_deref().map(|hdr| if hdr == "Dolby Vision" { "DV" } else { hdr }.to_string());
+            (overlay.resolution.as_deref(), range)
+        }
+        (None, Some(file)) => (file.resolution.as_deref(), file.hdr.then(|| "HDR".to_string())),
+        (None, None) => (None, None),
+    };
+    [size.map(resolution), range].into_iter().flatten().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// The line of a season card: how many episodes the Profile watched, for example "1 of 9 episodes", or only the
+/// episode count when the server sends no watch data.
+pub fn season_line(season: &wire::Season) -> String {
+    let count = season.episode_count;
+    let noun = if count == 1 { "episode" } else { "episodes" };
+    match &season.user_data {
+        Some(data) => format!("{} of {count} {noun}", data.watched_count),
+        None => format!("{count} {noun}"),
     }
 }
 
@@ -706,7 +850,7 @@ pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
     actions
 }
 
-/// The focused control, by index: a hero button, a version pill, a season pill, an episode card, a cast card, a
+/// The focused control, by index: a hero button, a version pill, a season card, an episode card, a cast card, a
 /// crew card or a trailer card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -985,11 +1129,11 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_an_episode_or_a_season_opens_its_series_with_that_season() {
+    fn enter_on_a_season_opens_its_series_with_that_season_and_an_episode_opens_its_page() {
         let movie = card(json!({"content_id": "movie:heat-1995"}));
         assert_eq!(target(&movie), ("movie:heat-1995".into(), None));
         let episode = card(json!({"content_id": "e", "type": "episode", "series_id": "series:s", "season_number": 2}));
-        assert_eq!(target(&episode), ("series:s".into(), Some(2)));
+        assert_eq!(target(&episode), ("e".into(), None));
         let season = card(json!({"content_id": "s2", "type": "season", "series_id": "series:s", "season_number": 2}));
         assert_eq!(target(&season), ("series:s".into(), Some(2)));
         let series = card(json!({"content_id": "series:s", "type": "series"}));
@@ -1239,5 +1383,59 @@ mod tests {
         assert_eq!(series.child(Focus::Season(1)), 1);
         assert_eq!(series.child(Focus::Trailer(0)), 5, "hero, seasons, episodes, cast, crew; a series has no versions");
         assert_eq!(no_crew.child(Focus::Trailer(0)), 4);
+    }
+
+    fn episode(fields: serde_json::Value) -> wire::Episode {
+        let body: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/list_season_episodes_ok.json")).unwrap();
+        let mut episode = body["items"][0].clone();
+        episode.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(episode).unwrap()
+    }
+
+    #[test]
+    fn an_episode_row_has_the_runtime_the_air_date_and_a_quality_badge() {
+        assert_eq!(episode_line(&episode(json!({}))), "57m · Feb 18, 2022");
+        assert_eq!(episode_line(&episode(json!({"air_date": null}))), "57m");
+        assert_eq!(
+            episode_line(&episode(json!({"air_date": "soon"}))),
+            "57m",
+            "a date the app cannot read is left out"
+        );
+        let dv =
+            episode(json!({"overlay_summary": {"resolution": "4K", "hdr": "Dolby Vision", "video_codec": "hevc"}}));
+        assert_eq!(episode_badge(&dv), "4K DV");
+        assert_eq!(
+            episode_badge(&episode(json!({"overlay_summary": {"resolution": "2160p", "hdr": "HDR10"}}))),
+            "4K HDR10"
+        );
+        assert_eq!(episode_badge(&episode(json!({}))), "1080p", "with no overlay, the first file gives the badge");
+        let hdr_file = json!({"files": [{"file_id": "1", "resolution": "2160p", "hdr": true, "file_size": 1}]});
+        assert_eq!(episode_badge(&episode(hdr_file)), "4K HDR");
+        assert_eq!(episode_badge(&episode(json!({"files": []}))), "");
+    }
+
+    #[test]
+    fn a_season_card_counts_the_watched_episodes() {
+        let season = |fields: serde_json::Value| {
+            let body: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/silo/list_series_seasons_ok.json")).unwrap();
+            let mut season = body["items"][0].clone();
+            season.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            serde_json::from_value::<wire::Season>(season).unwrap()
+        };
+        assert_eq!(season_line(&season(json!({}))), "1 of 9 episodes");
+        assert_eq!(season_line(&season(json!({"user_data": null}))), "9 episodes");
+        assert_eq!(season_line(&season(json!({"user_data": null, "episode_count": 1}))), "1 episode");
+    }
+
+    #[test]
+    fn an_episode_page_lists_the_episodes_of_its_season() {
+        let ep = detail(json!({"type": "episode", "content_id": "e", "series_id": "series:s", "season_number": 2}));
+        assert_eq!(episode_list(&ep, None), Some(("series:s".into(), 2)));
+        let series = detail(json!({"type": "series", "content_id": "series:s"}));
+        assert_eq!(episode_list(&series, Some(3)), Some(("series:s".into(), 3)), "a series lists the chosen season");
+        assert_eq!(episode_list(&series, None), None, "the seasons did not load");
+        assert_eq!(episode_list(&detail(json!({})), None), None, "a movie has no episodes");
     }
 }
