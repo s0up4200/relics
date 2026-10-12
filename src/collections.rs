@@ -223,6 +223,7 @@ impl Render for Collections {
                         .flex()
                         .gap(px(14.))
                         .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
                         .track_scroll(&self.row_scrolls[row])
                         .children(cards),
                 )

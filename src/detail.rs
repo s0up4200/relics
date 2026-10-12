@@ -715,6 +715,7 @@ impl Detail {
             .flex()
             .gap(px(GAP))
             .overflow_x_scroll()
+            .restrict_scroll_to_axis()
             .children(cards)
             .into_any_element()
     }
@@ -846,7 +847,9 @@ impl Detail {
                     .flex_col()
                     .gap(px(12.))
                     .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child(title))
-                    .child(div().id(id).flex().gap(px(GAP)).overflow_x_scroll().children(cards))
+                    .child(
+                        div().id(id).flex().gap(px(GAP)).overflow_x_scroll().restrict_scroll_to_axis().children(cards),
+                    )
                     .into_any_element()
             })
         };

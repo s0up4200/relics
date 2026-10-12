@@ -304,6 +304,7 @@ impl Home {
                     .flex()
                     .gap(px(14.))
                     .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.row_scrolls[index])
                     .children(cards)
                     .children(view_all),

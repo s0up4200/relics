@@ -621,7 +621,7 @@ impl Search {
                         .child(person.name.clone()),
                 )
         });
-        div().id("search-people").flex().gap(px(12.)).overflow_x_scroll().children(cards)
+        div().id("search-people").flex().gap(px(12.)).overflow_x_scroll().restrict_scroll_to_axis().children(cards)
     }
 
     /// The Request to add row: the titles of the search that are not on the Server.
@@ -683,7 +683,15 @@ impl Search {
                         div().text_size(px(14.)).font_weight(FontWeight::NORMAL).text_color(t.secondary).child(note)
                     })),
             )
-            .child(div().id("search-requests").flex().gap(px(12.)).overflow_x_scroll().children(cards))
+            .child(
+                div()
+                    .id("search-requests")
+                    .flex()
+                    .gap(px(12.))
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .children(cards),
+            )
     }
 }
 
