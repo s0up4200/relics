@@ -2,6 +2,13 @@
 
 silo-omarchy is a native Silo media player for Omarchy. The library window uses GPUI and gpui-omarchy. libmpv plays video in its own window.
 
+## Builds
+
+A full GPUI build overloads this machine (16 cores, 19 GB of RAM, about 16 GB per target dir).
+
+- Run every cargo command as `nice -n 19 cargo ... -j 4`, with `CARGO_TARGET_DIR=$HOME/.cache/silo-omarchy-target`. The shared target dir also applies in a worktree, so a new worktree rebuilds only the app crate.
+- Run one cargo command at a time, and one implementer agent at a time.
+
 ## Agent skills
 
 ### Issue tracker
