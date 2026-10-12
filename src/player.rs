@@ -14,6 +14,7 @@ use gpui::{AppContext as _, Context, EventEmitter, Hsla, Rgba, Task};
 use gpui_omarchy::ActiveTheme as _;
 use mpris_server::PlaybackStatus;
 
+use crate::api::types::Marker;
 use crate::api::{Client, wire};
 use crate::mpris::{self, Track};
 use crate::playback::{Command, Input, Session};
@@ -142,6 +143,8 @@ pub struct PlayerWindow {
     position: Option<f64>,
     /// The label of the Skip prompt that shows. Empty when none shows.
     prompt: String,
+    /// The Markers of the file in player time, for the seek bar of the Player view.
+    markers: Vec<Marker>,
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
@@ -181,6 +184,7 @@ impl PlayerWindow {
             in_view: false,
             position: None,
             prompt: String::new(),
+            markers: Vec::new(),
         }
     }
 
@@ -190,7 +194,7 @@ impl PlayerWindow {
         self.step(Input::End, cx);
         self.generation += 1;
         self.in_view = self.video.is_some();
-        (self.position, self.prompt) = (None, String::new());
+        (self.position, self.prompt, self.markers) = (None, String::new(), Vec::new());
         self.session = Some(Session::new(item.runtime, client.server_settings()));
         self.client = Some(client.clone());
         // A new Item drops these tasks, so an older answer never reaches the new session.
@@ -460,6 +464,7 @@ impl PlayerWindow {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.show_markers(&markers)) {
                     eprintln!("silo-omarchy: cannot send the markers to the player: {err}");
                 }
+                self.markers = markers;
             }
             Command::ShowPrompt(label) => {
                 self.prompt.clone_from(&label);
@@ -547,6 +552,11 @@ impl PlayerWindow {
     /// The label of the Skip prompt that shows, or an empty text.
     pub fn prompt(&self) -> &str {
         &self.prompt
+    }
+
+    /// The Markers of the file, in player time.
+    pub fn markers(&self) -> &[Marker] {
+        &self.markers
     }
 
     /// The volume in percent, and whether the audio is muted.

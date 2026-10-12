@@ -257,6 +257,15 @@ impl PlayerView {
                     .text_color(t.bright)
                     .child(player.title().unwrap_or_default().to_string()),
             );
+        // The Markers show as light ranges over the track, also over the played part.
+        let markers = duration.into_iter().flat_map(|duration| {
+            player.markers().iter().filter_map(move |marker| marker_span(marker.start, marker.end, duration))
+        });
+        let markers = markers.map(|(left, width)| {
+            div().absolute().top_0().h_full().left(relative(left)).w(relative(width)).bg(t.bright.opacity(0.5))
+        });
+        let played = div().absolute().top_0().left_0().h_full().w(relative(fraction)).rounded_full().bg(t.accent);
+        let track = div().relative().h(px(4.)).w_full().rounded_full().bg(t.inset).child(played).children(markers);
         let bar = self.bar.clone();
         let seek = div()
             .id("seek-bar")
@@ -267,14 +276,7 @@ impl PlayerView {
             .items_center()
             .on_click(cx.listener(Self::click_bar))
             .child(canvas(move |bounds, _, _| bar.set(Some(bounds)), |_, _, _, _| ()).absolute().size_full())
-            .child(
-                div()
-                    .h(px(4.))
-                    .w_full()
-                    .rounded_full()
-                    .bg(t.inset)
-                    .child(div().h_full().w(relative(fraction)).rounded_full().bg(t.accent)),
-            );
+            .child(track);
         let row = div()
             .flex()
             .items_center()
@@ -359,6 +361,13 @@ pub fn clock(seconds: f64) -> String {
     if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
 }
 
+/// Where a Marker from `start` to `end` shows on a seek bar of a file of `duration` seconds: its left edge and
+/// its width, as fractions of the bar. A Marker outside the file does not show.
+pub fn marker_span(start: f64, end: f64, duration: f64) -> Option<(f32, f32)> {
+    let (start, end) = (start.max(0.0), end.min(duration));
+    (duration > 0.0 && end > start).then(|| ((start / duration) as f32, ((end - start) / duration) as f32))
+}
+
 /// The position that a click `x` pixels into a seek bar of `width` pixels seeks to.
 pub fn seek_target(x: f32, width: f32, duration: f64) -> f64 {
     if width <= 0.0 {
@@ -369,7 +378,7 @@ pub fn seek_target(x: f32, width: f32, duration: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{clock, seek_target};
+    use super::{clock, marker_span, seek_target};
 
     #[test]
     fn the_time_shows_hours_only_from_one_hour() {
@@ -377,6 +386,15 @@ mod tests {
         assert_eq!(clock(125.9), "2:05");
         assert_eq!(clock(3723.0), "1:02:03");
         assert_eq!(clock(-1.0), "0:00");
+    }
+
+    #[test]
+    fn a_marker_shows_at_its_fraction_of_the_duration_and_is_cut_to_the_file() {
+        assert_eq!(marker_span(100.0, 300.0, 1000.0), Some((0.1, 0.2)));
+        assert_eq!(marker_span(-50.0, 100.0, 1000.0), Some((0.0, 0.1)), "starts before the file");
+        assert_eq!(marker_span(900.0, 1100.0, 1000.0), Some((0.9, 0.1)), "runs past the end");
+        assert_eq!(marker_span(1100.0, 1200.0, 1000.0), None, "after the end");
+        assert_eq!(marker_span(10.0, 20.0, 0.0), None, "no duration yet");
     }
 
     #[test]

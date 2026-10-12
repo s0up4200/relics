@@ -147,9 +147,9 @@ pub enum Command {
     ShowPrompt(String),
     /// Seek to this player position.
     Seek(f64),
-    /// Play the next episode in the same Player window. The session has already ended.
+    /// Play the next episode in the same Player view or Player window. The session has already ended.
     PlayNext,
-    /// Play the previous episode in the same Player window. The session has already ended.
+    /// Play the previous episode in the same Player view or Player window. The session has already ended.
     PlayPrevious,
     /// Set the mpv `pause` property.
     SetPause(bool),
@@ -613,11 +613,14 @@ impl Session {
                 self.resolved.push(index);
                 commands.push(Command::Seek(end));
             }
+            MarkerKind::Credits => commands.push(self.show("Skip credits", skip, false, now)),
             MarkerKind::Recap if self.settings.auto_skip_recap => {
                 self.resolved.push(index);
                 commands.push(Command::Seek(end));
             }
-            _ => {}
+            MarkerKind::Recap => commands.push(self.show("Skip recap", skip, false, now)),
+            MarkerKind::Preview => commands.push(self.show("Skip preview", skip, false, now)),
+            MarkerKind::Unknown(_) => {}
         }
         commands
     }
@@ -638,7 +641,7 @@ impl Session {
         Command::ShowPrompt(label.into())
     }
 
-    /// Ends the session at `position` and plays the next episode in the same Player window.
+    /// Ends the session at `position` and plays the next episode in the same Player view or Player window.
     fn play_next(&mut self, position: Option<f64>) -> Vec<Command> {
         let mut commands = self.finish(position, false);
         commands.push(Command::PlayNext);

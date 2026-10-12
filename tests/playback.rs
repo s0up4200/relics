@@ -345,8 +345,10 @@ fn always_does_not_skip_again_after_the_undo_prompt_times_out() {
 fn credits_and_recap_skip_only_when_the_server_settings_say_so() {
     let markers = vec![marker(MarkerKind::Recap, 100.0, 130.0), marker(MarkerKind::Credits, 500.0, 520.0)];
     let mut session = with_markers(ServerSettings::default(), markers.clone());
-    assert_eq!(session.step(Input::Position(0.5), at(1)), vec![]);
-    assert_eq!(session.step(Input::Position(400.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(0.5), at(1)), vec![prompt("Skip recap")]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(30.0), prompt("")]);
+    assert_eq!(session.step(Input::Position(400.0), at(3)), vec![prompt("Skip credits")]);
+    assert_eq!(session.step(Input::Action, at(4)), vec![Command::Seek(420.0), prompt("")]);
     let settings = ServerSettings { auto_skip_credits: true, auto_skip_recap: true, ..ServerSettings::default() };
     let mut session = with_markers(settings, markers);
     assert_eq!(session.step(Input::Position(0.5), at(1)), vec![Command::Seek(30.0)]);
@@ -354,10 +356,30 @@ fn credits_and_recap_skip_only_when_the_server_settings_say_so() {
 }
 
 #[test]
-fn a_preview_marker_does_nothing() {
+fn a_preview_marker_offers_skip_preview_and_the_action_seeks_to_its_end() {
     let settings = ServerSettings { auto_skip_credits: true, auto_skip_recap: true, ..ServerSettings::default() };
     let mut session = with_markers(settings, vec![marker(MarkerKind::Preview, 200.0, 220.0)]);
-    assert_eq!(session.step(Input::Position(105.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(99.0), at(1)), vec![]);
+    assert_eq!(session.step(Input::Position(100.0), at(1)), vec![prompt("Skip preview")], "no automatic skip");
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(120.0), prompt("")]);
+    session.step(Input::Position(120.0), at(2));
+    assert_eq!(session.step(Input::Position(105.0), at(3)), vec![], "a skipped preview is not offered again");
+}
+
+#[test]
+fn skip_preview_hides_when_playback_leaves_the_preview_or_after_five_seconds() {
+    let mut session = with_markers(ServerSettings::default(), vec![marker(MarkerKind::Preview, 200.0, 220.0)]);
+    session.step(Input::Position(100.0), at(1));
+    assert_eq!(session.step(Input::Position(130.0), at(2)), vec![prompt("")]);
+    session.step(Input::Position(110.0), at(3));
+    assert_eq!(session.step(Input::Tick, at(8)), vec![prompt("")]);
+}
+
+#[test]
+fn credits_to_the_end_with_no_next_episode_offer_skip_credits() {
+    let mut session = end_credits(ServerSettings::default());
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Skip credits")]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![Command::Seek(1000.0), prompt("")]);
 }
 
 fn end_credits(settings: ServerSettings) -> Session {
@@ -366,8 +388,6 @@ fn end_credits(settings: ServerSettings) -> Session {
 
 #[test]
 fn credits_to_the_end_of_the_file_offer_the_next_episode_when_one_exists() {
-    let mut session = end_credits(ServerSettings::default());
-    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![], "no next episode, no prompt");
     let mut session = end_credits(ServerSettings::default());
     session.step(Input::NextEpisode, at(0));
     assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next episode")]);

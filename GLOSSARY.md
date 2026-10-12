@@ -107,7 +107,7 @@ _Avoid_: config, device setting
 A time range in a file version that Silo labels `intro`, `credits`, `recap` or `preview`. A file version can have more than one marker of the same kind.
 
 **Skip prompt**:
-The button that the player shows while playback is inside a marker. It offers "Skip intro", "Watch intro" (after an automatic skip), or "Next episode" (when the credits run to the end of the file). The app decides when the prompt shows. The controller only draws it.
+The button that the Player view shows over the video while playback is inside a marker. It offers "Skip intro", "Skip recap", "Skip credits", "Skip preview", "Watch intro" (after an automatic skip), or "Next episode" (when the credits run to the end of the file and the Item has a next episode). A recap or credits marker that the Server settings skip automatically shows no prompt. The Playback session decides when the prompt shows. The Player view only draws it, and a click on it does the same as Enter.
 
 **Offline**:
 The app state when the active Server does not answer, or answers 503. The app keeps its tokens and retries. It never signs the user out.
