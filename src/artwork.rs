@@ -37,8 +37,10 @@ pub struct ArtworkCache {
     running: usize,
     /// The decoded bytes of the images in memory.
     bytes: usize,
-    /// Counts the calls to `load`. Each entry keeps the count of its last use.
-    clock: u64,
+    /// Counts the drawn frames. Each entry keeps the frame that last drew it.
+    frame: u64,
+    /// The current frame has an eviction queued for its end.
+    frame_open: bool,
     /// The bytes of the files on disk, as far as the cache knows: the bytes that the last prune kept, and the
     /// bytes that downloads wrote after it started.
     disk_bytes: u64,
@@ -79,7 +81,8 @@ pub fn global(cx: &mut App) -> Entity<ArtworkCache> {
         queue: VecDeque::new(),
         running: 0,
         bytes: 0,
-        clock: 0,
+        frame: 0,
+        frame_open: false,
         disk_bytes: 0,
         pruning: false,
     });
@@ -164,19 +167,11 @@ impl ArtworkCache {
         .detach();
     }
 
-    /// Drops the least recently used images until the images in memory hold
-    /// `MEMORY_LIMIT` bytes or less. It keeps the image that was used last.
-    fn evict(&mut self, window: &mut Window, cx: &mut App) {
-        while self.bytes > MEMORY_LIMIT {
-            let Some(key) = self
-                .entries
-                .iter()
-                .filter(|(_, entry)| entry.bytes > 0 && entry.last_use < self.clock)
-                .min_by_key(|(_, entry)| entry.last_use)
-                .map(|(key, _)| key.clone())
-            else {
-                return;
-            };
+    /// Runs after a frame is drawn. It drops the images that this frame did not draw, see [`evictions`], and
+    /// starts the next frame.
+    fn end_frame(&mut self, window: &mut Window, cx: &mut App) {
+        let images = self.entries.iter().map(|(key, entry)| (key.clone(), entry.last_use, entry.bytes));
+        for key in evictions(images, self.frame, self.bytes, MEMORY_LIMIT) {
             let entry = self.entries.remove(&key).expect("the key comes from the map");
             self.bytes -= entry.bytes;
             if let State::Ready(item) = entry.state
@@ -185,7 +180,30 @@ impl ArtworkCache {
                 cx.drop_image(image, Some(window));
             }
         }
+        self.frame += 1;
+        self.frame_open = false;
     }
+}
+
+/// The keys of the decoded images to drop, least recently drawn first, so that `bytes` falls to `limit` or less.
+/// Each image is (key, last frame that drew it, decoded bytes). An image that `frame` drew always stays, also
+/// when the images stay over the limit: the next frame draws it again, and a dropped image loads again.
+pub fn evictions<K>(
+    images: impl IntoIterator<Item = (K, u64, usize)>,
+    frame: u64,
+    mut bytes: usize,
+    limit: usize,
+) -> Vec<K> {
+    let mut old: Vec<_> = images.into_iter().filter(|&(_, last, size)| size > 0 && last < frame).collect();
+    old.sort_by_key(|&(_, last, _)| last);
+    old.into_iter()
+        .take_while(|&(_, _, size)| {
+            let over = bytes > limit;
+            bytes = bytes.saturating_sub(size);
+            over
+        })
+        .map(|(key, ..)| key)
+        .collect()
 }
 
 impl ImageCache for ArtworkCache {
@@ -200,7 +218,14 @@ impl ImageCache for ArtworkCache {
             Resource::Path(path) => (path.display().to_string(), None),
             Resource::Embedded(name) => (name.to_string(), None),
         };
-        self.clock += 1;
+        if !self.frame_open {
+            self.frame_open = true;
+            let this = self.this.clone();
+            // A deferred call runs when the window has drawn the frame.
+            window.defer(cx, move |window, cx| {
+                this.update(cx, |this, cx| this.end_frame(window, cx)).ok();
+            });
+        }
         let entry = self.entries.entry(key.clone()).or_insert_with(|| {
             let state = match &url {
                 Some(url) => {
@@ -211,7 +236,7 @@ impl ImageCache for ArtworkCache {
             };
             Entry { state, last_use: 0, bytes: 0, refetched: false }
         });
-        entry.last_use = self.clock;
+        entry.last_use = self.frame;
         let result = match &mut entry.state {
             State::Fetching(views) => {
                 views.insert(window.current_view());
@@ -238,7 +263,6 @@ impl ImageCache for ArtworkCache {
             let size = image.size(0);
             entry.bytes = (size.width.0 * size.height.0 * 4) as usize;
             self.bytes += entry.bytes;
-            self.evict(window, cx);
         }
         self.start_downloads(cx);
         result

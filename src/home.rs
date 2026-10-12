@@ -370,7 +370,9 @@ pub(crate) fn artwork_image(url: Option<String>, thumb: Option<Arc<RenderImage>>
         None => div().into_any_element(),
     };
     match url {
-        Some(url) => img(ImageSource::Resource(Resource::Uri(url.into())))
+        // GPUI keeps the loading state, and thus shows the Thumbhash, only for an image with an id.
+        Some(url) => img(ImageSource::Resource(Resource::Uri(url.clone().into())))
+            .id(gpui::SharedString::from(url))
             .size_full()
             .object_fit(ObjectFit::Cover)
             .with_loading(preview.clone())

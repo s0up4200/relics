@@ -145,6 +145,15 @@ fn a_download_reports_the_bytes_that_it_wrote_and_prune_the_bytes_that_it_kept()
 }
 
 #[test]
+fn eviction_drops_the_oldest_images_but_never_one_drawn_in_this_frame() {
+    // (key, last frame that drew it, decoded bytes). Frame 7 is the current frame.
+    let images = [("old", 3, 40), ("older", 1, 40), ("drawn", 7, 100), ("also-drawn", 7, 100)];
+    assert_eq!(artwork::evictions(images, 7, 280, 250), ["older"], "the least recently drawn goes first");
+    assert_eq!(artwork::evictions(images, 7, 280, 100), ["older", "old"], "drawn images stay over the limit");
+    assert!(artwork::evictions(images, 7, 250, 250).is_empty());
+}
+
+#[test]
 fn a_discarded_file_downloads_again() {
     let dir = empty_dir("discard");
     let (http, seen) = host(vec![(200, Some("\"e1\""), "broken"), (200, Some("\"e2\""), "poster")]);
