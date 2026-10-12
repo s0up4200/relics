@@ -31,3 +31,7 @@ The repository must be public, because the AUR package downloads the tarball of 
 4. Build the package in a clean chroot (`extra-x86_64-build` from `devtools`).
 5. Run `makepkg --printsrcinfo > .SRCINFO`.
 6. Commit and push to the AUR.
+
+## Omarchy updates
+
+The Hyprland rule goes in `/usr/share/omarchy/default/hypr/apps/`. At each major Omarchy release, make sure that `default/hypr/apps.lua` in Omarchy still loads the files from that directory. If the rule does not load, the Library window and the video in it are 1.5% to 4% transparent.
