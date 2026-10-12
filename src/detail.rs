@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
-    RenderImage, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Task, Window, div,
-    linear_color_stop, linear_gradient, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, Render, RenderImage, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Task,
+    Window, div, linear_color_stop, linear_gradient, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -56,6 +56,11 @@ pub struct Detail {
     columns: usize,
     /// The error of the last request, shown with Retry.
     error: Option<String>,
+    /// The error of the last write action, for example a favorite that did not save. It shows at the bottom of the
+    /// window.
+    notice: Option<String>,
+    /// The season or episode card whose menu is open.
+    menu: Option<Mark>,
     /// The Thumbhash of the backdrop, the poster and each cast photo.
     thumbs: Vec<Option<Arc<RenderImage>>>,
     episode_thumbs: Vec<Option<Arc<RenderImage>>>,
@@ -68,7 +73,6 @@ pub struct Detail {
     episode_size: Rung,
     _loading: Task<()>,
     _episodes: Task<()>,
-    _watchlist: Task<()>,
 }
 
 impl EventEmitter<Play> for Detail {}
@@ -101,6 +105,8 @@ impl Detail {
             active: false,
             columns: 1,
             error: None,
+            notice: None,
+            menu: None,
             thumbs: Vec::new(),
             episode_thumbs: Vec::new(),
             season_thumbs: Vec::new(),
@@ -112,7 +118,6 @@ impl Detail {
             episode_size: Rung::fit(Kind::Still, EPISODE_WIDTH, scale),
             _loading: Task::ready(()),
             _episodes: Task::ready(()),
-            _watchlist: Task::ready(()),
         };
         detail.load(cx);
         detail
@@ -239,8 +244,25 @@ impl Detail {
         let Some(item) = &self.item else {
             return false;
         };
+        // The menu of a season or episode card takes each key.
+        self.menu = self.open_menu();
+        if let Some(mark) = self.menu {
+            match key {
+                Key::Other("enter") => self.mark(mark, cx),
+                Key::Other("escape" | "backspace" | "o") => self.menu = None,
+                _ => {}
+            }
+            cx.notify();
+            return true;
+        }
         match (self.focus, key) {
-            (Focus::Action(i), Key::Other("enter")) => self.act(actions(item)[i], cx),
+            (Focus::Action(i), Key::Other("enter")) => {
+                if let Some(&action) = actions(item).get(i) {
+                    self.act(action, cx);
+                }
+            }
+            (Focus::Season(i), Key::Other("o")) => self.menu = Some(Mark::Season(i)),
+            (Focus::Episode(i), Key::Other("o")) => self.menu = Some(Mark::Episode(i)),
             (Focus::Version(i), Key::Other("enter")) => self.choose_version(i, cx),
             (Focus::Season(i), Key::Other("enter")) => self.choose_season(i, cx),
             (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
@@ -262,10 +284,12 @@ impl Detail {
     }
 
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
-        let play = self.item.as_ref().map(|item| self.play_item(item));
-        let (Some(item), Some(mut play)) = (&mut self.item, play) else {
+        let Some(item) = &self.item else {
             return;
         };
+        let mut play = self.play_item(item);
+        let state = |flag: fn(&wire::CatalogItemUserState) -> bool| item.user_state.as_ref().is_some_and(flag);
+        let (client, id) = (self.client.clone(), self.id.clone());
         match action {
             Action::Play { .. } => cx.emit(Play(play)),
             Action::StartOver => {
@@ -273,28 +297,141 @@ impl Detail {
                 cx.emit(Play(play));
             }
             Action::Watchlist => {
-                let state = item.user_state.get_or_insert(wire::CatalogItemUserState {
-                    in_watchlist: false,
-                    is_favorite: false,
-                    played: false,
-                });
-                state.in_watchlist = !state.in_watchlist;
-                let (client, id, on) = (self.client.clone(), self.id.clone(), state.in_watchlist);
-                self._watchlist = cx.spawn(async move |this, cx| {
-                    if let Err(err) = client.set_watchlist(&id, on).await {
-                        this.update(cx, |this, cx| {
-                            if let Some(state) = this.item.as_mut().and_then(|item| item.user_state.as_mut()) {
-                                state.in_watchlist = !on;
-                            }
-                            this.error = Some(err.to_string());
-                            cx.notify();
-                        })
-                        .ok();
-                    }
-                });
+                let on = !state(|s| s.in_watchlist);
+                let call = async move { client.set_watchlist(&id, on).await };
+                self.write(
+                    call,
+                    move |this| this.item.iter_mut().for_each(|item| user_state(item).in_watchlist = on),
+                    cx,
+                );
             }
+            Action::Favorite => {
+                let on = !state(|s| s.is_favorite);
+                let call = async move { client.set_favorite(&id, on).await };
+                self.write(
+                    call,
+                    move |this| this.item.iter_mut().for_each(|item| user_state(item).is_favorite = on),
+                    cx,
+                );
+            }
+            Action::Rate(stars) => {
+                let call = async move { client.set_rating(&id, Some(stars)).await };
+                self.write(
+                    call,
+                    move |this| this.item.iter_mut().for_each(|item| item.user_rating = Some(stars.into())),
+                    cx,
+                );
+            }
+            Action::ClearRating => {
+                let call = async move { client.set_rating(&id, None).await };
+                self.write(call, |this| this.item.iter_mut().for_each(|item| item.user_rating = None), cx);
+            }
+            Action::Watched => self.mark(Mark::Item, cx),
         }
         cx.notify();
+    }
+
+    /// Marks the Item, a season or an episode watched, or unwatched when it is watched.
+    fn mark(&mut self, mark: Mark, cx: &mut Context<Self>) {
+        self.menu = None;
+        let target = match mark {
+            Mark::Item => {
+                self.item.as_ref().map(|item| (self.id.clone(), !item.user_state.as_ref().is_some_and(|s| s.played)))
+            }
+            Mark::Season(i) => self.seasons.get(i).map(|s| (s.content_id.clone(), !season_watched(s))),
+            Mark::Episode(i) => self.episodes.get(i).map(|e| (e.content_id.clone(), !episode_watched(e))),
+        };
+        let Some((id, on)) = target else {
+            return;
+        };
+        let client = self.client.clone();
+        let call = {
+            let id = id.clone();
+            async move { client.set_watched(&id, on).await }
+        };
+        self.write(
+            call,
+            move |this| {
+                // The list can show another season by now.
+                let listed = match mark {
+                    Mark::Episode(i) => this.episodes.get(i).is_some_and(|e| e.content_id == id),
+                    _ => true,
+                };
+                if let (Some(item), true) = (&mut this.item, listed) {
+                    apply_mark(item, &mut this.seasons, this.season, &mut this.episodes, mark, on);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// The open menu of a season or episode card. A click on another control moves the focus, and that closes the
+    /// menu.
+    fn open_menu(&self) -> Option<Mark> {
+        self.menu.filter(|mark| match (*mark, self.focus) {
+            (Mark::Season(i), Focus::Season(j)) | (Mark::Episode(i), Focus::Episode(j)) => i == j,
+            _ => false,
+        })
+    }
+
+    /// A season or episode card with the right-click that opens its menu, and the menu below it when it is open.
+    fn with_menu(
+        &self,
+        card: gpui::Stateful<gpui::Div>,
+        (mark, focus): (Mark, Focus),
+        watched: bool,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        let card = card.on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _, _, cx| {
+                this.focus = focus;
+                this.menu = Some(mark);
+                cx.notify();
+            }),
+        );
+        let menu = (self.open_menu() == Some(mark)).then(|| {
+            let label = if watched { "Mark unwatched" } else { "Mark watched" };
+            self.pill(("detail-mark", 0), label.into(), false, focus, cx)
+                .on_click(cx.listener(move |this, _, _, cx| this.mark(mark, cx)))
+        });
+        div().flex_none().flex().flex_col().items_start().gap(px(6.)).child(card).children(menu)
+    }
+
+    /// Sends a write action. The page shows the new state only when the server saved it. A failure, for example
+    /// while the app is Offline, shows an error and leaves the state as it was. Nothing is kept to send later.
+    fn write(
+        &mut self,
+        call: impl Future<Output = Result<(), Error>> + 'static,
+        apply: impl FnOnce(&mut Self) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.notice = None;
+        let focused = match self.focus {
+            Focus::Action(i) => self.item.as_ref().and_then(|item| actions(item).get(i).copied()),
+            _ => None,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = call.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        apply(this);
+                        // A button can move or go, for example Resume after Mark watched. The focus stays on the
+                        // button, or goes to the last one.
+                        if let (Some(action), Some(item), Focus::Action(_)) = (focused, &this.item, this.focus) {
+                            let actions = actions(item);
+                            let i = actions.iter().position(|a| *a == action).unwrap_or(actions.len() - 1);
+                            this.focus = Focus::Action(i);
+                        }
+                    }
+                    Err(err) => this.notice = Some(format!("Not saved: {err}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn choose_version(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -382,19 +519,16 @@ impl Detail {
     fn hero(&self, item: &wire::CatalogItemDetail, width: f32, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
         let buttons = actions(item).into_iter().enumerate().map(|(i, action)| {
-            let label: SharedString = match action {
-                Action::Play { resume: true } => "▶ Resume".into(),
-                Action::Play { resume: false } => "▶ Play".into(),
-                Action::StartOver => "Start over".into(),
-                Action::Watchlist if item.user_state.as_ref().is_some_and(|s| s.in_watchlist) => "✓ Watchlist".into(),
-                Action::Watchlist => "+ Watchlist".into(),
-            };
-            self.pill(("detail-action", i), label, i == 0, Focus::Action(i), cx).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.focus = Focus::Action(i);
-                    this.act(action, cx);
-                },
-            ))
+            let mut pill =
+                self.pill(("detail-action", i), action_label(item, action).into(), i == 0, Focus::Action(i), cx);
+            if let Action::Rate(_) = action {
+                // A star is a narrow button.
+                pill = pill.px(px(8.));
+            }
+            pill.on_click(cx.listener(move |this, _, _, cx| {
+                this.focus = Focus::Action(i);
+                this.act(action, cx);
+            }))
         });
         let labels = self.versions.get(self.version).map_or_else(|| quality_badges(item), version_labels);
         let title_text = {
@@ -470,7 +604,7 @@ impl Detail {
                             .children(line(ratings_line(item)))
                             .children(item.overview.clone().map(|text| div().line_clamp(3).child(text)))
                             .children(line(credits_line(item)))
-                            .child(div().pt(px(6.)).flex().gap(px(10.)).children(buttons)),
+                            .child(div().pt(px(6.)).flex().flex_wrap().gap(px(10.)).children(buttons)),
                     ),
             )
             .into_any_element()
@@ -498,7 +632,7 @@ impl Detail {
                 (false, true) => t.foreground,
                 (false, false) => gpui::transparent_black(),
             };
-            div()
+            let card = div()
                 .id(("detail-season", i))
                 .clickable()
                 .w(px(SEASON_WIDTH))
@@ -530,7 +664,8 @@ impl Detail {
                         .truncate()
                         .child(season.title.clone()),
                 )
-                .child(div().text_size(px(12.)).text_color(t.secondary).child(season_line(season)))
+                .child(div().text_size(px(12.)).text_color(t.secondary).child(season_line(season)));
+            self.with_menu(card, (Mark::Season(i), Focus::Season(i)), season_watched(season), cx)
         });
         div()
             .id("detail-seasons")
@@ -545,7 +680,10 @@ impl Detail {
     /// The episode grid. On an episode page it has the More Episodes title.
     fn episode_grid(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let cards = self.episodes.iter().enumerate().map(|(i, episode)| self.episode_card(i, episode, cx));
+        let cards = self.episodes.iter().enumerate().map(|(i, episode)| {
+            let mark = (Mark::Episode(i), Focus::Episode(i));
+            self.with_menu(self.episode_card(i, episode, cx), mark, episode_watched(episode), cx)
+        });
         div()
             .px(px(MARGIN))
             .flex()
@@ -611,7 +749,11 @@ impl Detail {
                     .truncate()
                     .child(format!("{}. {}", episode.episode_number, episode.title)),
             )
-            .child(div().text_size(px(12.)).text_color(t.secondary).child(episode_line(episode)))
+            .child(div().text_size(px(12.)).text_color(t.secondary).child(if episode_watched(episode) {
+                format!("{} · ✓ Watched", episode_line(episode))
+            } else {
+                episode_line(episode)
+            }))
             .children(
                 episode
                     .overview
@@ -770,7 +912,19 @@ impl Render for Detail {
             }
             page = page.children(self.sections(item, cx));
         }
-        page.children(status)
+        let notice = self.notice.clone().map(|notice| {
+            div()
+                .absolute()
+                .bottom(px(24.))
+                .left(px(MARGIN))
+                .right(px(MARGIN))
+                .p(px(12.))
+                .rounded(px(10.))
+                .bg(t.surface)
+                .text_color(t.danger)
+                .child(notice)
+        });
+        div().relative().size_full().child(page.children(status)).children(notice)
     }
 }
 
@@ -837,17 +991,144 @@ pub enum Action {
     },
     StartOver,
     Watchlist,
+    Favorite,
+    /// Mark watched, or Mark unwatched.
+    Watched,
+    /// Give the Item 1 to 5 stars.
+    Rate(u8),
+    ClearRating,
 }
 
-/// The buttons of the hero. Start over shows only when Resume does.
+/// The buttons of the hero. Start over shows only when Resume does, and Clear rating only when the Item has a
+/// rating.
 pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
     let resume = item.position_seconds.is_some_and(|position| position > 0.);
     let mut actions = vec![Action::Play { resume }];
     if resume {
         actions.push(Action::StartOver);
     }
-    actions.push(Action::Watchlist);
+    actions.extend([Action::Watchlist, Action::Favorite, Action::Watched]);
+    actions.extend((1..=5).map(Action::Rate));
+    if item.user_rating.is_some() {
+        actions.push(Action::ClearRating);
+    }
     actions
+}
+
+/// The text of a hero button. A star is full up to the rating of the Item.
+pub fn action_label(item: &wire::CatalogItemDetail, action: Action) -> String {
+    let state = item.user_state.as_ref();
+    let on = |flag: fn(&wire::CatalogItemUserState) -> bool| state.is_some_and(flag);
+    match action {
+        Action::Play { resume: true } => "▶ Resume",
+        Action::Play { resume: false } => "▶ Play",
+        Action::StartOver => "Start over",
+        Action::Watchlist if on(|s| s.in_watchlist) => "✓ Watchlist",
+        Action::Watchlist => "+ Watchlist",
+        Action::Favorite if on(|s| s.is_favorite) => "♥ Favorite",
+        Action::Favorite => "♡ Favorite",
+        Action::Watched if on(|s| s.played) => "✓ Watched",
+        Action::Watched => "Mark watched",
+        Action::Rate(stars) if item.user_rating.is_some_and(|rating| i64::from(stars) <= rating) => "★",
+        Action::Rate(_) => "☆",
+        Action::ClearRating => "Clear rating",
+    }
+    .to_string()
+}
+
+/// What a Mark watched action marks: the Item of the page, a season card or an episode card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Item,
+    Season(usize),
+    Episode(usize),
+}
+
+/// The Profile watched each episode of the season.
+pub fn season_watched(season: &wire::Season) -> bool {
+    season.user_data.as_ref().is_some_and(|data| season.episode_count > 0 && data.watched_count >= season.episode_count)
+}
+
+pub fn episode_watched(episode: &wire::Episode) -> bool {
+    episode.user_data.as_ref().is_some_and(|data| data.played)
+}
+
+/// Shows on the page that the server marked `mark` watched (`on`) or unwatched. `seasons[season]` is the season that
+/// `episodes` lists, on a series. A mark and an unmark both drop the resume point on the server.
+pub fn apply_mark(
+    item: &mut wire::CatalogItemDetail,
+    seasons: &mut [wire::Season],
+    season: usize,
+    episodes: &mut [wire::Episode],
+    mark: Mark,
+    on: bool,
+) {
+    let count = |season: &mut wire::Season, count: i64| watch_data(&mut season.user_data).watched_count = count;
+    let mark_episode = |episode: &mut wire::Episode| {
+        let data = watch_data(&mut episode.user_data);
+        data.played = on;
+        data.position_seconds = None;
+    };
+    let mark_item = |item: &mut wire::CatalogItemDetail| {
+        user_state(item).played = on;
+        item.position_seconds = None;
+    };
+    match mark {
+        Mark::Item => {
+            mark_item(item);
+            if item.type_ == "series" {
+                seasons.iter_mut().for_each(|s| count(s, if on { s.episode_count } else { 0 }));
+                episodes.iter_mut().for_each(mark_episode);
+            } else if let Some(episode) = episodes.iter_mut().find(|e| e.content_id == item.content_id) {
+                mark_episode(episode);
+            }
+        }
+        Mark::Season(i) => {
+            if let Some(s) = seasons.get_mut(i) {
+                count(s, if on { s.episode_count } else { 0 });
+            }
+            if i == season {
+                episodes.iter_mut().for_each(mark_episode);
+            }
+        }
+        Mark::Episode(i) => {
+            let Some(episode) = episodes.get_mut(i) else {
+                return;
+            };
+            let changed = episode_watched(episode) != on;
+            mark_episode(episode);
+            if episode.content_id == item.content_id {
+                mark_item(item);
+            }
+            if let Some(s) = seasons.get_mut(season).filter(|_| changed) {
+                let watched = s.user_data.as_ref().map_or(0, |d| d.watched_count) + if on { 1 } else { -1 };
+                count(s, watched.clamp(0, s.episode_count));
+            }
+        }
+    }
+}
+
+/// The watch state of the Item, with nothing set when the server sent none.
+fn user_state(item: &mut wire::CatalogItemDetail) -> &mut wire::CatalogItemUserState {
+    item.user_state.get_or_insert(wire::CatalogItemUserState { in_watchlist: false, is_favorite: false, played: false })
+}
+
+/// The watch data of a season or an episode, with nothing watched when the server sent none.
+fn watch_data(data: &mut Option<wire::WatchRollup>) -> &mut wire::WatchRollup {
+    data.get_or_insert(wire::WatchRollup {
+        duration_seconds: None,
+        in_progress_count: 0,
+        is_in_progress: None,
+        last_codec_video: None,
+        last_edition_key: None,
+        last_file_id: None,
+        last_hdr: None,
+        last_resolution: None,
+        played: false,
+        position_seconds: None,
+        unplayed_count: 0,
+        watched_count: 0,
+    })
 }
 
 /// The focused control, by index: a hero button, a version pill, a season card, an episode card, a cast card, a
@@ -1143,9 +1424,9 @@ mod tests {
     #[test]
     fn a_started_item_offers_resume_and_start_over() {
         let fresh = detail(json!({}));
-        assert_eq!(actions(&fresh), [Action::Play { resume: false }, Action::Watchlist]);
+        assert!(actions(&fresh).starts_with(&[Action::Play { resume: false }, Action::Watchlist]));
         let started = detail(json!({"position_seconds": 600.0}));
-        assert_eq!(actions(&started), [Action::Play { resume: true }, Action::StartOver, Action::Watchlist]);
+        assert!(actions(&started).starts_with(&[Action::Play { resume: true }, Action::StartOver, Action::Watchlist]));
     }
 
     #[test]
@@ -1437,5 +1718,101 @@ mod tests {
         assert_eq!(episode_list(&series, Some(3)), Some(("series:s".into(), 3)), "a series lists the chosen season");
         assert_eq!(episode_list(&series, None), None, "the seasons did not load");
         assert_eq!(episode_list(&detail(json!({})), None), None, "a movie has no episodes");
+    }
+
+    #[test]
+    fn the_hero_has_favorite_mark_watched_and_five_stars_and_clear_shows_only_for_a_rating() {
+        let stars = (1..=5).map(Action::Rate);
+        let fresh = detail(json!({"user_state": null}));
+        let expected: Vec<_> = [Action::Play { resume: false }, Action::Watchlist, Action::Favorite, Action::Watched]
+            .into_iter()
+            .chain(stars.clone())
+            .collect();
+        assert_eq!(actions(&fresh), expected);
+        let labels: Vec<_> = actions(&fresh).into_iter().skip(2).map(|a| action_label(&fresh, a)).collect();
+        assert_eq!(labels, ["♡ Favorite", "Mark watched", "☆", "☆", "☆", "☆", "☆"]);
+
+        let rated = detail(
+            json!({"user_rating": 3, "user_state": {"played": true, "is_favorite": true, "in_watchlist": false}}),
+        );
+        assert_eq!(actions(&rated).last(), Some(&Action::ClearRating));
+        let labels: Vec<_> = actions(&rated).into_iter().skip(2).map(|a| action_label(&rated, a)).collect();
+        assert_eq!(labels, ["♥ Favorite", "✓ Watched", "★", "★", "★", "☆", "☆", "Clear rating"]);
+    }
+
+    fn season(fields: serde_json::Value) -> wire::Season {
+        let body: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/list_series_seasons_ok.json")).unwrap();
+        let mut season = body["items"][0].clone();
+        season.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(season).unwrap()
+    }
+
+    fn played(episodes: &[wire::Episode]) -> Vec<bool> {
+        episodes.iter().map(episode_watched).collect()
+    }
+
+    #[test]
+    fn a_mark_shows_on_the_episode_its_season_and_the_series() {
+        let mut item = detail(json!({"type": "series", "content_id": "series:s", "user_state": null}));
+        // Season 1 is listed: 1 of 3 episodes watched. Season 2 has none watched.
+        let mut seasons = vec![
+            season(
+                json!({"episode_count": 3, "user_data": {"watched_count": 1, "unplayed_count": 2, "in_progress_count": 0, "played": false}}),
+            ),
+            season(json!({"season_number": 2, "episode_count": 2, "user_data": null})),
+        ];
+        let mut episodes = vec![
+            episode(
+                json!({"content_id": "e1", "user_data": {"watched_count": 1, "unplayed_count": 0, "in_progress_count": 0, "played": true}}),
+            ),
+            episode(
+                json!({"content_id": "e2", "user_data": {"watched_count": 0, "unplayed_count": 1, "in_progress_count": 1, "played": false, "position_seconds": 600.0}}),
+            ),
+            episode(json!({"content_id": "e3", "user_data": null})),
+        ];
+
+        apply_mark(&mut item, &mut seasons, 0, &mut episodes, Mark::Episode(1), true);
+        apply_mark(&mut item, &mut seasons, 0, &mut episodes, Mark::Episode(1), true);
+        assert_eq!(played(&episodes), [true, true, false]);
+        assert_eq!(season_line(&seasons[0]), "2 of 3 episodes", "a second mark of the same episode counts once");
+        assert_eq!(episodes[1].user_data.as_ref().unwrap().position_seconds, None, "the resume point is gone");
+
+        apply_mark(&mut item, &mut seasons, 0, &mut episodes, Mark::Episode(2), true);
+        assert_eq!(season_line(&seasons[0]), "3 of 3 episodes");
+        assert!(season_watched(&seasons[0]));
+
+        apply_mark(&mut item, &mut seasons, 0, &mut episodes, Mark::Season(0), false);
+        assert_eq!(played(&episodes), [false, false, false], "the listed season marks its episodes");
+        assert_eq!(season_line(&seasons[0]), "0 of 3 episodes");
+
+        apply_mark(&mut item, &mut seasons, 0, &mut episodes, Mark::Season(1), true);
+        assert_eq!(played(&episodes), [false, false, false], "another season leaves the listed episodes");
+        assert_eq!(season_line(&seasons[1]), "2 of 2 episodes");
+
+        apply_mark(&mut item, &mut seasons, 0, &mut episodes, Mark::Item, true);
+        assert!(item.user_state.as_ref().unwrap().played);
+        assert_eq!(played(&episodes), [true, true, true]);
+        assert_eq!(season_line(&seasons[0]), "3 of 3 episodes");
+    }
+
+    #[test]
+    fn a_mark_drops_the_resume_point_of_the_item() {
+        let mut item = detail(json!({"position_seconds": 600.0}));
+        apply_mark(&mut item, &mut [], 0, &mut [], Mark::Item, false);
+        assert_eq!(
+            actions(&item)[0],
+            Action::Play { resume: false },
+            "no Resume after the server cleared the progress"
+        );
+        assert_eq!(action_label(&item, Action::Watched), "Mark watched");
+
+        // An episode page lists its own episode under More Episodes.
+        let mut item = detail(json!({"type": "episode", "content_id": "e2", "user_state": null}));
+        let mut episodes = vec![episode(json!({"content_id": "e1"})), episode(json!({"content_id": "e2"}))];
+        apply_mark(&mut item, &mut [], 0, &mut episodes, Mark::Episode(1), true);
+        assert_eq!(action_label(&item, Action::Watched), "✓ Watched");
+        apply_mark(&mut item, &mut [], 0, &mut episodes, Mark::Item, false);
+        assert!(!episode_watched(&episodes[1]));
     }
 }

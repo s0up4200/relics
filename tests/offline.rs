@@ -76,7 +76,9 @@ fn a_503_or_no_reply_is_offline_and_never_signs_the_user_out() {
         |_| problem(503, "service_unavailable"),
         |_| reply(503, "text/plain", String::new()),
         |_| None,
-        |req| if req.path == "auth/refresh" { None } else { problem(401, "token_refresh_required") },
+        |req| {
+            if req.path == "auth/refresh" { None } else { problem(401, "token_refresh_required") }
+        },
     ];
     for (case, reply) in replies.into_iter().enumerate() {
         let (client, _, troubles) = fake(reply);
@@ -258,4 +260,33 @@ fn a_failed_sign_out_does_not_show_the_offline_banner_or_the_sign_in_screen() {
     assert!(block_on(client.sign_out()).is_err());
     assert_eq!(refused.get(), []);
     assert_eq!(offline.get(), []);
+}
+
+#[test]
+fn a_write_action_while_offline_fails_and_is_not_sent_again() {
+    let down = Arc::new(AtomicBool::new(true));
+    let (client, seen, troubles) = fake({
+        let down = down.clone();
+        move |req| match req.path.as_str() {
+            _ if down.load(Ordering::SeqCst) => None,
+            "sync/progress" => ok("sync_progress_ok.json"),
+            _ => json(204, String::new()),
+        }
+    });
+    let writes = [
+        block_on(client.set_favorite("movie:heat-1995", true)),
+        block_on(client.set_rating("movie:heat-1995", Some(4))),
+        block_on(client.set_watched("movie:heat-1995", true)),
+        block_on(client.set_watchlist("movie:heat-1995", true)),
+    ];
+    for (i, write) in writes.iter().enumerate() {
+        assert!(write.as_ref().is_err_and(Error::is_offline), "write {i}: {write:?}");
+    }
+    assert_eq!(troubles.get(), [Trouble::Offline; 4]);
+
+    down.store(false, Ordering::SeqCst);
+    let sent = seen.lock().unwrap().len();
+    block_on(client.sync_progress()).unwrap();
+    let later: Vec<String> = seen.lock().unwrap()[sent..].iter().map(|s| s.path.clone()).collect();
+    assert!(later.is_empty(), "the client keeps no write to send later: {later:?}");
 }

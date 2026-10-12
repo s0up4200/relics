@@ -10,8 +10,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, StatefulInteractiveElement as _, Styled,
-    Subscription, Task, Window, div, px,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement as _,
+    Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, IconName, icon, keycap};
 
@@ -361,6 +361,14 @@ impl Pages {
         }
     }
 
+    fn page_click(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        if self.sidebar.take().is_some() {
+            self.page.set_active(true, cx);
+        }
+        cx.notify();
+    }
+
     /// Gives a key to the page. `typed` is the text that the key types, for the search field.
     fn page_key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.page.clone() {
@@ -615,17 +623,10 @@ impl Render for Pages {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    // A click on the page moves the focus from the sidebar and the menu to the page.
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.menu = None;
-                            if this.sidebar.take().is_some() {
-                                this.page.set_active(true, cx);
-                            }
-                            cx.notify();
-                        }),
-                    )
+                    // A click on the page moves the focus from the sidebar and the menu to the page. A right-click
+                    // does too, because it opens the menu of an episode card.
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::page_click))
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::page_click))
                     .child(self.page.clone().into_any_element()),
             )
     }
