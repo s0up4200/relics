@@ -37,6 +37,8 @@ pub struct PlayItem {
     pub start_over: bool,
     /// The file version from the Version picker. `None` plays the first version.
     pub file_id: Option<String>,
+    /// Start at this source position, for a version switch. It wins over `start_over`.
+    start: Option<f64>,
 }
 
 impl From<&wire::CatalogItem> for PlayItem {
@@ -51,6 +53,7 @@ impl From<&wire::CatalogItem> for PlayItem {
             season,
             start_over: false,
             file_id: None,
+            start: None,
         }
     }
 }
@@ -66,6 +69,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 find_season: item.play_season_number.is_none(),
                 start_over: false,
                 file_id: None,
+                start: None,
             },
             _ => Self {
                 content_id: item.content_id.clone(),
@@ -74,6 +78,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 find_season: false,
                 start_over: false,
                 file_id: None,
+                start: None,
             },
         }
     }
@@ -88,12 +93,13 @@ impl PlayItem {
             find_season: false,
             start_over: false,
             file_id: None,
+            start: None,
         }
     }
 
     /// Where playback starts: `None` resumes at the saved position.
     pub fn start_position(&self) -> Option<f64> {
-        self.start_over.then_some(0.)
+        self.start.or(self.start_over.then_some(0.))
     }
 }
 
@@ -148,6 +154,10 @@ pub struct PlayerWindow {
     markers: Vec<Marker>,
     /// The series of the episode that plays. The Track picker choice carries to the next Item of the same series.
     series: Option<String>,
+    /// The Item that plays. A version switch plays it again with another file.
+    item: Option<PlayItem>,
+    /// The file versions of the Item that plays, for the Quality list of the Player view.
+    versions: Vec<wire::FileVersion>,
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
@@ -189,6 +199,8 @@ impl PlayerWindow {
             prompt: String::new(),
             markers: Vec::new(),
             series: None,
+            item: None,
+            versions: Vec::new(),
         }
     }
 
@@ -200,11 +212,15 @@ impl PlayerWindow {
         self.in_view = self.video.is_some();
         (self.position, self.prompt, self.markers) = (None, String::new(), Vec::new());
         let series = item.season.as_ref().map(|(id, _)| id.clone());
+        // A version switch plays the same Item again, so the choice carries too.
+        let same = self.item.as_ref().is_some_and(|old| old.content_id == item.content_id);
         let carry = match &self.session {
-            Some(session) if series.is_some() && series == self.series => session.carry(),
+            Some(session) if same || series.is_some() && series == self.series => session.carry(),
             _ => Carry::default(),
         };
         self.series = series;
+        self.item = Some(item.clone());
+        self.versions = Vec::new();
         self.session = Some(Session::new(item.runtime, client.server_settings()).with_carry(carry));
         self.client = Some(client.clone());
         // A new Item drops these tasks, so an older answer never reaches the new session.
@@ -222,6 +238,14 @@ impl PlayerWindow {
                 Err(err) => Input::StartFailed(err.to_string()),
             };
             this.update(cx, |this, cx| this.step(input, cx)).ok();
+            match client.versions(&content_id).await {
+                Ok(versions) => this.update(cx, |this, cx| {
+                    this.versions = versions;
+                    cx.notify();
+                }),
+                Err(err) => return eprintln!("silo-omarchy: cannot read the versions of {content_id}: {err}"),
+            }
+            .ok();
         }));
     }
 
@@ -503,6 +527,11 @@ impl PlayerWindow {
                     self.play(client, previous, cx);
                 }
             }
+            Command::PlayVersion { file_id, position } => {
+                if let Some(item) = self.item.clone() {
+                    self.play(client, PlayItem { file_id: Some(file_id), start: position, ..item }, cx);
+                }
+            }
             Command::SetPause(paused) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.set_pause(paused)) {
                     eprintln!("silo-omarchy: cannot pause or play: {err}");
@@ -578,6 +607,21 @@ impl PlayerWindow {
     /// The tracks of the file, for the Track picker.
     pub fn tracks(&self) -> &[tracks::Track] {
         self.session.as_ref().map_or(&[], Session::tracks)
+    }
+
+    /// The plan that plays, for the Playback info panel and the Quality ladder.
+    pub fn plan(&self) -> Option<&wire::PlaybackPlan> {
+        self.session.as_ref()?.plan()
+    }
+
+    /// The step label of the Quality ladder that plays.
+    pub fn quality(&self) -> &str {
+        self.session.as_ref().map_or(crate::playback::ORIGINAL, Session::quality)
+    }
+
+    /// The file versions of the Item that plays.
+    pub fn versions(&self) -> &[wire::FileVersion] {
+        &self.versions
     }
 
     /// The volume in percent, and whether the audio is muted.

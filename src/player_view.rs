@@ -15,7 +15,10 @@ use gpui::{
 };
 use gpui_omarchy::{ActiveTheme as _, IconName, icon};
 
+use crate::api::types::{Delivery, StreamProtocol};
+use crate::api::wire;
 use crate::click::Clickable as _;
+use crate::detail;
 use crate::keys::Key;
 use crate::playback::Input;
 use crate::playback::tracks::{Kind, Track};
@@ -55,6 +58,8 @@ pub struct PlayerView {
     fullscreen: bool,
     /// The picker that shows over the video.
     picker: Option<Picker>,
+    /// The Playback info panel shows.
+    info: bool,
     _player: Subscription,
 }
 
@@ -66,6 +71,19 @@ pub enum List {
     Audio,
     /// The Track picker for the subtitles, with Off at the top.
     Subtitles,
+    /// The file versions and the steps of the Quality ladder.
+    Quality,
+}
+
+/// What a pick of a row sends.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pick {
+    /// A track id, or `None` for subtitles off.
+    Track(Option<i64>),
+    /// A file id.
+    Version(String),
+    /// A step label of the Quality ladder.
+    Quality(String),
 }
 
 impl List {
@@ -73,6 +91,7 @@ impl List {
         match self {
             List::Audio => "Audio",
             List::Subtitles => "Subtitles",
+            List::Quality => "Quality",
         }
     }
 }
@@ -109,6 +128,7 @@ impl PlayerView {
             bar: Rc::default(),
             fullscreen: false,
             picker: None,
+            info: false,
             _player: observe,
         }
     }
@@ -169,7 +189,7 @@ impl PlayerView {
     /// Esc leaves fullscreen, then goes Back. A picker or a panel over the controls must close first: check it
     /// here, before fullscreen.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker.take().is_some() {
+        if self.picker.take().is_some() || std::mem::take(&mut self.info) {
             cx.notify();
         } else if window.is_fullscreen() {
             self.toggle_fullscreen(window);
@@ -179,11 +199,17 @@ impl PlayerView {
     }
 
     /// The rows of `list` and the value that a pick of each one sends.
-    fn rows(&self, list: List, cx: &Context<Self>) -> Vec<(Option<i64>, Row)> {
-        let tracks = self.player.read(cx).tracks();
+    fn rows(&self, list: List, cx: &Context<Self>) -> Vec<(Pick, Row)> {
+        let player = self.player.read(cx);
+        let tracks =
+            |kind| track_rows(player.tracks(), kind).into_iter().map(|(id, row)| (Pick::Track(id), row)).collect();
         match list {
-            List::Audio => track_rows(tracks, Kind::Audio),
-            List::Subtitles => track_rows(tracks, Kind::Sub),
+            List::Audio => tracks(Kind::Audio),
+            List::Subtitles => tracks(Kind::Sub),
+            List::Quality => match player.plan() {
+                Some(plan) => quality_rows(player.versions(), plan, player.quality()),
+                None => Vec::new(),
+            },
         }
     }
 
@@ -193,12 +219,14 @@ impl PlayerView {
             return;
         };
         cx.notify();
-        let Some((id, _)) = self.rows(list, cx).into_iter().nth(index) else {
+        let Some((pick, _)) = self.rows(list, cx).into_iter().nth(index) else {
             return;
         };
-        match list {
-            List::Audio => self.step(Input::PickTrack { kind: Kind::Audio, id }, cx),
-            List::Subtitles => self.step(Input::PickTrack { kind: Kind::Sub, id }, cx),
+        match (list, pick) {
+            (List::Audio, Pick::Track(id)) => self.step(Input::PickTrack { kind: Kind::Audio, id }, cx),
+            (_, Pick::Track(id)) => self.step(Input::PickTrack { kind: Kind::Sub, id }, cx),
+            (_, Pick::Version(file_id)) => self.step(Input::SwitchVersion(file_id), cx),
+            (_, Pick::Quality(label)) => self.step(Input::PickQuality(label), cx),
         }
     }
 
@@ -248,6 +276,8 @@ impl PlayerView {
         match key {
             Key::Other("a") => self.toggle(List::Audio, cx),
             Key::Other("s") => self.toggle(List::Subtitles, cx),
+            Key::Other("v") => self.toggle(List::Quality, cx),
+            Key::Other("i") => self.toggle_info(cx),
             Key::Other("space") => self.step(Input::PlayPause, cx),
             Key::Left => self.step(Input::SeekBy(-SEEK_STEP), cx),
             Key::Right => self.step(Input::SeekBy(SEEK_STEP), cx),
@@ -286,8 +316,8 @@ impl PlayerView {
     /// A click pauses or plays, after the double-click time. A double-click toggles fullscreen.
     fn click_video(&mut self, event: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.wake(cx);
-        // A click next to an open picker only closes it.
-        if self.picker.take().is_some() {
+        // A click next to an open picker or panel only closes it.
+        if self.picker.take().is_some() || std::mem::take(&mut self.info) {
             return cx.notify();
         }
         if event.click_count() >= 2 {
@@ -298,6 +328,11 @@ impl PlayerView {
             cx.background_executor().timer(DOUBLE_CLICK).await;
             this.update(cx, |this, cx| this.step(Input::PlayPause, cx)).ok();
         }));
+    }
+
+    fn toggle_info(&mut self, cx: &mut Context<Self>) {
+        self.info = !self.info;
+        cx.notify();
     }
 
     fn click_bar(&mut self, event: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -401,6 +436,8 @@ impl PlayerView {
             .child(
                 self.button("player-subtitles", IconName::Captions, cx, |this, _, cx| this.toggle(List::Subtitles, cx)),
             )
+            .child(self.button("player-quality", IconName::Gauge, cx, |this, _, cx| this.toggle(List::Quality, cx)))
+            .child(self.button("player-info", IconName::Info, cx, |this, _, cx| this.toggle_info(cx)))
             .child(self.button("player-mute", mute.0, cx, |this, _, cx| this.toggle_mute(cx)))
             .child(div().w(px(48.)).text_color(t.secondary).child(mute.1))
             .child(self.button("player-fullscreen", full, cx, |this, window, _| this.toggle_fullscreen(window)));
@@ -485,6 +522,39 @@ impl PlayerView {
             )
     }
 
+    /// The Playback info panel, at the top right. A click on it does nothing, so it stays open.
+    fn info(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let player = self.player.read(cx);
+        let version = player
+            .plan()
+            .and_then(|plan| player.versions().iter().find(|v| *v.file_id == *plan.effective_media_file_id));
+        let rows = player.plan().map(|plan| info_rows(plan, version, player.quality())).unwrap_or_default();
+        let rows = rows.into_iter().map(|(label, value)| {
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(div().w(px(110.)).flex_none().text_color(t.secondary).child(label))
+                .child(div().flex_1().text_color(t.bright).child(value))
+        });
+        div()
+            .id("playback-info")
+            .absolute()
+            .right(px(16.))
+            .top(px(64.))
+            .w(px(420.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .p(px(16.))
+            .rounded(px(12.))
+            .bg(t.surface)
+            .text_size(px(13.))
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(div().pb(px(4.)).text_color(t.secondary).child("Playback info"))
+            .children(rows)
+    }
+
     /// The Skip prompt over the video. A click does what Enter does.
     fn prompt(&self, label: String, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
@@ -533,6 +603,7 @@ impl Render for PlayerView {
             .children(prompt.map(|label| self.prompt(label, cx)))
             .when(self.controls, |view| view.children(self.controls(window, cx)))
             .children(self.picker.as_ref().map(|picker| self.picker(picker, cx)))
+            .when(self.info, |view| view.child(self.info(cx)))
     }
 }
 
@@ -549,6 +620,110 @@ pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Row)> {
         (None, Row { label: "Off".into(), detail: String::new(), tags: Vec::new(), current })
     });
     off.into_iter().chain(rows).collect()
+}
+
+/// The rows of the Quality list: the file versions when the Item has more than one, then the steps of the
+/// Quality ladder when the plan offers more than one. A pick of a version sends its file id, a pick of a step its
+/// label.
+pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, quality: &str) -> Vec<(Pick, Row)> {
+    let versions = versions.iter().filter(|_| versions.len() > 1).map(|version| {
+        let row = Row {
+            label: detail::version_row(version),
+            detail: version.edition_raw.clone().unwrap_or_default(),
+            tags: vec!["Version"],
+            current: *version.file_id == *plan.effective_media_file_id,
+        };
+        (Pick::Version(version.file_id.to_string()), row)
+    });
+    let ladder = &plan.available_qualities;
+    let steps = ladder.iter().filter(|_| ladder.len() > 1).map(|step| {
+        let row = Row {
+            label: step_name(step),
+            detail: step.bitrate_kbps.map(bitrate).unwrap_or_default(),
+            tags: Vec::new(),
+            current: step.label == quality,
+        };
+        (Pick::Quality(step.label.clone()), row)
+    });
+    versions.chain(steps).collect()
+}
+
+/// The name of a step of the Quality ladder: the display name of the server, else Original or the label.
+fn step_name(step: &wire::AvailableQualityV3) -> String {
+    match step.display_name.as_deref().filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None if step.preserves_source => "Original".into(),
+        None => step.label.clone(),
+    }
+}
+
+/// The rows of the Playback info panel: the file, the delivery, the codecs and the bitrate. An unknown value
+/// shows as a dash.
+pub fn info_rows(
+    plan: &wire::PlaybackPlan,
+    version: Option<&wire::FileVersion>,
+    quality: &str,
+) -> Vec<(&'static str, String)> {
+    let (source, delivered) = (&plan.source, &plan.effective_recipe);
+    let delivery = Delivery::from(plan.delivery.clone());
+    // The server names each change that it makes to the stream.
+    let changed = |name: &str| plan.transformations.iter().any(|t| t.executor == "server" && t.name == name);
+    let codec = |codec: &Option<String>, transcoded: bool| {
+        let how = if delivery == Delivery::OriginalHttp {
+            "direct"
+        } else if transcoded {
+            "transcoded"
+        } else {
+            "copy"
+        };
+        codec.as_deref().filter(|c| !c.is_empty()).map(|c| format!("{} ({how})", c.to_uppercase())).unwrap_or_default()
+    };
+    let method = match &delivery {
+        Delivery::OriginalHttp => "Direct play".to_string(),
+        Delivery::ServerRemuxProgressive | Delivery::ServerRemuxHls => "Direct stream".to_string(),
+        Delivery::ServerTranscodeHls => "Transcode".to_string(),
+        Delivery::Unknown(other) => other.clone(),
+    };
+    let protocol = match StreamProtocol::from(plan.stream.protocol.clone()) {
+        StreamProtocol::Hls => "HLS",
+        _ => "Progressive",
+    };
+    let frame = |w: Option<i64>, h: Option<i64>| w.zip(h).map(|(w, h)| format!("{w}x{h}")).unwrap_or_default();
+    let upper = |text: &Option<String>| text.as_deref().unwrap_or_default().to_uppercase();
+    let file = version.and_then(|v| v.file_name.clone().or_else(|| v.file_path.clone())).unwrap_or_default();
+    let container = source.container.clone().or_else(|| version.map(|v| v.container.clone()));
+    let size = version.map(|v| detail::file_size(v.file_size)).unwrap_or_default();
+    let step = plan.available_qualities.iter().find(|step| step.label == quality).map(step_name);
+    let source_bitrate = source.bitrate_kbps.or(version.map(|v| v.bitrate)).filter(|kbps| *kbps > 0);
+    let rows = [
+        ("File", vec![file]),
+        ("Container", vec![upper(&container), size]),
+        ("Delivery", vec![method, protocol.into()]),
+        ("Quality", vec![step.unwrap_or_else(|| quality.to_string())]),
+        (
+            "Video",
+            vec![codec(&delivered.video_codec, changed("video_to_h264")), frame(delivered.width, delivered.height)],
+        ),
+        ("Audio", vec![codec(&delivered.audio_codec, changed("audio_to_aac"))]),
+        ("Bitrate", vec![delivered.bitrate_kbps.filter(|kbps| *kbps > 0).map(bitrate).unwrap_or_default()]),
+        (
+            "Source video",
+            vec![upper(&source.video_codec), frame(source.width, source.height), upper(&source.dynamic_range)],
+        ),
+        ("Source audio", vec![upper(&source.audio_codec), source.audio_layout.clone().unwrap_or_default()]),
+        ("Source bitrate", vec![source_bitrate.map(bitrate).unwrap_or_default()]),
+    ];
+    rows.into_iter()
+        .map(|(label, parts)| {
+            let parts: Vec<String> = parts.into_iter().filter(|part| !part.trim().is_empty()).collect();
+            (label, if parts.is_empty() { "—".to_string() } else { parts.join(" · ") })
+        })
+        .collect()
+}
+
+/// A bitrate as `25.6 Mbps`, or `800 kbps` under 1 Mbps.
+pub fn bitrate(kbps: i64) -> String {
+    if kbps >= 1000 { format!("{:.1} Mbps", kbps as f64 / 1000.0) } else { format!("{kbps} kbps") }
 }
 
 /// A time as `1:02:03`, or `2:03` under one hour.
@@ -575,8 +750,84 @@ pub fn seek_target(x: f32, width: f32, duration: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{clock, marker_span, seek_target, track_rows};
+    use serde_json::json;
+
+    use super::{Pick, clock, info_rows, marker_span, quality_rows, seek_target, track_rows};
+    use crate::api::wire;
     use crate::playback::tracks::{Kind, parse};
+
+    /// The transcode plan of the own replan fixture, with `fields` set.
+    fn plan(fields: serde_json::Value) -> wire::PlaybackPlan {
+        let body: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/own/playback_replan_failure_recovery.json")).unwrap();
+        let mut plan = body["playback_plan"].clone();
+        plan.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(plan).unwrap()
+    }
+
+    fn version(file_id: &str, resolution: &str) -> wire::FileVersion {
+        serde_json::from_value(json!({
+            "added_at": "2024-01-01T00:00:00.000Z", "bitrate": 25_600, "codec_audio": "eac3", "codec_video": "hevc",
+            "container": "mkv", "duration": 7200, "file_id": file_id, "file_name": "Heat.1995.mkv",
+            "file_size": 11_381_663_334_i64, "hdr": false, "resolution": resolution,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_quality_list_has_the_versions_then_the_ladder_and_marks_what_plays() {
+        let ladder = json!({"available_qualities": [
+            {"label": "original", "display_name": "Original", "bitrate_kbps": 25_600, "preserves_source": true},
+            {"label": "1080p-medium", "bitrate_kbps": 6000, "height": 1080, "preserves_source": false},
+            {"label": "720p-low", "display_name": "720p Low", "bitrate_kbps": 800, "preserves_source": false},
+        ]});
+        let rows = quality_rows(&[version("42", "2160p"), version("43", "1080p")], &plan(ladder), "1080p-medium");
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(pick, row)| (pick.clone(), row.label.as_str(), row.detail.as_str(), row.current))
+            .collect();
+        assert_eq!(rows[0].0, Pick::Version("42".into()));
+        assert!(rows[0].1.starts_with("4K"), "{:?}", rows[0]);
+        assert!(rows[0].3, "file 42 plays");
+        assert_eq!((rows[1].0.clone(), rows[1].3), (Pick::Version("43".into()), false));
+        assert_eq!(
+            rows[2..],
+            [
+                (Pick::Quality("original".into()), "Original", "25.6 Mbps", false),
+                (Pick::Quality("1080p-medium".into()), "1080p-medium", "6.0 Mbps", true),
+                (Pick::Quality("720p-low".into()), "720p Low", "800 kbps", false),
+            ]
+        );
+        // One version and one step give no choice.
+        assert!(quality_rows(&[version("42", "1080p")], &plan(json!({})), "original").is_empty());
+    }
+
+    #[test]
+    fn playback_info_shows_the_file_the_delivery_the_codecs_and_the_bitrate() {
+        let transcode = plan(json!({
+            "transformations": [{"executor": "server", "name": "video_to_h264", "recipe_version": "1", "validated_claims": []}],
+        }));
+        let rows = info_rows(&transcode, Some(&version("42", "1080p")), "original");
+        let value = |label: &str| rows.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str()).unwrap();
+        assert_eq!(value("File"), "Heat.1995.mkv");
+        assert_eq!(value("Container"), "MP4 · 10.6 GB");
+        assert_eq!(value("Delivery"), "Transcode · HLS");
+        assert_eq!(value("Quality"), "Original");
+        assert_eq!(value("Video"), "H264 (transcoded) · 1920x1080");
+        assert_eq!(value("Audio"), "AAC (copy)");
+        assert_eq!(value("Bitrate"), "8.0 Mbps");
+        assert_eq!(value("Source video"), "HEVC · 1920x1080 · SDR");
+        assert_eq!(value("Source audio"), "AAC · stereo");
+        assert_eq!(value("Source bitrate"), "8.0 Mbps");
+        let direct = plan(
+            json!({"delivery": "original_http", "stream": {"protocol": "http_progressive", "url": "/s", "headers": {}, "header_refresh": "none"}}),
+        );
+        let rows = info_rows(&direct, None, "original");
+        let value = |label: &str| rows.iter().find(|(l, _)| *l == label).map(|(_, v)| v.as_str()).unwrap();
+        assert_eq!(value("Delivery"), "Direct play · Progressive");
+        assert_eq!(value("Video"), "H264 (direct) · 1920x1080");
+        assert_eq!(value("File"), "—", "no version list yet");
+    }
 
     #[test]
     fn the_subtitle_list_starts_with_off_and_marks_the_track_that_plays() {

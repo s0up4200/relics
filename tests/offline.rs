@@ -12,7 +12,7 @@ use futures::executor::block_on;
 use serde_json::{Value, json};
 use silo_omarchy::api::{Client, Decision, Error, Trouble};
 use silo_omarchy::library::retry_delay;
-use silo_omarchy::playback::{Replan, Sample};
+use silo_omarchy::playback::{Operation, Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -188,6 +188,8 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position_with_the_s
         attempted_plan_keys: vec!["key".into()],
         selected_tracks: json!({}),
         position: 1234.5,
+        operation: Operation::FailureRecovery,
+        quality: "original".into(),
     };
     let decision = block_on(client.replan(&replan)).unwrap();
     assert!(matches!(decision, Decision::Playable { .. }), "{decision:?}");

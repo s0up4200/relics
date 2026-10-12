@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use silo_omarchy::api::types::{Decision, Marker, MarkerKind};
 use silo_omarchy::playback::tracks::{self, Choice, Kind, Track};
-use silo_omarchy::playback::{Access, Command, Headers, Input, Replan, Sample, Session};
+use silo_omarchy::playback::{Access, Command, Headers, Input, Operation, Replan, Sample, Session};
 use silo_omarchy::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -519,7 +519,74 @@ fn replan(position: f64) -> Command {
         attempted_plan_keys: vec!["v3:f0144c47fa349e3e".into()],
         selected_tracks: serde_json::json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
         position,
+        operation: Operation::FailureRecovery,
+        quality: "original".into(),
     })
+}
+
+/// The quality change replan of the session of `failed_at`, at `position`.
+fn quality_change(label: &str, position: f64) -> Command {
+    let Command::Replan(failure) = replan(position) else { unreachable!() };
+    Command::Replan(Replan {
+        attempted_plan_keys: vec![],
+        operation: Operation::QualityChange,
+        quality: label.into(),
+        ..failure
+    })
+}
+
+#[test]
+fn a_quality_step_replans_at_the_position_and_plays_the_new_plan_in_the_same_session() {
+    let mut session = failed_at(3600.0);
+    assert_eq!(
+        session.step(Input::PickQuality("1080p-medium".into()), at(2)),
+        vec![quality_change("1080p-medium", 3600.0)]
+    );
+    assert_eq!(session.quality(), "original", "the step plays only once the server answers");
+    // The transcode starts at source 3600 s, which is player time 0.
+    assert_eq!(session.step(Input::Replanned(Some(replanned())), at(3)), vec![load(&transcode(), headers(), 0.0)]);
+    assert_eq!(session.quality(), "1080p-medium");
+    session.step(Input::FileLoaded, at(4));
+    session.step(Input::Position(30.0), at(5));
+    assert_eq!(session.step(Input::Shutdown, at(6)), vec![stop(3630.0, 1), Command::ClosePlayer]);
+}
+
+#[test]
+fn a_failed_quality_step_keeps_the_plan_that_plays() {
+    let mut session = failed_at(3600.0);
+    session.step(Input::PickQuality("720p-low".into()), at(2));
+    assert_eq!(session.step(Input::Replanned(None), at(3)), vec![], "no Lost connection: the old stream still plays");
+    assert_eq!(session.quality(), "original");
+    assert_eq!(session.step(Input::LoadFailed, at(4)), vec![Command::Refresh], "the recovery chain starts as usual");
+}
+
+#[test]
+fn the_quality_that_plays_needs_no_replan_and_a_recovery_keeps_the_chosen_quality() {
+    let mut session = failed_at(3600.0);
+    assert_eq!(session.step(Input::PickQuality("original".into()), at(2)), vec![]);
+    session.step(Input::PickQuality("1080p-medium".into()), at(2));
+    session.step(Input::Replanned(Some(replanned())), at(3));
+    session.step(Input::FileLoaded, at(4));
+    session.step(Input::Position(30.0), at(5));
+    session.step(Input::LoadFailed, at(6));
+    session.step(Input::Refreshed(Some(refreshed(6))), at(7));
+    let commands = session.step(Input::LoadFailed, at(8));
+    let [Command::Replan(Replan { operation: Operation::FailureRecovery, quality, .. })] = &commands[..] else {
+        panic!("{commands:?}");
+    };
+    assert_eq!(quality, "1080p-medium");
+}
+
+#[test]
+fn a_version_switch_ends_the_session_at_the_position_and_starts_the_other_file_there() {
+    let mut session = playing(None);
+    session.step(Input::Position(300.0), at(1));
+    assert_eq!(session.step(Input::SwitchVersion("42".into()), at(2)), vec![], "file 42 plays already");
+    assert_eq!(
+        session.step(Input::SwitchVersion("43".into()), at(2)),
+        vec![stop(300.0, 1), Command::PlayVersion { file_id: "43".into(), position: Some(300.0) }]
+    );
+    assert_eq!(session.step(Input::Tick, at(60)), vec![], "the new file plays in a new session");
 }
 
 /// The replan answer of the own fixture: a transcode from 3600 s.

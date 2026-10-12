@@ -7,7 +7,7 @@ use common::{Log, fixture, json};
 use futures::executor::block_on;
 use serde_json::{Value, json};
 use silo_omarchy::api::{Client, Decision, types};
-use silo_omarchy::playback::{Replan, Sample};
+use silo_omarchy::playback::{Operation, Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -233,6 +233,8 @@ fn a_replan_sends_the_failed_plan_and_the_last_good_position() {
         attempted_plan_keys: vec!["v3:f0144c47fa349e3e".into()],
         selected_tracks: json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
         position: 3600.0,
+        operation: Operation::FailureRecovery,
+        quality: "original".into(),
     };
     let Decision::Playable { plan, .. } = block_on(client.replan(&replan)).unwrap() else {
         panic!("not playable");
@@ -253,6 +255,31 @@ fn a_replan_sends_the_failed_plan_and_the_last_good_position() {
     let start = body_of(&seen, "POST", "playback/start");
     assert_eq!(body["client_capabilities"], start["client_capabilities"]);
     assert_eq!(body["client_features"], start["client_features"]);
+}
+
+#[test]
+fn a_quality_step_replans_with_its_label_and_no_failure() {
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    let replan = Replan {
+        session_id: SESSION.into(),
+        attempt_id: "attempt".into(),
+        failed_plan_id: "plan:478677870860e5e5108c18bff749b34b".into(),
+        plan_attempt_key: "v3:f0144c47fa349e3e".into(),
+        attempted_plan_keys: vec![],
+        selected_tracks: json!({}),
+        position: 1800.0,
+        operation: Operation::QualityChange,
+        quality: "1080p-medium".into(),
+    };
+    block_on(client.replan(&replan)).unwrap();
+    let body = body_of(&seen, "POST", "/replan");
+    assert_eq!(body["operation"], json!("quality_change"));
+    assert_eq!(body["quality_preference"], json!("1080p-medium"));
+    assert_eq!(body["position_seconds"], json!(1800.0));
+    assert_eq!((&body["attempted_plan_keys"], &body["attempt_count"]), (&json!([]), &json!(1)));
+    assert!(body.get("failure").is_none(), "nothing failed");
+    assert_eq!(body_of(&seen, "POST", "playback/start")["quality_preference"], json!("original"));
 }
 
 #[test]

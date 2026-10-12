@@ -120,3 +120,7 @@ _Avoid_: track menu, cycle
 **Version picker**:
 The list on the detail page where the user picks which file version of an Item plays.
 _Avoid_: quality picker
+
+**Quality ladder**:
+The lower-bitrate renditions of the file version that plays. The user picks a step to play with less bandwidth.
+_Avoid_: version

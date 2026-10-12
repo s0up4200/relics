@@ -19,7 +19,7 @@ use types::Marker;
 pub use types::{Decision, Problem};
 
 use crate::artwork::Rung;
-use crate::playback::{Access, Replan, Sample};
+use crate::playback::{Access, Operation, Replan, Sample};
 use crate::settings::{self, ServerSettings};
 
 /// A Silo server that the user added. The app knows it by `id`, the stable id that
@@ -504,14 +504,20 @@ impl Client {
         Ok(self.media_access())
     }
 
-    /// Asks the server for a new plan after the plan in `replan` failed (operation `failure_recovery`).
+    /// Asks the server for a new plan in the same Playback session: after the plan in `replan` failed, or for
+    /// another step of the Quality ladder, at the position of `replan`.
     pub async fn replan(&self, replan: &Replan) -> Result<Decision, Error> {
         let installation_id = self.installation_id.lock().unwrap().clone();
         let mut body = client_description(&self.features.lock().unwrap());
         let keys = &replan.attempted_plan_keys;
+        let operation = match replan.operation {
+            Operation::FailureRecovery => "failure_recovery",
+            Operation::QualityChange => "quality_change",
+        };
         // The server takes at most 16 keys and a count of at most 8.
-        let fields = serde_json::json!({
-            "operation": "failure_recovery",
+        let mut fields = serde_json::json!({
+            "operation": operation,
+            "quality_preference": replan.quality,
             "installation_id": installation_id,
             "playback_attempt_id": replan.attempt_id,
             "replan_request_id": uuid::Uuid::new_v4().to_string(),
@@ -522,8 +528,10 @@ impl Client {
             "attempt_count": keys.len().clamp(1, 8),
             "position_seconds": replan.position.max(0.0),
             "selected_tracks": replan.selected_tracks,
-            "failure": { "classification": "network_degraded" },
         });
+        if replan.operation == Operation::FailureRecovery {
+            fields["failure"] = serde_json::json!({ "classification": "network_degraded" });
+        }
         body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         let path = format!("playback/{}/replan", replan.session_id);
         let decision: wire::PlaybackDecision = match self.call(Method::POST, &path, Some(body)).await {

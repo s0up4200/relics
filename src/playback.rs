@@ -59,7 +59,22 @@ pub struct Replan {
     pub selected_tracks: serde_json::Value,
     /// The last good source position.
     pub position: f64,
+    pub operation: Operation,
+    /// The `quality_preference`: a step label of the Quality ladder, or `original`.
+    pub quality: String,
 }
+
+/// Why the app asks for a new plan.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Operation {
+    /// The plan failed: `failure_recovery`.
+    FailureRecovery,
+    /// The user picked a step on the Quality ladder: `quality_change`.
+    QualityChange,
+}
+
+/// The quality preference of a start request: the file as it is, with no lower step of the Quality ladder.
+pub const ORIGINAL: &str = "original";
 
 #[derive(Debug)]
 pub enum Input {
@@ -122,6 +137,10 @@ pub enum Input {
         kind: Kind,
         id: Option<i64>,
     },
+    /// The user picked this step label of the Quality ladder.
+    PickQuality(String),
+    /// The user picked the file version with this file id.
+    SwitchVersion(String),
 }
 
 /// One progress sample. `position` is the source position in seconds.
@@ -169,6 +188,9 @@ pub enum Command {
     Refresh,
     /// Ask the server for a new plan and send `Input::Replanned`.
     Replan(Replan),
+    /// Start the file version `file_id` of the same Item at this source position, in the same Player view. The
+    /// session has already ended. The replan request names no file, so a version switch is a new start.
+    PlayVersion { file_id: String, position: Option<f64> },
 }
 
 /// The recovery chain: a failure starts it, and each next failure goes one step on.
@@ -235,6 +257,10 @@ pub struct Session {
     carry: Carry,
     /// The part of `carry` that mpv has not played yet in the file that loads.
     pending: Carry,
+    /// The step of the Quality ladder that plays.
+    quality: String,
+    /// The step of a quality change replan that runs.
+    changing: Option<String>,
 }
 
 /// The Skip prompt that shows now.
@@ -269,6 +295,8 @@ struct Plan {
     subtitle: Option<Command>,
     /// The Markers in player time.
     markers: Vec<Marker>,
+    /// The plan as the server sent it, for the Playback info panel.
+    wire: wire::PlaybackPlan,
 }
 
 impl Session {
@@ -300,6 +328,8 @@ impl Session {
             tracks: Vec::new(),
             carry: Carry::default(),
             pending: Carry::default(),
+            quality: ORIGINAL.into(),
+            changing: None,
         }
     }
 
@@ -317,6 +347,16 @@ impl Session {
     /// The tracks of the file, for the Track picker.
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    /// The plan that plays, for the Playback info panel and the Quality ladder.
+    pub fn plan(&self) -> Option<&wire::PlaybackPlan> {
+        self.plan.as_ref().map(|plan| &plan.wire)
+    }
+
+    /// The step label of the Quality ladder that plays.
+    pub fn quality(&self) -> &str {
+        &self.quality
     }
 
     pub fn step(&mut self, input: Input, now: SystemTime) -> Vec<Command> {
@@ -358,29 +398,22 @@ impl Session {
             }
             Input::Replanned(decision) if self.chain == Chain::Replanning => match decision {
                 Some(Decision::Playable { session_id, plan, .. }) => {
-                    let Some(old) = &self.plan else {
-                        return Vec::new();
-                    };
-                    let source = self.position.unwrap_or(self.load_start) + old.offset;
-                    // The Markers come in source time. The plan keeps them in player time.
-                    let markers = old
-                        .markers
-                        .iter()
-                        .map(|marker| Marker {
-                            start: marker.start + old.offset,
-                            end: marker.end + old.offset,
-                            ..marker.clone()
-                        })
-                        .collect();
-                    let attempt_id = old.attempt_id.clone();
-                    self.adopt(session_id, attempt_id, &plan, markers);
-                    let start = (source - plan.timeline.timeline_offset_seconds).max(0.0);
-                    self.position = Some(start);
                     self.chain = Chain::Replanned;
-                    self.load_now(start)
+                    self.play_replan(session_id, &plan)
                 }
                 _ => self.lose(),
             },
+            Input::Replanned(decision) if self.changing.is_some() => {
+                let label = self.changing.take().unwrap_or_default();
+                match decision {
+                    Some(Decision::Playable { session_id, plan, .. }) => {
+                        self.quality = label;
+                        self.play_replan(session_id, &plan)
+                    }
+                    // The old plan still plays.
+                    _ => Vec::new(),
+                }
+            }
             Input::Replanned(_) => Vec::new(),
             Input::FileLoaded => {
                 self.loaded = true;
@@ -504,6 +537,37 @@ impl Session {
                     _ => vec![Command::SelectSubtitle(id)],
                 }
             }
+            Input::PickQuality(label) => {
+                let Some(plan) = &self.plan else {
+                    return Vec::new();
+                };
+                if label == self.quality || self.changing.is_some() || self.chain != Chain::Healthy {
+                    return Vec::new();
+                }
+                let replan = Replan {
+                    session_id: plan.session_id.clone(),
+                    attempt_id: plan.attempt_id.clone(),
+                    failed_plan_id: plan.plan_id.clone(),
+                    plan_attempt_key: plan.plan_attempt_key.clone(),
+                    // Nothing failed, so each plan is a choice again.
+                    attempted_plan_keys: Vec::new(),
+                    selected_tracks: plan.selected_tracks.clone(),
+                    position: self.position.unwrap_or(self.load_start) + plan.offset,
+                    operation: Operation::QualityChange,
+                    quality: label.clone(),
+                };
+                self.changing = Some(label);
+                vec![Command::Replan(replan)]
+            }
+            Input::SwitchVersion(file_id) => {
+                if self.plan.as_ref().is_none_or(|plan| *plan.wire.effective_media_file_id == file_id) {
+                    return Vec::new();
+                }
+                let position = self.source_position();
+                let mut commands = self.finish(position, false);
+                commands.push(Command::PlayVersion { file_id, position });
+                commands
+            }
             Input::LoadFailed => self.recover(),
             Input::Shutdown => self.finish(self.source_position(), true),
             Input::End => self.finish(self.source_position(), false),
@@ -574,7 +638,27 @@ impl Session {
             offset,
             subtitle,
             markers,
+            wire: plan.clone(),
         });
+    }
+
+    /// Plays the new plan of a replan at the source position that plays now. The Markers keep their source time.
+    fn play_replan(&mut self, session_id: String, plan: &wire::PlaybackPlan) -> Vec<Command> {
+        let Some(old) = &self.plan else {
+            return Vec::new();
+        };
+        let source = self.position.unwrap_or(self.load_start) + old.offset;
+        // The Markers come in source time. The plan keeps them in player time.
+        let markers = old
+            .markers
+            .iter()
+            .map(|marker| Marker { start: marker.start + old.offset, end: marker.end + old.offset, ..marker.clone() })
+            .collect();
+        let attempt_id = old.attempt_id.clone();
+        self.adopt(session_id, attempt_id, plan, markers);
+        let start = (source - plan.timeline.timeline_offset_seconds).max(0.0);
+        self.position = Some(start);
+        self.load_now(start)
     }
 
     /// Loads the plan at `start`, after a refresh when the token has less than 4 hours left.
@@ -636,6 +720,8 @@ impl Session {
                     attempted_plan_keys: self.failed_keys.clone(),
                     selected_tracks: plan.selected_tracks.clone(),
                     position: good + plan.offset,
+                    operation: Operation::FailureRecovery,
+                    quality: self.quality.clone(),
                 })]
             }
             Chain::Replanned => self.lose(),

@@ -1451,7 +1451,7 @@ pub fn version_row(version: &wire::FileVersion) -> String {
 }
 
 /// A file size with 1024-based units and the GB, MB and KB labels of the web app, for example "10.6 GB".
-fn file_size(bytes: i64) -> String {
+pub fn file_size(bytes: i64) -> String {
     let bytes = bytes as f64;
     match [("GB", 3), ("MB", 2), ("KB", 1)].into_iter().find(|(_, power)| bytes >= 1024_f64.powi(*power)) {
         Some((unit, power)) => format!("{:.1} {unit}", bytes / 1024_f64.powi(power)),
