@@ -256,8 +256,8 @@ impl PlayerWindow {
             let Some(url) = poster else {
                 return;
             };
-            let http = cx.update(|cx| cx.http_client());
-            let file = cx.background_spawn(async move { artwork::fetch(&http, &artwork::cache_dir(), &url).await });
+            let target = MPRIS_POSTER_WIDTH as u32;
+            let file = cx.update(|cx| artwork::global(cx).update(cx, |cache, cx| cache.cover(&url, target, cx)));
             match file.await {
                 Ok(file) => {
                     this.update(cx, |this, cx| {

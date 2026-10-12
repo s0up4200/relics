@@ -1,13 +1,17 @@
-//! The Artwork cache, the rung of the Artwork ladder, and the Thumbhash previews.
+//! The Artwork cache, the rung of the Artwork ladder, and the Thumbhash previews. It is the only module that
+//! may call `gpui::img` (clippy.toml blocks it everywhere else), so that each image loads through the cache.
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, bail};
 use base64::Engine as _;
 use futures::AsyncReadExt as _;
+use futures::channel::oneshot;
 use gpui::http_client::{AsyncBody, HttpClient, Request};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, ImageCacheError, ImageCacheItem, ImageSource,
@@ -29,6 +33,8 @@ const DOWNLOADS: usize = 6;
 const REVALIDATIONS: usize = 2;
 /// A file on disk that is not revisioned is revalidated when its last check is this old.
 const REVALIDATE_AFTER: Duration = Duration::from_secs(60 * 60);
+/// An image in memory touches its files on disk at most this often, see [`touch`].
+const TOUCH_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// The Artwork cache. It keeps an LRU of decoded images in memory, limited by decoded
 /// bytes, and the files in `$XDG_CACHE_HOME/silo-omarchy/artwork/`. GPUI decodes each
@@ -62,11 +68,14 @@ struct Entry {
     bytes: usize,
     /// The file did not decode once, so the cache downloaded it again.
     refetched: bool,
+    /// The last time that the cache touched the files of the image, see [`touch`].
+    touched: SystemTime,
 }
 
 enum State {
-    /// The file is queued or downloading. The views wait for it.
-    Fetching(HashSet<EntityId>),
+    /// The file is queued or downloading. The views wait for it, and [`ArtworkCache::cover`] calls wait in the
+    /// senders.
+    Fetching(HashSet<EntityId>, Vec<oneshot::Sender<anyhow::Result<PathBuf>>>),
     Failed(ImageCacheError),
     /// The image, and the cache file that it decodes from.
     Ready(ImageCacheItem, PathBuf),
@@ -111,7 +120,7 @@ pub fn global(cx: &mut App) -> Entity<ArtworkCache> {
 }
 
 /// `$XDG_CACHE_HOME/silo-omarchy/artwork/`, or `~/.cache/silo-omarchy/artwork/`.
-pub fn cache_dir() -> PathBuf {
+fn cache_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
@@ -205,7 +214,11 @@ impl ArtworkCache {
                 Ok((file, _)) => State::Ready(ImageCacheItem::new(&Resource::Path(file.clone().into()), cx), file),
                 Err(err) => State::Failed(ImageCacheError::Other(Arc::new(err))),
             };
-            if let State::Fetching(views) = std::mem::replace(&mut entry.state, state) {
+            entry.touched = SystemTime::now();
+            if let State::Fetching(views, covers) = std::mem::replace(&mut entry.state, state) {
+                for cover in covers {
+                    _ = cover.send(entry.state.file());
+                }
                 let app: &mut App = cx;
                 for view in views {
                     app.notify(view);
@@ -271,6 +284,15 @@ impl ArtworkCache {
     /// Runs after a frame is drawn. It drops the images that this frame did not draw, see [`evictions`], and
     /// starts the next frame.
     fn end_frame(&mut self, window: &mut Window, cx: &mut App) {
+        for entry in self.entries.values_mut().filter(|entry| entry.bytes == 0) {
+            if let State::Ready(item, _) = &entry.state
+                && let Some(Ok(image)) = item.get()
+            {
+                let size = image.size(0);
+                entry.bytes = (size.width.0 * size.height.0 * 4) as usize;
+                self.bytes += entry.bytes;
+            }
+        }
         let images = self.entries.iter().map(|(key, entry)| (key.clone(), entry.last_use, entry.bytes));
         for key in evictions(images, self.frame, self.bytes, MEMORY_LIMIT) {
             let entry = self.entries.remove(&key).expect("the key comes from the map");
@@ -316,7 +338,7 @@ impl ArtworkCache {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        let key = format!("{}-w{target}", file_name(url).unwrap_or_else(|| url.to_string()));
+        let key = key(url, target);
         if !self.frame_open {
             self.frame_open = true;
             let this = self.this.clone();
@@ -325,18 +347,11 @@ impl ArtworkCache {
                 this.update(cx, |this, cx| this.end_frame(window, cx)).ok();
             });
         }
-        if !self.entries.contains_key(&key) {
-            self.open(Job { key: key.clone(), url: url.to_string(), target }, cx);
-        }
-        let entry = self.entries.entry(key.clone()).or_insert_with(|| Entry {
-            state: State::Fetching(HashSet::new()),
-            last_use: 0,
-            bytes: 0,
-            refetched: false,
-        });
-        entry.last_use = self.frame;
+        let frame = self.frame;
+        let entry = self.entry(&key, url, target, cx);
+        entry.last_use = frame;
         let result = match &mut entry.state {
-            State::Fetching(views) => {
+            State::Fetching(views, _) => {
                 views.insert(window.current_view());
                 None
             }
@@ -344,27 +359,80 @@ impl ArtworkCache {
             State::Ready(item, _) => item.use_image(window),
         };
         // A cache file that does not decode goes, so that a revisioned file does not stay broken. The cache
-        // downloads it again once.
-        if let (Some(Err(_)), State::Ready(_, file)) = (&result, &entry.state) {
+        // downloads it again once. After that the image fails, so that the next render does not discard again.
+        if let (Some(Err(err)), State::Ready(_, file)) = (&result, &entry.state) {
             discard(file);
-            if !entry.refetched {
+            if entry.refetched {
+                entry.state = State::Failed(err.clone());
+            } else {
                 entry.refetched = true;
-                entry.state = State::Fetching(HashSet::from([window.current_view()]));
+                entry.state = State::Fetching(HashSet::from([window.current_view()]), Vec::new());
                 self.queue.push_back(Job { key, url: url.to_string(), target });
                 self.start_downloads(cx);
                 return None;
             }
         }
-        if entry.bytes == 0
-            && let Some(Ok(image)) = &result
+        // A memory hit tells `prune` that the files are in use. It is not each frame, because a touch writes to
+        // the disk.
+        let now = SystemTime::now();
+        if let (Some(Ok(_)), State::Ready(_, file)) = (&result, &entry.state)
+            && now.duration_since(entry.touched).is_ok_and(|age| age >= TOUCH_AFTER)
         {
-            let size = image.size(0);
-            entry.bytes = (size.width.0 * size.height.0 * 4) as usize;
-            self.bytes += entry.bytes;
+            let file = file.clone();
+            entry.touched = now;
+            let (dir, url) = (self.dir.clone(), url.to_string());
+            cx.background_executor().spawn(async move { touch(&dir, &url, &file, now) }).detach();
         }
         self.start_downloads(cx);
         result
     }
+
+    /// The entry at `key`. When there is none, it makes one and starts to load the image.
+    fn entry(&mut self, key: &str, url: &str, target: u32, cx: &mut App) -> &mut Entry {
+        if !self.entries.contains_key(key) {
+            self.open(Job { key: key.to_string(), url: url.to_string(), target }, cx);
+        }
+        self.entries.entry(key.to_string()).or_insert_with(|| Entry {
+            state: State::Fetching(HashSet::new(), Vec::new()),
+            last_use: 0,
+            bytes: 0,
+            refetched: false,
+            touched: SystemTime::UNIX_EPOCH,
+        })
+    }
+
+    /// The cache file of the artwork at `url` for `target` pixels wide, for the MPRIS cover. It loads through the
+    /// same entries as [`image`], so that one URL has one download.
+    pub fn cover(
+        &mut self,
+        url: &str,
+        target: u32,
+        cx: &mut App,
+    ) -> impl Future<Output = anyhow::Result<PathBuf>> + use<> {
+        let (sender, receiver) = oneshot::channel();
+        let entry = self.entry(&key(url, target), url, target, cx);
+        match &mut entry.state {
+            State::Fetching(_, covers) => covers.push(sender),
+            state => _ = sender.send(state.file()),
+        }
+        async move { receiver.await? }
+    }
+}
+
+impl State {
+    /// The cache file of a ready image, or the error of a failed one.
+    fn file(&self) -> anyhow::Result<PathBuf> {
+        match self {
+            State::Ready(_, file) => Ok(file.clone()),
+            State::Failed(err) => Err(anyhow::anyhow!("{err}")),
+            State::Fetching(..) => Err(anyhow::anyhow!("the artwork is still loading")),
+        }
+    }
+}
+
+/// The key of the image at `url` for `target` pixels wide.
+fn key(url: &str, target: u32) -> String {
+    format!("{}-w{target}", file_name(url).unwrap_or_else(|| url.to_string()))
 }
 
 /// The artwork at `url`, shown `width` logical pixels wide. It loads through the Artwork cache, in the size
@@ -403,8 +471,9 @@ pub fn thumbhash(hash: &str) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
-/// Deletes the least recently used files until the files in `dir` hold `max_bytes` or
-/// less. It also deletes the temp files that a crash left behind. Returns the bytes that the files keep.
+/// When the files in `dir` hold more than `max_bytes`, deletes the least recently used files until they hold 90% of
+/// `max_bytes` or less, so that the next writes do not start a new prune at once. It also deletes the temp files
+/// that a crash left behind. Returns the bytes that the files keep.
 pub fn prune(dir: &Path, max_bytes: u64) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut files = Vec::new();
@@ -426,8 +495,11 @@ pub fn prune(dir: &Path, max_bytes: u64) -> u64 {
     }
     files.sort();
     let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
+    if total <= max_bytes {
+        return total;
+    }
     for (_, len, path) in files {
-        if total <= max_bytes {
+        if total <= max_bytes / 10 * 9 {
             break;
         }
         discard(&path);
@@ -442,10 +514,15 @@ pub fn discard(file: &Path) {
     _ = std::fs::remove_file(file.with_extension("etag"));
 }
 
-/// Returns the cache file of the artwork at `url` in `dir`, and downloads it first when
-/// necessary. See [`download`].
-pub async fn fetch(http: &Arc<dyn HttpClient>, dir: &Path, url: &str) -> anyhow::Result<PathBuf> {
-    Ok(download(http, dir, url, SystemTime::now()).await?.0)
+/// Sets the modification time of the cache file of `url` in `dir`, and of `file`, its shrunk copy, to `now`.
+/// `prune` then keeps them. The ETag file keeps its time, because that time is the last revalidation.
+pub fn touch(dir: &Path, url: &str, file: &Path, now: SystemTime) {
+    let base = file_name(url).map(|name| dir.join(name));
+    for path in base.iter().map(PathBuf::as_path).chain([file]) {
+        if let Ok(file) = std::fs::File::options().write(true).open(path) {
+            _ = file.set_modified(now);
+        }
+    }
 }
 
 /// Returns the cache file of the artwork at `url` in `dir`, and the number of bytes that the call wrote to `dir`.
@@ -491,7 +568,9 @@ pub async fn download(
     match reply.await {
         Ok(Some((etag, body))) => {
             std::fs::create_dir_all(dir)?;
-            let temp = dir.join(format!("{name}.tmp"));
+            // Each write has its own temp file, because two widths of one URL can download it at the same time.
+            static WRITES: AtomicU64 = AtomicU64::new(0);
+            let temp = dir.join(format!("{name}.{}.tmp", WRITES.fetch_add(1, Ordering::Relaxed)));
             let written = body.len() as u64;
             std::fs::write(&temp, body)?;
             std::fs::rename(&temp, &file)?;

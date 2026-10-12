@@ -49,10 +49,10 @@ const MUTABLE: &str = "https://silo.test/api/v2/artwork/poster/abc/w300.webp?exp
 fn revisioned_artwork_downloads_once_and_then_comes_from_disk() {
     let dir = empty_dir("revisioned");
     let (http, seen) = host(vec![(200, Some("\"e1\""), "poster")]);
-    let file = block_on(artwork::fetch(&http, &dir, REVISIONED)).unwrap();
+    let file = block_on(artwork::download(&http, &dir, REVISIONED, start())).unwrap().0;
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "poster");
     let resigned = REVISIONED.replace("exp=1&sig=a", "exp=2&sig=b");
-    assert_eq!(block_on(artwork::fetch(&http, &dir, &resigned)).unwrap(), file);
+    assert_eq!(block_on(artwork::download(&http, &dir, &resigned, start())).unwrap().0, file);
     assert_eq!(seen.lock().unwrap().len(), 1, "a revisioned file is never revalidated");
     let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert!(names.iter().all(|n| !n.to_string_lossy().ends_with(".tmp")), "{names:?}");
@@ -144,6 +144,36 @@ fn prune_deletes_the_least_recently_used_files_and_left_over_temp_files() {
 }
 
 #[test]
+fn prune_waits_for_the_limit_and_then_trims_to_90_percent_of_it() {
+    let dir = empty_dir("prune-margin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let now = std::time::SystemTime::now();
+    for (name, len, age) in [("old", 10, 30), ("mid", 100, 20), ("new", 100, 10)] {
+        std::fs::write(dir.join(name), vec![0u8; len]).unwrap();
+        let file = std::fs::File::options().write(true).open(dir.join(name)).unwrap();
+        file.set_modified(now - std::time::Duration::from_secs(age)).unwrap();
+    }
+    assert_eq!(artwork::prune(&dir, 210), 210, "at the limit nothing goes");
+    assert_eq!(artwork::prune(&dir, 205), 100, "over the limit the files fall to 184 bytes or less");
+    assert!(dir.join("new").exists());
+}
+
+#[test]
+fn a_touch_keeps_the_file_and_its_shrunk_copy_but_not_the_revalidation_clock() {
+    let dir = empty_dir("touch");
+    let (http, _) = image_host(vec![png(600, 900)]);
+    let t0 = start();
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 200)).unwrap();
+    let later = t0 + 2 * MINUTE;
+    artwork::touch(&dir, MUTABLE, &copy, later);
+    let modified = |path: &std::path::Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    let file = dir.join(artwork::file_name(MUTABLE).unwrap());
+    assert_eq!(modified(&file), later, "prune keeps the file that the copy comes from");
+    assert_eq!(modified(&copy), later);
+    assert!(artwork::revalidation_due(&dir, MUTABLE, t0 + 61 * MINUTE), "a touch is not a check");
+}
+
+#[test]
 fn each_surface_gets_the_smallest_rung_at_least_as_wide_as_its_pixels() {
     use artwork::Kind::{Backdrop, Poster, Profile, Still};
     // The widths come from the server docs: poster and still 300/500/780, backdrop 300/1920/1920, profile 300/500/500.
@@ -188,10 +218,13 @@ fn eviction_drops_the_oldest_images_but_never_one_drawn_in_this_frame() {
 fn a_discarded_file_downloads_again() {
     let dir = empty_dir("discard");
     let (http, seen) = host(vec![(200, Some("\"e1\""), "broken"), (200, Some("\"e2\""), "poster")]);
-    let file = block_on(artwork::fetch(&http, &dir, REVISIONED)).unwrap();
+    let file = block_on(artwork::download(&http, &dir, REVISIONED, start())).unwrap().0;
     artwork::discard(&file);
     assert!(!file.exists() && !file.with_extension("etag").exists());
-    assert_eq!(std::fs::read_to_string(block_on(artwork::fetch(&http, &dir, REVISIONED)).unwrap()).unwrap(), "poster");
+    assert_eq!(
+        std::fs::read_to_string(block_on(artwork::download(&http, &dir, REVISIONED, start())).unwrap().0).unwrap(),
+        "poster"
+    );
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
