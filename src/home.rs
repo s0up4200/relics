@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
-    RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
+    ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription,
+    Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -45,7 +46,8 @@ pub struct Home {
     focus: Focus,
     /// The page has the keyboard focus, so the focused card shows the focus ring.
     pub active: bool,
-    page_scroll: ScrollHandle,
+    /// The page list: one item for each section, and the status line as the last item.
+    page: ListState,
     row_scrolls: Vec<ScrollHandle>,
     /// The decoded Thumbhash of each card, in the order of `sections`.
     thumbs: Vec<Vec<Option<Arc<RenderImage>>>>,
@@ -117,7 +119,8 @@ impl Home {
             failed: false,
             focus: Focus::Outside,
             active: false,
-            page_scroll: ScrollHandle::new(),
+            // The overdraw measures the rows near the viewport, so that the focus can scroll to them.
+            page: ListState::new(1, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
             _loading: Task::ready(()),
             _scale: scale,
@@ -159,11 +162,20 @@ impl Home {
                             this.focus = move_focus(Focus::Outside, Key::Right, &rows);
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
+                        // A reload with the same number of sections keeps the scroll position.
+                        let count = this.sections.len() + 1;
+                        if this.page.item_count() == count {
+                            this.page.remeasure();
+                        } else {
+                            this.page.reset(count);
+                        }
                     }
                     // The page keeps what it shows. The Library window shows Offline or the sign-in screen.
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;
+                        let status = this.sections.len();
+                        this.page.remeasure_items(status..status + 1);
                     }
                 }
                 cx.notify();
@@ -205,7 +217,7 @@ impl Home {
         if focus == self.focus {
             return false;
         }
-        self.page_scroll.scroll_to_item(row);
+        self.page.scroll_to_reveal_item(row);
         self.row_scrolls[row].scroll_to_item(col);
         self.focus = focus;
         cx.notify();
@@ -312,23 +324,12 @@ impl Home {
             )
             .into_any_element()
     }
-}
 
-impl Render for Home {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy().clone();
-        let rows: Vec<_> = self.sections.iter().enumerate().map(|(i, s)| self.row(i, s, cx)).collect();
+    /// The last item of the page: the status line with Retry after a failed load, and the bottom margin.
+    fn status(&self, cx: &Context<Self>) -> AnyElement {
+        let t = cx.omarchy();
         div()
-            .id("home-page")
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(36.))
-            .pt(px(32.))
             .pb(px(80.))
-            .overflow_y_scroll()
-            .track_scroll(&self.page_scroll)
-            .children(rows)
             .children(self.status.clone().map(|status| {
                 let retry = button("home-retry", "Retry", ButtonVariant::Secondary, cx)
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
@@ -341,6 +342,24 @@ impl Render for Home {
                     .child(status)
                     .children(self.failed.then_some(retry))
             }))
+            .into_any_element()
+    }
+}
+
+impl Render for Home {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The list draws only the sections near the viewport. Each row keeps its own sideways scroll.
+        let page = list(
+            self.page.clone(),
+            cx.processor(|this, index: usize, _, cx| {
+                let item = match this.sections.get(index) {
+                    Some(section) => div().pb(px(36.)).child(this.row(index, section, cx)).into_any_element(),
+                    None => this.status(cx),
+                };
+                div().when(index == 0, |d| d.pt(px(32.))).child(item).into_any_element()
+            }),
+        );
+        div().id("home-page").size_full().child(page.size_full())
     }
 }
 

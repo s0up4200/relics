@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    Render, RenderImage, ScrollStrategy, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -36,6 +37,17 @@ pub enum Move {
     Stay,
 }
 
+/// The indexes of the cards in grid row `row`.
+pub fn row_cards(row: usize, columns: usize, len: usize) -> std::ops::Range<usize> {
+    (row * columns).min(len)..((row + 1) * columns).min(len)
+}
+
+/// The scroll is within three posters of the end, so the next page must load. `scroll_top` and `max` are the
+/// scrolled and the largest scroll distance.
+fn near_end(scroll_top: f32, max: f32) -> bool {
+    scroll_top > max - POSTER_HEIGHT * 3.
+}
+
 pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
     match key {
         Key::Left if index.is_multiple_of(columns) => Move::OutLeft,
@@ -64,7 +76,7 @@ pub struct Grid {
     error: Option<String>,
     loading: Option<Task<()>>,
     image_size: Rung,
-    scroll: ScrollHandle,
+    scroll: UniformListScrollHandle,
     artwork: Entity<ArtworkCache>,
 }
 
@@ -85,7 +97,7 @@ impl Grid {
             error: None,
             loading: None,
             image_size: Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()),
-            scroll: ScrollHandle::new(),
+            scroll: UniformListScrollHandle::new(),
             artwork: artwork::global(cx),
         };
         grid.load_more(cx);
@@ -99,7 +111,7 @@ impl Grid {
         self.paging = Paging::default();
         self.focus = 0;
         self.loading = None;
-        self.scroll.set_offset(gpui::Point::default());
+        self.scroll.0.borrow().base_handle.set_offset(gpui::Point::default());
         self.load_more(cx);
     }
 
@@ -152,7 +164,8 @@ impl Grid {
     }
 
     fn near_end(&self) -> bool {
-        -self.scroll.offset().y > self.scroll.max_offset().y - px(POSTER_HEIGHT * 3.)
+        let scroll = &self.scroll.0.borrow().base_handle;
+        near_end(-f32::from(scroll.offset().y), f32::from(scroll.max_offset().y))
     }
 
     /// Handles a key. Returns `Move::OutTop` or `Move::OutLeft` when the key leaves the grid, and `Move::Stay`
@@ -172,7 +185,7 @@ impl Grid {
             _ => match move_focus(self.focus, key, items.len(), self.columns) {
                 Move::To(index) => {
                     self.focus = index;
-                    self.scroll.scroll_to_item(index);
+                    self.scroll.scroll_to_item(index / self.columns, ScrollStrategy::Nearest);
                     if index + 2 * self.columns >= items.len() {
                         self.load_more(cx);
                     }
@@ -243,7 +256,7 @@ impl Render for Grid {
         // The next page loads in the rung for the current scale. The loaded pages keep their rung.
         self.image_size = self.image_size.max(Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()));
         self.columns = columns(viewport - crate::pages::sidebar_width(viewport, false) - 80.);
-        let cards: Vec<_> = self.paging.items.iter().enumerate().map(|(i, item)| self.card(i, item, cx)).collect();
+        let len = self.paging.items.len();
         let status = match (&self.error, &self.loading) {
             (Some(error), _) => Some(
                 div()
@@ -262,23 +275,29 @@ impl Render for Grid {
             (None, Some(_)) => Some(div().w_full().text_color(t.secondary).child("Loading…").into_any_element()),
             _ => None,
         };
-        div()
-            .id("grid")
-            .size_full()
-            .flex()
-            .flex_wrap()
-            .content_start()
-            .gap(px(GAP))
-            .pb(px(80.))
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                if this.near_end() {
-                    this.load_more(cx);
-                }
-            }))
-            .children(cards)
-            .children(status)
+        // The list draws only the visible rows. Each row holds `columns` cards and the gap below it.
+        let rows = uniform_list(
+            "grid",
+            len.div_ceil(self.columns),
+            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .map(|row| {
+                        let cards = row_cards(row, this.columns, this.paging.items.len())
+                            .map(|i| this.card(i, &this.paging.items[i], cx));
+                        div().flex().gap(px(GAP)).pb(px(GAP)).children(cards)
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(&self.scroll)
+        .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+            if this.near_end() {
+                this.load_more(cx);
+            }
+        }));
+        // An empty list takes no height, so that "Loading…" shows at the top.
+        let rows = if len > 0 { rows.flex_1() } else { rows };
+        div().size_full().flex().flex_col().child(rows).children(status.map(|s| div().pb(px(80.)).child(s)))
     }
 }
 
@@ -361,7 +380,7 @@ impl Render for GridPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Move, columns, move_focus};
+    use super::{Move, columns, move_focus, near_end, row_cards};
     use crate::keys::Key;
 
     #[test]
@@ -378,6 +397,23 @@ mod tests {
         assert_eq!(move_focus(4, Key::Up, 7, 3), Move::To(1));
         assert_eq!(move_focus(1, Key::Up, 7, 3), Move::OutTop);
         assert_eq!(move_focus(0, Key::Other("x"), 7, 3), Move::Stay);
+    }
+
+    #[test]
+    fn each_row_holds_the_cards_of_its_columns() {
+        // 7 cards in 3 columns: rows [0 1 2] [3 4 5] [6].
+        assert_eq!(row_cards(0, 3, 7), 0..3);
+        assert_eq!(row_cards(1, 3, 7), 3..6);
+        assert_eq!(row_cards(2, 3, 7), 6..7, "a short last row");
+        assert_eq!(row_cards(3, 3, 7), 7..7, "past the end");
+    }
+
+    #[test]
+    fn the_next_page_loads_within_three_posters_of_the_end() {
+        assert!(!near_end(0., 1000.));
+        assert!(!near_end(300., 1000.));
+        assert!(near_end(400., 1000.));
+        assert!(near_end(0., 0.), "a list that does not scroll is at its end");
     }
 
     #[test]
