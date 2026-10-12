@@ -39,7 +39,7 @@ const RENEW_BEFORE_EXPIRY: Duration = Duration::from_secs(600);
 /// A reloaded stream that plays this many seconds is healthy again, and the next failure starts a new chain.
 // ponytail: a fixed distance; a stream that fails every few seconds restarts the chain only by Enter.
 const HEALTHY_SECONDS: f64 = 10.0;
-/// The text of the controller when the recovery chain gave up.
+/// The prompt text that the Player view shows when the recovery chain gave up.
 const LOST: &str = "Lost connection to the server";
 
 /// HTTP headers as (name, value).
@@ -113,7 +113,8 @@ pub enum Input {
     End,
     /// The periodic tick of the caller.
     Tick,
-    /// The user took the Skip prompt, with a click or Enter.
+    /// The user pressed Enter or clicked the button that shows: the Skip prompt, Play now on the Up Next card,
+    /// Continue on the Still watching prompt, or the retry after `LOST`.
     Action,
     /// The Item has a next episode.
     NextEpisode,
@@ -241,7 +242,7 @@ enum Chain {
     Replanning,
     /// The app loaded the new plan.
     Replanned,
-    /// The controller shows the `LOST` text. Enter starts the chain again.
+    /// The Player view shows the `LOST` text as the prompt. Enter starts the chain again.
     Lost,
 }
 
