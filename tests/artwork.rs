@@ -17,13 +17,13 @@ fn empty_dir(name: &str) -> PathBuf {
 }
 
 /// One reply of the fake artwork host: status, ETag, body.
-type Reply = (u16, Option<&'static str>, &'static str);
+type Reply<B> = (u16, Option<&'static str>, B);
 
 /// The `If-None-Match` header of each request.
 type Seen = Arc<Mutex<Vec<Option<String>>>>;
 
 /// A fake artwork host. It answers with `replies` in order.
-fn host(replies: Vec<Reply>) -> (Arc<dyn HttpClient>, Seen) {
+fn host<B: Into<Vec<u8>> + Send + 'static>(replies: Vec<Reply<B>>) -> (Arc<dyn HttpClient>, Seen) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
     let replies = Arc::new(Mutex::new(replies.into_iter()));
@@ -36,7 +36,7 @@ fn host(replies: Vec<Reply>) -> (Arc<dyn HttpClient>, Seen) {
             if let Some(etag) = etag {
                 response = response.header("ETag", etag);
             }
-            Ok(response.body(AsyncBody::from(body.to_string())).unwrap())
+            Ok(response.body(AsyncBody::from(body.into())).unwrap())
         }
     });
     (http, seen)
@@ -166,7 +166,8 @@ fn a_touch_keeps_the_file_and_its_shrunk_copy_but_not_the_revalidation_clock() {
     let dir = empty_dir("touch");
     let (http, _) = image_host(vec![png(600, 900)]);
     let t0 = start();
-    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 200)).unwrap();
+    block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 500)).unwrap();
+    let (copy, _) = artwork::on_disk(&dir, MUTABLE, 200).unwrap();
     let later = t0 + 2 * MINUTE;
     artwork::touch(&dir, MUTABLE, &copy, later);
     let modified = |path: &std::path::Path| std::fs::metadata(path).unwrap().modified().unwrap();
@@ -305,11 +306,13 @@ fn a_file_on_disk_shows_without_a_request() {
     let dir = empty_dir("on-disk");
     let (http, count) = image_host(vec![png(600, 900)]);
     assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), None, "nothing is on disk yet");
-    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, start(), 200)).unwrap();
-    assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), Some((copy, 0)));
-    let (other, written) = artwork::on_disk(&dir, MUTABLE, 300).expect("the file is on disk");
-    assert_eq!(dimensions(&other), (300, 450), "another width shrinks from the file on disk");
+    let (full, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, start(), 500)).unwrap();
+    assert_eq!(full, dir.join(artwork::file_name(MUTABLE).unwrap()), "a view near the full size uses the file");
+    let (copy, written) = artwork::on_disk(&dir, MUTABLE, 200).expect("the file is on disk");
+    assert_eq!(dimensions(&copy), (200, 300), "another width shrinks from the file on disk");
     assert!(written > 0, "the new copy counts as written");
+    assert!(full.exists(), "a view uses the full-size file, so it stays");
+    assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), Some((copy, 0)));
     assert_eq!(*count.lock().unwrap(), 1);
 }
 
@@ -318,11 +321,57 @@ fn a_new_file_from_a_revalidation_replaces_the_shrunk_copies() {
     let dir = empty_dir("replaced");
     let (http, count) = image_host(vec![png(600, 900), png(900, 600)]);
     let t0 = start();
-    block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 200)).unwrap();
-    artwork::on_disk(&dir, MUTABLE, 300).unwrap();
-    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t0 + 61 * MINUTE, 200)).unwrap();
+    block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 500)).unwrap();
+    artwork::on_disk(&dir, MUTABLE, 200).unwrap();
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t0 + 61 * MINUTE, 500)).unwrap();
     assert_eq!(*count.lock().unwrap(), 2);
-    assert_eq!(dimensions(&copy), (200, 133), "the copy comes from the new file");
-    let (other, _) = artwork::on_disk(&dir, MUTABLE, 300).unwrap();
-    assert_eq!(dimensions(&other), (300, 200), "the old copy for another width is gone");
+    assert_eq!(dimensions(&copy), (500, 333), "the copy comes from the new file");
+    assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), None, "the old copy for another width is gone");
+}
+
+#[test]
+fn a_shrunk_download_keeps_only_the_copy_and_the_etag() {
+    let dir = empty_dir("only-copy");
+    let (http, seen) = host(vec![
+        (200, Some("\"e1\""), png(600, 900)),
+        (304, None, Vec::new()),
+        (200, Some("\"e2\""), png(900, 600)),
+        (200, Some("\"e2\""), png(900, 600)),
+    ]);
+    let name = artwork::file_name(MUTABLE).unwrap();
+    let t0 = start();
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t0, 200)).unwrap();
+    assert!(!dir.join(&name).exists(), "the copy replaces the full-size file");
+    assert!(dir.join(format!("{name}.etag")).exists(), "the ETag stays for the revalidation");
+    assert_eq!(artwork::on_disk(&dir, MUTABLE, 200), Some((copy.clone(), 0)));
+    let t1 = t0 + 61 * MINUTE;
+    assert!(artwork::revalidation_due(&dir, MUTABLE, t1));
+    assert_eq!(block_on(artwork::download_sized(&http, &dir, MUTABLE, t1, 200)).unwrap(), (copy.clone(), 0));
+    assert_eq!(dimensions(&copy), (200, 300), "304 keeps the copy");
+    assert!(!artwork::revalidation_due(&dir, MUTABLE, t1 + 30 * MINUTE), "the 304 starts a new hour");
+    let t2 = t1 + 61 * MINUTE;
+    let (new, written) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t2, 200)).unwrap();
+    assert_eq!(new, copy);
+    assert!(written > 0);
+    assert_eq!(dimensions(&copy), (200, 133), "200 replaces the copy");
+    assert!(!dir.join(&name).exists(), "the new full-size file also goes");
+    assert_eq!(artwork::on_disk(&dir, MUTABLE, 300), None, "another width has no copy and no file to shrink");
+    let (other, _) = block_on(artwork::download_sized(&http, &dir, MUTABLE, t2, 300)).unwrap();
+    assert_eq!(dimensions(&other), (300, 200));
+    let etag = |tag: &str| Some(tag.to_string());
+    assert_eq!(*seen.lock().unwrap(), [None, etag("\"e1\""), etag("\"e1\""), None], "a 304 needs a copy to serve");
+}
+
+#[test]
+fn prune_keeps_an_etag_while_the_file_or_a_shrunk_copy_stays() {
+    let dir = empty_dir("prune-etag");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["a", "a.etag", "b-w300", "b.etag", "c.etag"] {
+        std::fs::write(dir.join(name), "x").unwrap();
+    }
+    artwork::prune(&dir, 1000);
+    let mut left: Vec<_> =
+        std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    left.sort();
+    assert_eq!(left, ["a", "a.etag", "b-w300", "b.etag"]);
 }

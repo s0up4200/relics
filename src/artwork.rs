@@ -476,7 +476,7 @@ pub fn thumbhash(hash: &str) -> Option<Arc<RenderImage>> {
 /// that a crash left behind. Returns the bytes that the files keep.
 pub fn prune(dir: &Path, max_bytes: u64) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
-    let mut files = Vec::new();
+    let (mut files, mut etags) = (Vec::new(), Vec::new());
     for entry in entries.flatten() {
         let path = entry.path();
         match path.extension().and_then(|e| e.to_str()) {
@@ -487,16 +487,24 @@ pub fn prune(dir: &Path, max_bytes: u64) -> u64 {
                     _ = std::fs::remove_file(&path);
                 }
             }
-            Some("etag") => {
-                if !path.with_extension("").exists() {
-                    _ = std::fs::remove_file(&path);
-                }
-            }
+            Some("etag") => etags.push(path),
             _ => {
                 if let Ok(meta) = entry.metadata() {
                     files.push((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len(), path));
                 }
             }
+        }
+    }
+    // An ETag file goes when its file and each shrunk copy of it are gone.
+    for etag in etags {
+        let name = etag.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let copy = format!("{name}-w");
+        let used = files.iter().any(|(.., path)| {
+            let file = path.file_name().unwrap_or_default().to_string_lossy();
+            file == name || file.starts_with(&copy)
+        });
+        if !used {
+            _ = std::fs::remove_file(&etag);
         }
     }
     files.sort();
@@ -540,15 +548,51 @@ pub async fn download(
     url: &str,
     now: SystemTime,
 ) -> anyhow::Result<(PathBuf, u64)> {
+    fetch(http, dir, url, now, None).await
+}
+
+/// [`download`] for an image that shows `target` pixels wide. When the image is much wider, the cache keeps a copy
+/// that is `target` pixels wide, and returns that copy. A new download keeps only the copy and the ETag file, not
+/// the full-size file. Later calls use the copy while the image on the server stays the same. The number is the
+/// bytes that the call wrote to `dir`.
+pub async fn download_sized(
+    http: &Arc<dyn HttpClient>,
+    dir: &Path,
+    url: &str,
+    now: SystemTime,
+    target: u32,
+) -> anyhow::Result<(PathBuf, u64)> {
+    fetch(http, dir, url, now, Some(target)).await
+}
+
+/// [`download`], and with a `target` width also [`download_sized`].
+async fn fetch(
+    http: &Arc<dyn HttpClient>,
+    dir: &Path,
+    url: &str,
+    now: SystemTime,
+    target: Option<u32>,
+) -> anyhow::Result<(PathBuf, u64)> {
     let name = file_name(url).context("not an artwork URL")?;
     let file = dir.join(&name);
     let etag_file = dir.join(format!("{name}.etag"));
-    let cached = file.exists();
+    let copy = target.map(|target| dir.join(format!("{name}-w{target}")));
+    // The file that shows when the server sends nothing new: the full-size file, else the copy for `target`.
+    let held = match &copy {
+        Some(copy) if !file.exists() && copy.exists() => copy.clone(),
+        _ => file.clone(),
+    };
+    let keep = |held: PathBuf| match target {
+        Some(target) if held == file => sized(held, target),
+        _ => Ok((held, 0)),
+    };
+    // With no file to show, a 304 is of no use, so the request has no ETag.
+    let cached = held.exists();
     if cached {
         // The modification time tells `prune` when the file was last used.
-        std::fs::File::options().write(true).open(&file)?.set_modified(now)?;
+        std::fs::File::options().write(true).open(&held)?.set_modified(now)?;
         if !revalidation_due(dir, url, now) {
-            return Ok((file, 0));
+            return keep(held);
         }
     }
     let mut request = Request::get(url);
@@ -574,27 +618,41 @@ pub async fn download(
     match reply.await {
         Ok(Some((etag, body))) => {
             std::fs::create_dir_all(dir)?;
+            if cached {
+                remove_copies(dir, &name);
+            }
+            // A view that needs a shrunk copy gets only the copy, and an old full-size file goes. A first download
+            // has no old file, so it keeps a file that a download for another width wrote at the same time.
+            let (path, body) = match (copy, target.and_then(|target| shrink(&body, target))) {
+                (Some(copy), Some(small)) => {
+                    if cached {
+                        _ = std::fs::remove_file(&file);
+                    }
+                    (copy, small)
+                }
+                _ => (file, body),
+            };
             // Each write has its own temp file, because two widths of one URL can download it at the same time.
             static WRITES: AtomicU64 = AtomicU64::new(0);
             let temp = dir.join(format!("{name}.{}.tmp", WRITES.fetch_add(1, Ordering::Relaxed)));
             let written = body.len() as u64;
             std::fs::write(&temp, body)?;
-            std::fs::rename(&temp, &file)?;
-            if cached {
-                remove_copies(dir, &name);
-            }
+            std::fs::rename(&temp, &path)?;
             // The ETag file also keeps the time of the last check, see `revalidation_due`. It is empty when the
-            // server sent no ETag.
-            std::fs::write(&etag_file, etag.unwrap_or_default())?;
-            checked(&etag_file, now)?;
-            Ok((file, written))
+            // server sent no ETag. A download for a width with no copy keeps the ETag file of the other copies,
+            // because they can come from an older file. Their next revalidation then replaces them.
+            if cached || !etag_file.exists() {
+                std::fs::write(&etag_file, etag.unwrap_or_default())?;
+                checked(&etag_file, now)?;
+            }
+            Ok((path, written))
         }
         Err(err) if !cached => Err(err),
         // A 304 and a failed revalidation both start a new hour, so that an offline cache does not ask again
         // at each load.
         _ => {
             checked(&etag_file, now)?;
-            Ok((file, 0))
+            keep(held)
         }
     }
 }
@@ -618,59 +676,48 @@ fn remove_copies(dir: &Path, name: &str) {
 }
 
 /// True when the artwork at `url` is on disk in `dir`, is not revisioned, and its last check is at least
-/// [`REVALIDATE_AFTER`] older than `now`. A file with no record of a check is due.
+/// [`REVALIDATE_AFTER`] older than `now`. A file with no record of a check is due. The ETag file stays while a
+/// shrunk copy stays, so it tells that the artwork is on disk also when the full-size file is gone.
 pub fn revalidation_due(dir: &Path, url: &str, now: SystemTime) -> bool {
     let Some(name) = file_name(url) else { return false };
-    if is_revisioned(url) || !dir.join(&name).exists() {
+    let etag_file = dir.join(format!("{name}.etag"));
+    if is_revisioned(url) || !(dir.join(&name).exists() || etag_file.exists()) {
         return false;
     }
-    let checked = std::fs::metadata(dir.join(format!("{name}.etag"))).and_then(|meta| meta.modified());
+    let checked = std::fs::metadata(etag_file).and_then(|meta| meta.modified());
     checked.map_or(true, |at| now.duration_since(at).is_ok_and(|age| age >= REVALIDATE_AFTER))
 }
 
-/// [`download`] for an image that shows `target` pixels wide. When the image is much wider, the cache also keeps
-/// a copy that is `target` pixels wide, and returns that copy. Later calls use the copy while the image on disk
-/// stays the same. The number is the bytes that the call wrote to `dir`.
-pub async fn download_sized(
-    http: &Arc<dyn HttpClient>,
-    dir: &Path,
-    url: &str,
-    now: SystemTime,
-    target: u32,
-) -> anyhow::Result<(PathBuf, u64)> {
-    let (file, written) = download(http, dir, url, now).await?;
-    sized(file, written, target)
-}
-
 /// The file for the artwork at `url` that shows `target` pixels wide, from disk only, as [`download_sized`]
-/// gives it. `None` when the artwork is not on disk. The number is the bytes of a new shrunk copy.
+/// gives it. `None` when the artwork is not on disk for `target`. The number is the bytes of a new shrunk copy.
 pub fn on_disk(dir: &Path, url: &str, target: u32) -> Option<(PathBuf, u64)> {
     let file = dir.join(file_name(url)?);
-    // The modification time tells `prune` when the file was last used.
-    std::fs::File::options().write(true).open(&file).ok()?.set_modified(SystemTime::now()).ok()?;
-    sized(file, 0, target).ok()
+    // The modification time tells `prune` when the file was last used. The file is gone when a copy replaced it.
+    if let Ok(open) = std::fs::File::options().write(true).open(&file) {
+        open.set_modified(SystemTime::now()).ok()?;
+    }
+    sized(file, target).ok()
 }
 
 /// The shrunk copy of the cache `file` for `target` pixels wide, or `file` when the image needs no copy. It makes
-/// the copy when `written` is more than zero (the file is new) or when there is no copy. The number is `written`
-/// plus the bytes of a new copy.
-fn sized(file: PathBuf, written: u64, target: u32) -> anyhow::Result<(PathBuf, u64)> {
+/// the copy from `file` when there is no copy, and keeps `file`, because a view can show it. The number is the
+/// bytes of a new copy.
+fn sized(file: PathBuf, target: u32) -> anyhow::Result<(PathBuf, u64)> {
     let mut name = file.file_name().context("a cache file has a name")?.to_os_string();
     name.push(format!("-w{target}"));
     let copy = file.with_file_name(name);
-    if written == 0 && copy.exists() {
+    if copy.exists() {
         std::fs::File::options().write(true).open(&copy)?.set_modified(SystemTime::now())?;
         return Ok((copy, 0));
     }
     let Some(small) = shrink(&std::fs::read(&file)?, target) else {
-        _ = std::fs::remove_file(&copy);
-        return Ok((file, written));
+        return Ok((file, 0));
     };
     let temp = copy.with_extension("tmp");
     let copied = small.len() as u64;
     std::fs::write(&temp, small)?;
     std::fs::rename(&temp, &copy)?;
-    Ok((copy, written + copied))
+    Ok((copy, copied))
 }
 
 /// An image that is at least this many times wider than its target gets a shrunk copy.
