@@ -7,6 +7,7 @@ use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
 use serde_json::{Value, json as value};
 use silo_omarchy::artwork::Rung;
+use silo_omarchy::requests;
 
 /// The method and the path of each request.
 fn calls(seen: &common::Log) -> Vec<(String, String)> {
@@ -153,6 +154,32 @@ fn requests_search_create_list_and_cancel() {
     assert_eq!(block_on(client.cancel_request("r-1")).unwrap().state, "approved");
     let seen = seen.lock().unwrap();
     assert_eq!(body(&seen[2]), value!({ "media_type": "movie", "tmdb_id": 12345, "title": "Example" }));
+}
+
+#[test]
+fn request_to_add_lists_the_missing_titles_and_requests_one_with_its_details() {
+    let page = value!({ "page": 1, "total_pages": 1, "total_results": 2, "results": [
+        { "availability": "available", "library_content_id": "movie:heat-1995", "media_type": "movie",
+          "tmdb_id": 949, "title": "Heat", "year": 1995, "in_watchlist": false,
+          "request": { "following": false, "requestable": false, "requested_by_viewer": false } },
+        { "availability": "missing", "media_type": "series", "tmdb_id": 1399, "title": "The Heat",
+          "year": 2013, "overview": "Two cops.", "poster_path": "/p.jpg", "in_watchlist": false,
+          "request": { "following": false, "requestable": true, "requested_by_viewer": false } },
+    ]});
+    let (client, seen) = fake(move |req| match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "requests/search?q=heat&page=1") => json(200, page.to_string()),
+        ("POST", "requests") => json(201, fixture("create_request_ok.json")),
+        _ => not_found(),
+    });
+    let results = requests::to_add(block_on(client.search_requests("heat", 1)).unwrap());
+    assert_eq!(results.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["The Heat"]);
+    block_on(client.create_request(&requests::create(&results[0]).unwrap())).unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        body(&seen[1]),
+        value!({ "media_type": "series", "tmdb_id": 1399, "title": "The Heat", "year": 2013,
+                 "overview": "Two cops.", "poster_path": "/p.jpg" })
+    );
 }
 
 #[test]

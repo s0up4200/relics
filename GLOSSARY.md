@@ -59,6 +59,10 @@ _Avoid_: Filter menu, Guided mode
 A filter that takes one text value: a language, a studio, a network, a country, or a Person in one role (actor, director, writer, producer). The server lists the values of each facet except the Person facets, where the user types the name.
 _Avoid_: Facet filter, people filter
 
+**Request**:
+A request from the user that the Server adds a movie or a series that it does not have. Search shows such titles under Request to add, and Enter sends a request. My requests lists the requests of the user with their state (pending, approved, processing, available, and others). The user can cancel a request until the Server sent something for it. The app does not have the discover pages or follows of the web client.
+_Avoid_: order, wish
+
 **Artwork ladder**:
 The fixed set of widths at which the Silo server caches each artwork type. `image_size` picks one rung for a whole response.
 _Avoid_: Variants, resolutions

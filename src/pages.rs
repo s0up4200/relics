@@ -1,6 +1,6 @@
 //! The pages of the active Profile: the sidebar, the page that shows, and the back history. Esc or Backspace
 //! goes back to the page and the card that had the focus. 1 to 3 open Home, Movies and Shows, and / opens
-//! Search. The sidebar also opens the Watchlist, the History and the collections of the Server. The sidebar shrinks to an icon rail when the window is narrow and on the detail page. The sidebar
+//! Search. The sidebar also opens the Watchlist, the History, the collections of the Server and My requests. The sidebar shrinks to an icon rail when the window is narrow and on the detail page. The sidebar
 //! footer, or m, opens the menu with Switch profile, Switch server and Sign out. The , key or the Settings row
 //! at the bottom of the sidebar opens the Settings page. Esc goes back from it.
 
@@ -25,6 +25,7 @@ use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
 use crate::library_page::{LibraryPage, is_shows};
 use crate::person::PersonPage;
+use crate::requests::Requests;
 use crate::search::{OpenPerson, Search};
 use crate::settings_page::{AccountAction, SettingsPage};
 use crate::state::Pair;
@@ -76,6 +77,8 @@ pub enum Page {
     History(Entity<GridPage>),
     /// The collections of the Server.
     Collections(Entity<Collections>),
+    /// My requests.
+    Requests(Entity<Requests>),
     Settings(Entity<SettingsPage>),
 }
 
@@ -100,6 +103,10 @@ impl Page {
                 page.active = active;
                 cx.notify();
             }),
+            Page::Requests(page) => page.update(cx, |page, cx| {
+                page.active = active;
+                cx.notify();
+            }),
             Page::Settings(page) => page.update(cx, |page, cx| {
                 page.active = active;
                 cx.notify();
@@ -116,6 +123,7 @@ impl Page {
             Page::Person(page) => page.into_any_element(),
             Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => page.into_any_element(),
             Page::Collections(page) => page.into_any_element(),
+            Page::Requests(page) => page.into_any_element(),
             Page::Settings(page) => page.into_any_element(),
         }
     }
@@ -347,9 +355,14 @@ impl Pages {
         self.search_row() + 3
     }
 
+    /// The sidebar row of My requests, below the Collections page.
+    fn requests_row(&self) -> usize {
+        self.search_row() + 4
+    }
+
     /// The sidebar row of Settings, at the bottom.
     fn settings_row(&self) -> usize {
-        self.search_row() + 4
+        self.search_row() + 5
     }
 
     /// Opens a sidebar row (0 is Home) and clears the back history. The keyboard focus goes to the page.
@@ -367,6 +380,10 @@ impl Pages {
                 Page::History(self.grid_page("History".into(), browse::source_query("history"), window, cx))
             }
             None if row == self.collections_row() => Page::Collections(self.collections_page(window, cx)),
+            None if row == self.requests_row() => {
+                let client = self.client.clone();
+                Page::Requests(cx.new(|cx| Requests::new(client, cx)))
+            }
             None => Page::Home(self.home.clone()),
             Some(library) => {
                 let id = library.id.to_string();
@@ -405,6 +422,7 @@ impl Pages {
             Some(Page::Watchlist(_)) => self.watchlist_row(),
             Some(Page::History(_)) => self.history_row(),
             Some(Page::Collections(_)) => self.collections_row(),
+            Some(Page::Requests(_)) => self.requests_row(),
             Some(Page::Settings(_)) => self.settings_row(),
             Some(Page::Library(page)) => {
                 let id = &page.read(cx).library.id;
@@ -434,6 +452,7 @@ impl Pages {
                 page.update(cx, |page, cx| page.key(key, cx))
             }
             Page::Collections(page) => page.update(cx, |page, cx| page.key(key, cx)),
+            Page::Requests(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Settings(page) => page.update(cx, |page, cx| page.key(key, cx)),
         }
     }
@@ -542,6 +561,7 @@ impl Pages {
                     (IconName::Bookmark, "Watchlist"),
                     (IconName::RotateCcwClock, "History"),
                     (IconName::LibraryBig, "Collections"),
+                    (IconName::Inbox, "My requests"),
                     (IconName::Settings, "Settings"),
                 ]
                 .map(|(icon, name)| (icon, name.to_string())),

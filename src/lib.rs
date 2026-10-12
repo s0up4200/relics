@@ -18,6 +18,7 @@ pub mod person;
 pub mod playback;
 pub mod player;
 pub mod profiles;
+pub mod requests;
 pub mod search;
 pub mod secrets;
 pub mod settings;
