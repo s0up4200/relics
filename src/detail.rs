@@ -1,8 +1,8 @@
 //! The detail page of an Item: a hero with the backdrop, the poster, the type and the studio or network, the title
 //! logo or the title, the tagline, the metadata line, the quality badges, the ratings, the overview, the Directed by
 //! and Written by line, and the buttons. A series shows its season cards and a grid of 16:9 episode cards. An
-//! episode shows the other episodes of its season under More Episodes. Then come the Cast, Crew and Trailers
-//! sections. Each request asks for the artwork rung that the page needs at the window scale.
+//! episode shows the other episodes of its season under More Episodes. Then come the Cast, Crew, Trailers and More
+//! Like This sections. Each request asks for the artwork rung that the page needs at the window scale.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::api::{Client, Error, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::click::Clickable as _;
 use crate::grid::Move;
-use crate::home::{Play, progress, progress_bar};
+use crate::home::{Open, Play, progress, progress_bar, short_line};
 use crate::keys::Key;
 use crate::player::PlayItem;
 use crate::search::OpenPerson;
@@ -65,6 +65,9 @@ pub struct Detail {
     thumbs: Vec<Option<Arc<RenderImage>>>,
     episode_thumbs: Vec<Option<Arc<RenderImage>>>,
     season_thumbs: Vec<Option<Arc<RenderImage>>>,
+    /// The Items of More Like This, from the similar call, and their Thumbhashes.
+    similar: Vec<wire::CatalogItem>,
+    similar_thumbs: Vec<Option<Arc<RenderImage>>>,
     scroll: ScrollHandle,
     artwork: Entity<ArtworkCache>,
     /// The artwork rung of the Item and of the episodes, at the window scale when the page opened.
@@ -73,10 +76,12 @@ pub struct Detail {
     episode_size: Rung,
     _loading: Task<()>,
     _episodes: Task<()>,
+    _similar: Task<()>,
 }
 
 impl EventEmitter<Play> for Detail {}
 impl EventEmitter<OpenPerson> for Detail {}
+impl EventEmitter<Open> for Detail {}
 
 impl Detail {
     pub fn new(client: Arc<Client>, id: String, season: Option<i64>, window: &Window, cx: &mut Context<Self>) -> Self {
@@ -85,7 +90,8 @@ impl Detail {
         let viewport = window.viewport_size().width.to_f64() as f32;
         let width = viewport - crate::pages::sidebar_width(viewport, true);
         cx.on_release(|this, cx| {
-            let thumbs = this.thumbs.drain(..).chain(this.episode_thumbs.drain(..)).chain(this.season_thumbs.drain(..));
+            let thumbs = this.thumbs.drain(..).chain(this.episode_thumbs.drain(..)).chain(this.season_thumbs.drain(..))
+                .chain(this.similar_thumbs.drain(..));
             for thumb in thumbs.flatten() {
                 cx.drop_image(thumb, None);
             }
@@ -110,6 +116,8 @@ impl Detail {
             thumbs: Vec::new(),
             episode_thumbs: Vec::new(),
             season_thumbs: Vec::new(),
+            similar: Vec::new(),
+            similar_thumbs: Vec::new(),
             scroll: ScrollHandle::new(),
             artwork: artwork::global(cx),
             image_size: Rung::fit(Kind::Backdrop, width, scale)
@@ -118,15 +126,38 @@ impl Detail {
             episode_size: Rung::fit(Kind::Still, EPISODE_WIDTH, scale),
             _loading: Task::ready(()),
             _episodes: Task::ready(()),
+            _similar: Task::ready(()),
         };
         detail.load(cx);
         detail
     }
 
-    /// Loads the Item, the seasons of a series, and the episodes of the chosen season or of the season of an
-    /// episode.
+    /// Loads More Like This. A failure leaves the row out: the page works without it.
+    fn load_similar(&mut self, cx: &mut Context<Self>) {
+        let (client, id) = (self.client.clone(), self.id.clone());
+        self._similar = cx.spawn(async move |this, cx| {
+            let items = client.similar(&id).await.unwrap_or_else(|err| {
+                eprintln!("silo-omarchy: cannot read the Items like {id}: {err}");
+                Vec::new()
+            });
+            this.update(cx, |this, cx| {
+                let thumbs =
+                    items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
+                for old in std::mem::replace(&mut this.similar_thumbs, thumbs).into_iter().flatten() {
+                    cx.drop_image(old, None);
+                }
+                this.similar = items;
+                cx.notify();
+            })
+            .ok();
+        });
+    }
+
+    /// Loads the Item, the seasons of a series, the episodes of the chosen season or of the season of an episode,
+    /// and More Like This.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
+        self.load_similar(cx);
         let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.image_size);
         self._loading = cx.spawn(async move |this, cx| {
             let result: Result<_, Error> = async {
@@ -221,6 +252,7 @@ impl Detail {
             cast: self.item.as_ref().map_or(0, |item| item.cast.len()),
             crew: self.item.as_ref().map_or(0, |item| item.crew.len()),
             trailers: self.item.as_ref().map_or(0, |item| trailers(item).len()),
+            similar: self.similar.len(),
             columns: self.columns,
         }
     }
@@ -268,6 +300,7 @@ impl Detail {
             (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
             (Focus::Cast(_) | Focus::Crew(_), Key::Other("enter")) => self.open_person(self.focus, cx),
             (Focus::Trailer(i), Key::Other("enter")) => self.open_trailer(i, cx),
+            (Focus::Similar(i), Key::Other("enter")) => self.open_similar(i, cx),
             (_, Key::Other("p")) => cx.emit(Play(self.play_item(item))),
             (focus, key) => match self.rows().step(focus, key) {
                 Step::To(focus) => {
@@ -477,6 +510,15 @@ impl Detail {
         self.focus = Focus::Trailer(index);
         if let Some((_, url)) = self.item.as_ref().and_then(|item| trailers(item).into_iter().nth(index)) {
             cx.open_url(&url);
+        }
+        cx.notify();
+    }
+
+    /// Opens the detail page of a More Like This Item.
+    fn open_similar(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.focus = Focus::Similar(index);
+        if let Some(item) = self.similar.get(index) {
+            cx.emit(Open(item.clone()));
         }
         cx.notify();
     }
@@ -805,7 +847,8 @@ impl Detail {
             .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(line.to_string()))
     }
 
-    /// The Cast, Crew and Trailers sections that have cards. Each has a row of cards that scrolls sideways.
+    /// The Cast, Crew, Trailers and More Like This sections that have cards. Each has a row of cards that scrolls
+    /// sideways.
     fn sections(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> Vec<AnyElement> {
         let t = cx.omarchy();
         let section = |title: &'static str, id: &'static str, cards: Vec<gpui::Stateful<gpui::Div>>| {
@@ -854,14 +897,56 @@ impl Detail {
                 )
                 .child(div().text_size(px(12.)).text_color(t.secondary).child(format!("{}{official}", video.kind)))
         });
+        let similar = self.similar.iter().enumerate().map(|(i, similar)| self.similar_card(i, similar, cx));
         [
             section("Cast", "detail-cast", cast.collect()),
             section("Crew", "detail-crew", crew.collect()),
             section("Trailers", "detail-trailers", videos.collect()),
+            section("More Like This", "detail-similar", similar.collect()),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// A More Like This card: the poster, the title and the short line, as on a grid card.
+    fn similar_card(&self, i: usize, item: &wire::CatalogItem, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let t = cx.omarchy();
+        let focused = self.active && self.focus == Focus::Similar(i);
+        let width = crate::grid::POSTER_WIDTH;
+        div()
+            .id(("detail-similar", i))
+            .clickable()
+            .w(px(width))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_similar(i, cx)))
+            .child(
+                div()
+                    .w(px(width))
+                    .h(px(width * 1.5))
+                    .rounded(px(12.))
+                    .overflow_hidden()
+                    .bg(t.surface)
+                    .border_2()
+                    .border_color(if focused { t.accent } else { gpui::transparent_black() })
+                    .child(artwork::image(
+                        self.url(&item.poster_url),
+                        self.similar_thumbs.get(i).cloned().flatten(),
+                        width,
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if focused { t.bright } else { t.foreground })
+                    .truncate()
+                    .child(item.title.clone()),
+            )
+            .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
     }
 }
 
@@ -1132,7 +1217,7 @@ fn watch_data(data: &mut Option<wire::WatchRollup>) -> &mut wire::WatchRollup {
 }
 
 /// The focused control, by index: a hero button, a version pill, a season card, an episode card, a cast card, a
-/// crew card or a trailer card.
+/// crew card, a trailer card or a More Like This card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Action(usize),
@@ -1142,14 +1227,22 @@ pub enum Focus {
     Cast(usize),
     Crew(usize),
     Trailer(usize),
+    Similar(usize),
 }
 
 impl Focus {
     /// The control at `index` in row `row` of the page, from the top.
     fn at(row: usize, index: usize) -> Self {
-        [Focus::Action, Focus::Version, Focus::Season, Focus::Episode, Focus::Cast, Focus::Crew, Focus::Trailer][row](
-            index,
-        )
+        [
+            Focus::Action,
+            Focus::Version,
+            Focus::Season,
+            Focus::Episode,
+            Focus::Cast,
+            Focus::Crew,
+            Focus::Trailer,
+            Focus::Similar,
+        ][row](index)
     }
 
     /// The row of the control, from the top, and its index in the row.
@@ -1162,6 +1255,7 @@ impl Focus {
             Focus::Cast(i) => (4, i),
             Focus::Crew(i) => (5, i),
             Focus::Trailer(i) => (6, i),
+            Focus::Similar(i) => (7, i),
         }
     }
 }
@@ -1194,13 +1288,16 @@ pub struct Rows {
     pub cast: usize,
     pub crew: usize,
     pub trailers: usize,
+    /// The More Like This cards.
+    pub similar: usize,
     /// The columns of the episode grid.
     pub columns: usize,
 }
 
 impl Rows {
     fn len(&self, row: usize) -> usize {
-        [self.actions, self.versions, self.seasons, self.episodes, self.cast, self.crew, self.trailers][row]
+        let Rows { actions, versions, seasons, episodes, cast, crew, trailers, similar, .. } = *self;
+        [actions, versions, seasons, episodes, cast, crew, trailers, similar][row]
     }
 
     /// The control that the focus goes to in `row`: the chosen version or season, the first card of the last
@@ -1224,7 +1321,7 @@ impl Rows {
         let (row, i) = focus.place();
         let leave = |down: bool| {
             let next =
-                if down { (row + 1..7).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
+                if down { (row + 1..8).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
             next.map_or(Step::Stay, |next| Step::To(self.enter(next, !down)))
         };
         if row == EPISODE_ROW {
@@ -1452,6 +1549,7 @@ mod tests {
             cast: 0,
             crew: 0,
             trailers: 0,
+            similar: 0,
             columns: 2,
         };
         let to = |focus| Step::To(focus);
@@ -1476,6 +1574,7 @@ mod tests {
             cast: 0,
             crew: 0,
             trailers: 0,
+            similar: 0,
             columns: 4,
         };
         assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
@@ -1495,6 +1594,7 @@ mod tests {
             cast: 3,
             crew: 0,
             trailers: 0,
+            similar: 0,
             columns: 4,
         };
         let to = |focus| Step::To(focus);
@@ -1562,6 +1662,7 @@ mod tests {
             cast: 2,
             crew: 0,
             trailers: 0,
+            similar: 0,
             columns: 4,
         };
         let to = |focus| Step::To(focus);
@@ -1641,6 +1742,7 @@ mod tests {
             cast: 2,
             crew: 3,
             trailers: 1,
+            similar: 0,
             columns: 2,
         };
         let to = |focus| Step::To(focus);
@@ -1664,6 +1766,35 @@ mod tests {
         assert_eq!(series.child(Focus::Season(1)), 1);
         assert_eq!(series.child(Focus::Trailer(0)), 5, "hero, seasons, episodes, cast, crew; a series has no versions");
         assert_eq!(no_crew.child(Focus::Trailer(0)), 4);
+    }
+
+    #[test]
+    fn hjkl_moves_down_from_the_trailers_into_more_like_this() {
+        let movie = Rows {
+            actions: 2,
+            versions: 0,
+            version: 0,
+            seasons: 0,
+            season: 0,
+            episodes: 0,
+            cast: 2,
+            crew: 0,
+            trailers: 1,
+            similar: 3,
+            columns: 4,
+        };
+        let to = |focus| Step::To(focus);
+        assert_eq!(movie.step(Focus::Trailer(0), Key::Down), to(Focus::Similar(0)));
+        assert_eq!(movie.step(Focus::Similar(0), Key::Right), to(Focus::Similar(1)));
+        assert_eq!(movie.step(Focus::Similar(2), Key::Right), Step::Stay);
+        assert_eq!(movie.step(Focus::Similar(0), Key::Left), Step::OutLeft);
+        assert_eq!(movie.step(Focus::Similar(1), Key::Down), Step::Stay);
+        assert_eq!(movie.step(Focus::Similar(1), Key::Up), to(Focus::Trailer(0)));
+        let no_trailers = Rows { trailers: 0, ..movie };
+        assert_eq!(no_trailers.step(Focus::Cast(1), Key::Down), to(Focus::Similar(0)));
+        assert_eq!(movie.child(Focus::Similar(0)), 3, "hero, cast, trailers");
+        let none = Rows { similar: 0, ..movie };
+        assert_eq!(none.step(Focus::Trailer(0), Key::Down), Step::Stay, "no similar Items, no row");
     }
 
     fn episode(fields: serde_json::Value) -> wire::Episode {
