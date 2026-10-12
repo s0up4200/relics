@@ -8,7 +8,7 @@ use gpui::{
     ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription,
     Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
+use gpui_omarchy::{ActiveTheme, ButtonVariant, Theme, button};
 
 use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
@@ -242,25 +242,13 @@ impl Home {
 
     fn row(&self, index: usize, section: &HomeSection, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let wide = is_wide(&section.section_type);
         let (width, height) = card_size(&section.section_type, section.featured);
         let cards = section.items.iter().enumerate().map(|(col, item)| {
             let focused = self.active && self.focus == Focus::Card { row: index, col };
             let url = art_url(section, item).and_then(|url| self.client.server().url.join(url).ok());
             let thumb = self.thumbs.get(index).and_then(|row| row.get(col)).cloned().flatten();
-            let mut art = div()
-                .relative()
-                .w(px(width))
-                .h(px(height))
-                .flex_none()
-                .rounded(px(12.))
-                .overflow_hidden()
-                .bg(t.surface)
-                .border_2()
-                .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .child(div().absolute().inset_0().child(artwork::image(url.map(String::from), thumb, width)));
             if section.featured {
-                art = art.child(
+                let art = art(url.map(String::from), thumb, (width, height), focused, t).child(
                     div().absolute().inset_0().flex().items_end().p(px(14.)).child(
                         div()
                             .text_size(px(32.))
@@ -271,30 +259,7 @@ impl Home {
                 );
                 return self.card_target(index, col, art, cx);
             }
-            if wide && let Some(progress) = progress(item.position_seconds, item.duration_seconds) {
-                art = art.child(progress_bar(progress, t.accent));
-            }
-            self.card_target(
-                index,
-                col,
-                div()
-                    .w(px(width))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(art)
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if focused { t.bright } else { t.foreground })
-                            .truncate()
-                            .child(item.title.clone()),
-                    )
-                    .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item))),
-                cx,
-            )
+            self.card_target(index, col, card(item, url.map(String::from), thumb, (width, height), focused, t), cx)
         });
         let col = section.items.len();
         let view_all = section.view_all.then(|| {
@@ -431,7 +396,70 @@ pub(crate) fn progress(position: Option<f64>, duration: Option<f64>) -> Option<f
     (position > 0. && duration > 0.).then(|| (position / duration).min(1.) as f32)
 }
 
-/// The progress bar inside the artwork of a 16:9 card.
+/// The artwork of a card of `size` (width, height), with the accent border when it has the focus.
+fn art(url: Option<String>, thumb: Option<Arc<RenderImage>>, size: (f32, f32), focused: bool, t: &Theme) -> gpui::Div {
+    div()
+        .relative()
+        .w(px(size.0))
+        .h(px(size.1))
+        .flex_none()
+        .rounded(px(12.))
+        .overflow_hidden()
+        .bg(t.surface)
+        .border_2()
+        .border_color(if focused { t.accent } else { gpui::transparent_black() })
+        .child(div().absolute().inset_0().child(artwork::image(url, thumb, size.0)))
+}
+
+/// A poster or 16:9 card of Home, a grid and More Like This: the artwork with the quality badge and the progress,
+/// the title, and the short line.
+pub(crate) fn card(
+    item: &wire::CatalogItem,
+    url: Option<String>,
+    thumb: Option<Arc<RenderImage>>,
+    size: (f32, f32),
+    focused: bool,
+    t: &Theme,
+) -> gpui::Div {
+    let badge = card_badge(item);
+    let progress = progress(item.position_seconds, item.duration_seconds);
+    let art = art(url, thumb, size, focused, t)
+        .children((!badge.is_empty()).then(|| badge_label(badge).left(px(8.))))
+        .children(progress.map(|progress| progress_bar(progress, t.accent)));
+    div()
+        .w(px(size.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(art)
+        .child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if focused { t.bright } else { t.foreground })
+                .truncate()
+                .child(item.title.clone()),
+        )
+        .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
+}
+
+/// A small label at the top of the artwork of a card, for example the quality badge. The caller sets the side.
+pub(crate) fn badge_label(text: String) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(8.))
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(4.))
+        .bg(gpui::hsla(0., 0., 0., 0.7))
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::white())
+        .child(text)
+}
+
+/// The progress bar inside the artwork of a card.
 pub(crate) fn progress_bar(progress: f32, accent: gpui::Hsla) -> gpui::Div {
     div().absolute().inset_0().flex().flex_col().justify_end().p(px(8.)).child(
         div()
@@ -442,19 +470,75 @@ pub(crate) fn progress_bar(progress: f32, accent: gpui::Hsla) -> gpui::Div {
     )
 }
 
-/// The line below the title: the series with the season and episode, or the year.
+/// The line below the title: the series with the season and episode, or the year. A series adds its status and
+/// network, for example "2022 · Returning · HBO". A started card adds the time left, for example "53 min left".
 pub(crate) fn short_line(item: &wire::CatalogItem) -> String {
-    match (&item.series_title, item.season_number, item.episode_number) {
-        (Some(series), Some(season), Some(episode)) => format!("{series} · S{season} E{episode}"),
-        _ => item.year.map(|year| year.to_string()).unwrap_or_default(),
+    let first = match (&item.series_title, item.season_number, item.episode_number) {
+        (Some(series), Some(season), Some(episode)) => Some(format!("{series} · S{season} E{episode}")),
+        _ => item.year.map(|year| year.to_string()),
+    };
+    let series = item.type_ == "series";
+    let status = item.show_status.as_deref().filter(|_| series).map(show_status);
+    let network = item.networks.first().filter(|_| series).cloned();
+    let left = progress(item.position_seconds, item.duration_seconds).and(item.duration_seconds).map(|duration| {
+        format!("{} min left", ((duration - item.position_seconds.unwrap_or_default()) / 60.).round() as i64)
+    });
+    [first, status, network, left].into_iter().flatten().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ")
+}
+
+/// The airing status of a series with the words of the web app: Returning, Ended, Cancelled or Upcoming.
+fn show_status(status: &str) -> String {
+    match status.to_lowercase().as_str() {
+        "returning" | "returning series" | "continuing" | "in_production" | "in production" => "Returning".into(),
+        "ended" => "Ended".into(),
+        "cancelled" | "canceled" => "Cancelled".into(),
+        "upcoming" | "planned" => "Upcoming".into(),
+        _ => status.to_string(),
     }
+}
+
+/// The quality badge of a card, for example "4K DV", or "" when the server sends none.
+pub(crate) fn card_badge(item: &wire::CatalogItem) -> String {
+    item.overlay_summary.as_ref().map(crate::detail::overlay_badge).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Focus, move_focus, rung};
+    use super::{Focus, card_badge, move_focus, rung, short_line};
+    use crate::api::wire;
     use crate::artwork::Rung;
     use crate::keys::Key;
+    use serde_json::json;
+
+    fn card(fields: serde_json::Value) -> wire::CatalogItem {
+        let mut item = json!({"content_id": "x", "type": "movie", "title": "x", "genres": [], "keywords": [], "status": "available", "year": 2022});
+        item.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(item).unwrap()
+    }
+
+    #[test]
+    fn a_card_shows_the_quality_badge_that_the_server_sends() {
+        let dv =
+            card(json!({"overlay_summary": {"resolution": "2160p", "hdr": "Dolby Vision", "video_codec": "hevc"}}));
+        assert_eq!(card_badge(&dv), "4K DV");
+        assert_eq!(card_badge(&card(json!({"overlay_summary": {"resolution": "1080p"}}))), "1080p");
+        assert_eq!(card_badge(&card(json!({}))), "", "no overlay, no badge");
+    }
+
+    #[test]
+    fn a_series_card_shows_its_status_and_network_and_a_started_card_the_time_left() {
+        assert_eq!(short_line(&card(json!({}))), "2022");
+        let series = json!({"type": "series", "show_status": "Returning Series", "networks": ["HBO", "Max"]});
+        assert_eq!(short_line(&card(series)), "2022 · Returning · HBO");
+        let ended = json!({"type": "series", "show_status": "ended", "networks": []});
+        assert_eq!(short_line(&card(ended)), "2022 · Ended");
+        assert_eq!(short_line(&card(json!({"type": "series", "networks": ["AMC"]}))), "2022 · AMC");
+        let started = json!({"type": "episode", "series_title": "Silo", "season_number": 1, "episode_number": 1,
+            "position_seconds": 600.0, "duration_seconds": 3780.0});
+        assert_eq!(short_line(&card(started)), "Silo · S1 E1 · 53 min left");
+        let unstarted = json!({"position_seconds": 0.0, "duration_seconds": 3780.0});
+        assert_eq!(short_line(&card(unstarted)), "2022", "a card that is not started has no time left");
+    }
 
     #[test]
     fn each_section_gets_the_rung_for_its_cards() {

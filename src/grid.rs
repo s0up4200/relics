@@ -14,11 +14,11 @@ use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::browse::Paging;
 use crate::click::Clickable as _;
-use crate::home::{Open, Play, short_line};
+use crate::home::{Open, Play, card};
 use crate::keys::Key;
 
 pub const POSTER_WIDTH: f32 = 150.;
-const POSTER_HEIGHT: f32 = 225.;
+pub const POSTER_HEIGHT: f32 = 225.;
 const GAP: f32 = 12.;
 
 /// The number of grid columns in `width` pixels.
@@ -199,7 +199,6 @@ impl Grid {
     }
 
     fn card(&self, index: usize, item: &wire::CatalogItem, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy();
         let focused = self.active && index == self.focus;
         let url = item
             .poster_url
@@ -210,11 +209,7 @@ impl Grid {
         div()
             .id(("grid-card", index))
             .clickable()
-            .w(px(POSTER_WIDTH))
             .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.focus = index;
                 if let Some(item) = this.paging.items.get(index) {
@@ -222,31 +217,7 @@ impl Grid {
                 }
                 cx.notify();
             }))
-            .child(
-                div()
-                    .relative()
-                    .w(px(POSTER_WIDTH))
-                    .h(px(POSTER_HEIGHT))
-                    .rounded(px(12.))
-                    .overflow_hidden()
-                    .bg(t.surface)
-                    .border_2()
-                    .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                    .child(div().absolute().inset_0().child(artwork::image(
-                        url.map(String::from),
-                        thumb,
-                        POSTER_WIDTH,
-                    ))),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if focused { t.bright } else { t.foreground })
-                    .truncate()
-                    .child(item.title.clone()),
-            )
-            .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
+            .child(card(item, url.map(String::from), thumb, (POSTER_WIDTH, POSTER_HEIGHT), focused, cx.omarchy()))
     }
 }
 

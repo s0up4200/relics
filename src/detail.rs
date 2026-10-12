@@ -17,7 +17,7 @@ use crate::api::{Client, Error, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::click::Clickable as _;
 use crate::grid::Move;
-use crate::home::{Open, Play, progress, progress_bar, short_line};
+use crate::home::{Open, Play, badge_label, card, progress, progress_bar};
 use crate::keys::Key;
 use crate::player::PlayItem;
 use crate::search::OpenPerson;
@@ -745,19 +745,6 @@ impl Detail {
         let focused = self.active && self.focus == Focus::Episode(i);
         let thumb = self.episode_thumbs.get(i).cloned().flatten();
         let progress = episode.user_data.as_ref().and_then(|d| progress(d.position_seconds, d.duration_seconds));
-        let label = |text: String| {
-            div()
-                .absolute()
-                .top(px(8.))
-                .px(px(6.))
-                .py(px(1.))
-                .rounded(px(4.))
-                .bg(gpui::hsla(0., 0., 0., 0.7))
-                .text_size(px(10.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(gpui::white())
-                .child(text)
-        };
         let badge = episode_badge(episode);
         let mut art = div()
             .relative()
@@ -769,8 +756,8 @@ impl Detail {
             .border_2()
             .border_color(if focused { t.accent } else { gpui::transparent_black() })
             .child(div().absolute().inset_0().child(artwork::image(self.url(&episode.still_url), thumb, EPISODE_WIDTH)))
-            .children((!badge.is_empty()).then(|| label(badge).left(px(8.))))
-            .children((episode.content_id == self.id).then(|| label("NOW VIEWING".into()).right(px(8.))));
+            .children((!badge.is_empty()).then(|| badge_label(badge).left(px(8.))))
+            .children((episode.content_id == self.id).then(|| badge_label("NOW VIEWING".into()).right(px(8.))));
         if let Some(progress) = progress {
             art = art.child(progress_bar(progress, t.accent));
         }
@@ -909,44 +896,17 @@ impl Detail {
         .collect()
     }
 
-    /// A More Like This card: the poster, the title and the short line, as on a grid card.
+    /// A More Like This card, the same as a grid card.
     fn similar_card(&self, i: usize, item: &wire::CatalogItem, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let t = cx.omarchy();
         let focused = self.active && self.focus == Focus::Similar(i);
-        let width = crate::grid::POSTER_WIDTH;
+        let size = (crate::grid::POSTER_WIDTH, crate::grid::POSTER_HEIGHT);
+        let thumb = self.similar_thumbs.get(i).cloned().flatten();
         div()
             .id(("detail-similar", i))
             .clickable()
-            .w(px(width))
             .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
             .on_click(cx.listener(move |this, _, _, cx| this.open_similar(i, cx)))
-            .child(
-                div()
-                    .w(px(width))
-                    .h(px(width * 1.5))
-                    .rounded(px(12.))
-                    .overflow_hidden()
-                    .bg(t.surface)
-                    .border_2()
-                    .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                    .child(artwork::image(
-                        self.url(&item.poster_url),
-                        self.similar_thumbs.get(i).cloned().flatten(),
-                        width,
-                    )),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if focused { t.bright } else { t.foreground })
-                    .truncate()
-                    .child(item.title.clone()),
-            )
-            .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
+            .child(card(item, self.url(&item.poster_url), thumb, size, focused, cx.omarchy()))
     }
 }
 
@@ -1045,15 +1005,27 @@ pub fn episode_line(episode: &wire::Episode) -> String {
 /// The quality badge of an episode, for example "4K DV", from the overlay that the server sends, else from the first
 /// file. "" when neither has the resolution or the dynamic range.
 pub fn episode_badge(episode: &wire::Episode) -> String {
-    let (size, range) = match (&episode.overlay_summary, episode.files.first()) {
-        (Some(overlay), _) => {
-            let range = overlay.hdr.as_deref().map(|hdr| if hdr == "Dolby Vision" { "DV" } else { hdr }.to_string());
-            (overlay.resolution.as_deref(), range)
-        }
-        (None, Some(file)) => (file.resolution.as_deref(), file.hdr.then(|| "HDR".to_string())),
-        (None, None) => (None, None),
-    };
-    [size.map(resolution), range].into_iter().flatten().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ")
+    match (&episode.overlay_summary, episode.files.first()) {
+        (Some(overlay), _) => overlay_badge(overlay),
+        (None, Some(file)) => badge(file.resolution.as_deref(), file.hdr.then_some("HDR")),
+        (None, None) => String::new(),
+    }
+}
+
+/// The quality badge of a card from the overlay that the server sends, for example "4K DV". "" when the overlay has
+/// neither the resolution nor the dynamic range.
+pub fn overlay_badge(overlay: &wire::CatalogItemOverlay) -> String {
+    let range = overlay.hdr.as_deref().map(|hdr| if hdr == "Dolby Vision" { "DV" } else { hdr });
+    badge(overlay.resolution.as_deref(), range)
+}
+
+fn badge(size: Option<&str>, range: Option<&str>) -> String {
+    [size.map(resolution), range.map(String::from)]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The line of a season card: how many episodes the Profile watched, for example "1 of 9 episodes", or only the
