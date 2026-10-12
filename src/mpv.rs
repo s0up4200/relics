@@ -153,6 +153,21 @@ impl Player {
         self.mpv.command("cycle", &["mute"])
     }
 
+    /// The subtitle delay in seconds. A positive delay shows the subtitles later.
+    pub fn sub_delay(&self) -> Result<f64, Error> {
+        self.mpv.get_property("sub-delay")
+    }
+
+    /// Changes the subtitle delay by `delta` seconds.
+    pub fn add_sub_delay(&self, delta: f64) -> Result<(), Error> {
+        self.mpv.command("add", &["sub-delay", &delta.to_string()])
+    }
+
+    /// Sets the subtitle delay to `seconds`. mpv keeps it from one file to the next.
+    pub fn set_sub_delay(&self, seconds: f64) -> Result<(), Error> {
+        self.mpv.set_property("sub-delay", seconds)
+    }
+
     /// The volume in percent, and whether the audio is muted.
     pub fn volume(&self) -> Result<(f64, bool), Error> {
         Ok((self.mpv.get_property("volume")?, self.mpv.get_property("mute")?))

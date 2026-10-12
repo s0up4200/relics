@@ -215,6 +215,20 @@ fn the_player_view_changes_the_volume_and_mutes() {
     assert!(!player.volume().unwrap().1);
 }
 
+#[test]
+fn the_player_view_changes_and_resets_the_subtitle_delay() {
+    let (player, _rx) = open();
+    assert_eq!(player.sub_delay().unwrap(), 0.0);
+    player.add_sub_delay(0.1).unwrap();
+    player.add_sub_delay(0.1).unwrap();
+    player.add_sub_delay(-0.5).unwrap();
+    // mpv keeps the delay as a 32-bit float.
+    let delay = player.sub_delay().unwrap();
+    assert!((delay + 0.3).abs() < 1e-6, "{delay}");
+    player.set_sub_delay(0.0).unwrap();
+    assert_eq!(player.sub_delay().unwrap(), 0.0);
+}
+
 fn open_with_controls() -> (Player, Receiver<Input>) {
     let (tx, rx) = mpsc::channel();
     let script = format!("{}/data/silo-controls.lua", env!("CARGO_MANIFEST_DIR"));

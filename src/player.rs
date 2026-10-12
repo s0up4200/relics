@@ -216,7 +216,14 @@ impl PlayerWindow {
         let same = self.item.as_ref().is_some_and(|old| old.content_id == item.content_id);
         let carry = match &self.session {
             Some(session) if same || series.is_some() && series == self.series => session.carry(),
-            _ => Carry::default(),
+            _ => {
+                // The subtitle delay carries as the Track picker choice does. mpv keeps it, so another Item
+                // resets it.
+                if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.set_sub_delay(0.0)) {
+                    eprintln!("silo-omarchy: cannot reset the subtitle delay: {err}");
+                }
+                Carry::default()
+            }
         };
         self.series = series;
         self.item = Some(item.clone());
@@ -624,6 +631,12 @@ impl PlayerWindow {
         &self.versions
     }
 
+    /// The file version that plays, once the plan and the version list are known.
+    pub fn version(&self) -> Option<&wire::FileVersion> {
+        let plan = self.plan()?;
+        self.versions.iter().find(|v| *v.file_id == *plan.effective_media_file_id)
+    }
+
     /// The volume in percent, and whether the audio is muted.
     pub fn volume(&self) -> Option<(f64, bool)> {
         self.mpv.as_ref()?.volume().ok()
@@ -632,6 +645,18 @@ impl PlayerWindow {
     pub fn add_volume(&mut self, delta: f64, cx: &mut Context<Self>) {
         if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_volume(delta)) {
             eprintln!("silo-omarchy: cannot change the volume: {err}");
+        }
+        cx.notify();
+    }
+
+    /// The subtitle delay in seconds.
+    pub fn sub_delay(&self) -> Option<f64> {
+        self.mpv.as_ref()?.sub_delay().ok()
+    }
+
+    pub fn add_sub_delay(&mut self, delta: f64, cx: &mut Context<Self>) {
+        if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_sub_delay(delta)) {
+            eprintln!("silo-omarchy: cannot change the subtitle delay: {err}");
         }
         cx.notify();
     }

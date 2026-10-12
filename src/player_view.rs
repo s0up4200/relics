@@ -32,6 +32,8 @@ const CONTROLS_TIME: Duration = Duration::from_secs(3);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Left and Right seek this many seconds.
 const SEEK_STEP: f64 = 10.0;
+/// `z`, `x` and the delay buttons change the subtitle delay by this many seconds, as the mpv keys do.
+const DELAY_STEP: f64 = 0.1;
 /// Up, Down and one wheel notch change the volume by this many percent.
 const VOLUME_STEP: f64 = 5.0;
 /// GPUI on Linux gives 3 lines for one wheel notch.
@@ -73,6 +75,8 @@ pub enum List {
     Subtitles,
     /// The file versions and the steps of the Quality ladder.
     Quality,
+    /// The chapters of the file that plays.
+    Chapters,
 }
 
 /// What a pick of a row sends.
@@ -84,6 +88,8 @@ pub enum Pick {
     Version(String),
     /// A step label of the Quality ladder.
     Quality(String),
+    /// The start of a chapter, in player time.
+    Chapter(f64),
 }
 
 impl List {
@@ -92,6 +98,7 @@ impl List {
             List::Audio => "Audio",
             List::Subtitles => "Subtitles",
             List::Quality => "Quality",
+            List::Chapters => "Chapters",
         }
     }
 }
@@ -172,6 +179,10 @@ impl PlayerView {
         self.player.update(cx, |player, cx| player.add_volume(delta, cx));
     }
 
+    fn add_sub_delay(&mut self, delta: f64, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.add_sub_delay(delta, cx));
+    }
+
     fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         self.player.update(cx, |player, cx| player.toggle_mute(cx));
     }
@@ -210,6 +221,12 @@ impl PlayerView {
                 Some(plan) => quality_rows(player.versions(), plan, player.quality()),
                 None => Vec::new(),
             },
+            List::Chapters => match (player.version(), player.plan()) {
+                (Some(version), Some(plan)) => {
+                    chapter_rows(&version.chapters, plan.timeline.timeline_offset_seconds, player.position())
+                }
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -227,6 +244,7 @@ impl PlayerView {
             (_, Pick::Track(id)) => self.step(Input::PickTrack { kind: Kind::Sub, id }, cx),
             (_, Pick::Version(file_id)) => self.step(Input::SwitchVersion(file_id), cx),
             (_, Pick::Quality(label)) => self.step(Input::PickQuality(label), cx),
+            (_, Pick::Chapter(start)) => self.step(Input::SetPosition(start), cx),
         }
     }
 
@@ -278,6 +296,9 @@ impl PlayerView {
             Key::Other("s") => self.toggle(List::Subtitles, cx),
             Key::Other("v") => self.toggle(List::Quality, cx),
             Key::Other("i") => self.toggle_info(cx),
+            Key::Other("c") => self.toggle(List::Chapters, cx),
+            Key::Other("z") => self.add_sub_delay(-DELAY_STEP, cx),
+            Key::Other("x") => self.add_sub_delay(DELAY_STEP, cx),
             Key::Other("space") => self.step(Input::PlayPause, cx),
             Key::Left => self.step(Input::SeekBy(-SEEK_STEP), cx),
             Key::Right => self.step(Input::SeekBy(SEEK_STEP), cx),
@@ -384,6 +405,7 @@ impl PlayerView {
                 None => (IconName::Volume2, String::new()),
             },
         );
+        let delay = player.sub_delay().filter(|delay| delay.abs() >= DELAY_STEP / 2.0).map(delay_label);
         let full = if window.is_fullscreen() { IconName::Minimize } else { IconName::Maximize };
         let shade = t.background.opacity(0.8);
         let top = div()
@@ -436,6 +458,11 @@ impl PlayerView {
             .child(
                 self.button("player-subtitles", IconName::Captions, cx, |this, _, cx| this.toggle(List::Subtitles, cx)),
             )
+            // The subtitle delay shows next to the subtitle button while it is not zero.
+            .children(delay.map(|delay| div().text_color(t.secondary).child(delay)))
+            .child(
+                self.button("player-chapters", IconName::ListVideo, cx, |this, _, cx| this.toggle(List::Chapters, cx)),
+            )
             .child(self.button("player-quality", IconName::Gauge, cx, |this, _, cx| this.toggle(List::Quality, cx)))
             .child(self.button("player-info", IconName::Info, cx, |this, _, cx| this.toggle_info(cx)))
             .child(self.button("player-mute", mute.0, cx, |this, _, cx| this.toggle_mute(cx)))
@@ -462,7 +489,9 @@ impl PlayerView {
     /// as Enter does.
     fn picker(&self, picker: &Picker, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
-        let rows = self.rows(picker.list, cx).into_iter().enumerate().map(|(i, (_, row))| {
+        let rows = self.rows(picker.list, cx);
+        let empty = rows.is_empty();
+        let rows = rows.into_iter().enumerate().map(|(i, (_, row))| {
             let tags = row.tags.into_iter().map(|tag| {
                 div().px(px(6.)).rounded(px(4.)).bg(t.inset).text_size(px(11.)).text_color(t.secondary).child(tag)
             });
@@ -511,6 +540,7 @@ impl PlayerView {
             .rounded(px(12.))
             .bg(t.surface)
             .child(div().px(px(12.)).py(px(6.)).text_color(t.secondary).child(picker.list.title()))
+            .when(empty, |list| list.child(div().px(px(12.)).py(px(8.)).text_color(t.secondary).child("None")))
             .child(
                 div()
                     .id("picker-rows")
@@ -520,16 +550,35 @@ impl PlayerView {
                     .track_scroll(&picker.scroll)
                     .children(rows),
             )
+            .when(picker.list == List::Subtitles, |list| list.child(self.delay(cx)))
+    }
+
+    /// The subtitle delay row below the Subtitles list: the value between a minus and a plus button. A click on
+    /// a button does what `z` or `x` does.
+    fn delay(&self, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let value = delay_label(self.player.read(cx).sub_delay().unwrap_or_default());
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(12.))
+            .pt(px(6.))
+            .border_t_1()
+            .border_color(t.inset)
+            .child(div().flex_1().text_color(t.secondary).child("Delay"))
+            .child(
+                self.button("sub-delay-less", IconName::Minus, cx, |this, _, cx| this.add_sub_delay(-DELAY_STEP, cx)),
+            )
+            .child(div().w(px(56.)).flex().justify_center().text_color(t.bright).child(value))
+            .child(self.button("sub-delay-more", IconName::Plus, cx, |this, _, cx| this.add_sub_delay(DELAY_STEP, cx)))
     }
 
     /// The Playback info panel, at the top right. A click on it does nothing, so it stays open.
     fn info(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
         let player = self.player.read(cx);
-        let version = player
-            .plan()
-            .and_then(|plan| player.versions().iter().find(|v| *v.file_id == *plan.effective_media_file_id));
-        let rows = player.plan().map(|plan| info_rows(plan, version, player.quality())).unwrap_or_default();
+        let rows = player.plan().map(|plan| info_rows(plan, player.version(), player.quality())).unwrap_or_default();
         let rows = rows.into_iter().map(|(label, value)| {
             div()
                 .flex()
@@ -648,6 +697,32 @@ pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, q
     versions.chain(steps).collect()
 }
 
+/// The rows of the Chapters list. `offset` is the source time where player time starts, and `position` the
+/// player position. A pick sends the chapter start in player time; a chapter that starts before the stream
+/// seeks to its start. The detail is the start in the file, and the row of the chapter that plays is current.
+pub fn chapter_rows(chapters: &[wire::VersionChapter], offset: f64, position: Option<f64>) -> Vec<(Pick, Row)> {
+    let source = position.map(|position| position + offset);
+    chapters
+        .iter()
+        .enumerate()
+        .map(|(i, chapter)| {
+            let label = match chapter.title.trim() {
+                "" => format!("Chapter {}", i + 1),
+                title => title.to_string(),
+            };
+            let current = source.is_some_and(|source| chapter.start_seconds <= source && source < chapter.end_seconds);
+            let row = Row { label, detail: clock(chapter.start_seconds), tags: Vec::new(), current };
+            (Pick::Chapter((chapter.start_seconds - offset).max(0.0)), row)
+        })
+        .collect()
+}
+
+/// A subtitle delay as `+0.3 s`, `-1.2 s` or `0.0 s`.
+pub fn delay_label(seconds: f64) -> String {
+    let tenths = (seconds * 10.0).round();
+    if tenths == 0.0 { "0.0 s".to_string() } else { format!("{:+.1} s", tenths / 10.0) }
+}
+
 /// The name of a step of the Quality ladder: the display name of the server, else Original or the label.
 fn step_name(step: &wire::AvailableQualityV3) -> String {
     match step.display_name.as_deref().filter(|name| !name.is_empty()) {
@@ -752,7 +827,9 @@ pub fn seek_target(x: f32, width: f32, duration: f64) -> f64 {
 mod tests {
     use serde_json::json;
 
-    use super::{Pick, clock, info_rows, marker_span, quality_rows, seek_target, track_rows};
+    use super::{
+        Pick, chapter_rows, clock, delay_label, info_rows, marker_span, quality_rows, seek_target, track_rows,
+    };
     use crate::api::wire;
     use crate::playback::tracks::{Kind, parse};
 
@@ -827,6 +904,44 @@ mod tests {
         assert_eq!(value("Delivery"), "Direct play · Progressive");
         assert_eq!(value("Video"), "H264 (direct) · 1920x1080");
         assert_eq!(value("File"), "—", "no version list yet");
+    }
+
+    fn chapter(index: i64, title: &str, start: f64, end: f64) -> wire::VersionChapter {
+        serde_json::from_value(json!({
+            "index": index, "title": title, "source": "embedded", "start_seconds": start, "end_seconds": end,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_chapter_list_seeks_to_the_chapter_start_in_player_time_and_marks_the_chapter_that_plays() {
+        let chapters =
+            [chapter(0, "Opening", 0.0, 300.0), chapter(1, "", 300.0, 1500.0), chapter(2, "End", 1500.0, 1800.0)];
+        // The stream starts 600 s into the file, and the source position is 700 s.
+        let rows = chapter_rows(&chapters, 600.0, Some(100.0));
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(pick, row)| (pick.clone(), row.label.as_str(), row.detail.as_str(), row.current))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Pick::Chapter(0.0), "Opening", "0:00", false),
+                (Pick::Chapter(0.0), "Chapter 2", "5:00", true),
+                (Pick::Chapter(900.0), "End", "25:00", false),
+            ]
+        );
+        let rows = chapter_rows(&chapters, 0.0, None);
+        assert!(rows.iter().all(|(_, row)| !row.current), "no position yet");
+        assert_eq!(rows[2].0, Pick::Chapter(1500.0));
+    }
+
+    #[test]
+    fn the_subtitle_delay_shows_with_its_sign_and_one_decimal() {
+        assert_eq!(delay_label(0.0), "0.0 s");
+        assert_eq!(delay_label(0.30000000000000004), "+0.3 s");
+        assert_eq!(delay_label(-1.26), "-1.3 s");
+        assert_eq!(delay_label(-0.00001), "0.0 s");
     }
 
     #[test]

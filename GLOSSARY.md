@@ -117,6 +117,12 @@ _Avoid_: disconnected, down
 The list in the Player view where the user picks the audio track or the subtitle track.
 _Avoid_: track menu, cycle
 
+**Chapter**:
+A titled time range of a file version, from the file. The Chapters list in the Player view seeks to the start of a chapter. A chapter is not a Marker.
+
+**Subtitle delay**:
+The time in seconds that the subtitles show later (positive) or earlier (negative) than the file says. It carries to the next episode of the same series, as the Track picker choice does. Another Item starts at zero.
+
 **Version picker**:
 The list on the detail page where the user picks which file version of an Item plays.
 _Avoid_: quality picker
