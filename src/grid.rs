@@ -13,6 +13,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::browse::Paging;
+use crate::click::Clickable as _;
 use crate::home::{Open, Play, short_line};
 use crate::keys::Key;
 
@@ -208,6 +209,7 @@ impl Grid {
         let thumb = self.thumbs.get(index).cloned().flatten();
         div()
             .id(("grid-card", index))
+            .clickable()
             .w(px(POSTER_WIDTH))
             .flex_none()
             .flex()

@@ -13,6 +13,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, Error, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
+use crate::click::Clickable as _;
 use crate::grid::Move;
 use crate::home::{Play, progress, progress_bar};
 use crate::keys::Key;
@@ -293,6 +294,7 @@ impl Detail {
         let focused = self.active && self.focus == focus;
         div()
             .id(id)
+            .clickable()
             .px(px(18.))
             .py(px(9.))
             .rounded_full()
@@ -412,6 +414,7 @@ impl Detail {
             }
             div()
                 .id(("detail-episode", i))
+                .clickable()
                 .w(px(EPISODE_WIDTH))
                 .flex()
                 .flex_col()
@@ -437,6 +440,7 @@ impl Detail {
             let focused = self.active && self.focus == Focus::Cast(i);
             div()
                 .id(("detail-cast", i))
+                .clickable()
                 .w(px(CAST_WIDTH))
                 .flex_none()
                 .flex()

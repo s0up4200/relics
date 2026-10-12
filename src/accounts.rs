@@ -7,6 +7,7 @@ use gpui::{
 };
 use gpui_omarchy::ActiveTheme;
 
+use crate::click::Clickable as _;
 use crate::keys::Key;
 use crate::state::Pair;
 
@@ -72,6 +73,7 @@ impl Render for AccountPicker {
             labels.chain([("Add server".to_string(), None, false)]).enumerate().map(|(row, (name, user, active))| {
                 div()
                     .id(("account", row))
+                    .clickable()
                     .px(px(16.))
                     .py(px(12.))
                     .rounded(px(12.))
@@ -81,7 +83,10 @@ impl Render for AccountPicker {
                     .bg(t.surface)
                     .border_2()
                     .border_color(if row == self.selected { t.accent } else { gpui::transparent_black() })
-                    .on_click(cx.listener(move |this, _, _, cx| this.choose(row, cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected = row;
+                        this.choose(row, cx);
+                    }))
                     .child(
                         div()
                             .flex_1()

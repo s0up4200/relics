@@ -21,6 +21,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use serde_json::Value;
 
 use crate::api::Client;
+use crate::click::Clickable as _;
 use crate::keys::Key;
 use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
 use crate::state::Pair;
@@ -222,6 +223,7 @@ impl SettingsPage {
         let focused = self.active && self.row == row;
         div()
             .id(("settings-row", row))
+            .clickable()
             .max_w(px(720.))
             .px(px(14.))
             .py(px(10.))
@@ -248,13 +250,18 @@ impl SettingsPage {
             let focused = self.active && self.row == row && self.action == n;
             div()
                 .id(("settings-action", row * 2 + n))
+                .clickable()
                 .px(px(12.))
                 .py(px(4.))
                 .rounded_full()
                 .border_2()
                 .border_color(if focused { t.accent } else { t.divider() })
                 .text_color(if n == 1 { t.danger } else { t.foreground })
-                .on_click(cx.listener(move |this, _, _, cx| this.act(index, n, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.row = row;
+                    this.action = n;
+                    this.act(index, n, cx);
+                }))
                 .child(label)
         };
         div()

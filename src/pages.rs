@@ -10,13 +10,14 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Task,
-    Window, div, px,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, StatefulInteractiveElement as _, Styled,
+    Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, IconName, icon, keycap};
 
 use crate::api::{Client, wire};
 use crate::browse;
+use crate::click::Clickable as _;
 use crate::detail::{self, Detail};
 use crate::grid::GridPage;
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
@@ -489,6 +490,7 @@ impl Pages {
                 let key = key.or((row == self.settings_row()).then_some(","));
                 div()
                     .id(("sidebar", row))
+                    .clickable()
                     .px(px(10.))
                     .py(px(8.))
                     .rounded(px(8.))
@@ -539,6 +541,7 @@ impl Pages {
         let initial = self.profile_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         div()
             .id("account-menu")
+            .clickable()
             .px(px(10.))
             .py(px(8.))
             .rounded(px(8.))
@@ -575,6 +578,7 @@ impl Pages {
         let entries = MENU.iter().enumerate().map(|(row, &(choice, label))| {
             div()
                 .id(("menu", row))
+                .clickable()
                 .px(px(10.))
                 .py(px(8.))
                 .rounded(px(8.))
@@ -606,7 +610,24 @@ impl Render for Pages {
                 sidebar_width(viewport, matches!(self.page, Page::Detail(_))) < 240. && self.menu.is_none(),
                 cx,
             ))
-            .child(div().flex_1().min_w_0().h_full().child(self.page.clone().into_any_element()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    // A click on the page moves the focus from the sidebar and the menu to the page.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.menu = None;
+                            if this.sidebar.take().is_some() {
+                                this.page.set_active(true, cx);
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(self.page.clone().into_any_element()),
+            )
     }
 }
 

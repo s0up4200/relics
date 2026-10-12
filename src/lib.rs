@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod api;
 pub mod artwork;
 pub mod browse;
+pub mod click;
 pub mod detail;
 pub mod grid;
 pub mod home;

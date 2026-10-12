@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement, Render, Styled, Subscription, Task, Window, div, px,
+    IntoElement, KeyDownEvent, ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    Window, div, px,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, input};
 
 use crate::api::{self, Client, PinCheck, wire};
+use crate::click::Clickable as _;
 use crate::grid::{Move, move_focus};
 use crate::keys::Key;
 
@@ -201,6 +203,18 @@ impl ProfilePicker {
                 .children(status.map(|(text, color)| div().text_size(px(12.)).text_color(color).child(text)))
         });
         div()
+            .id(("profile", index))
+            .clickable()
+            // A click picks the Profile like Enter does. A click on the open PIN field of its own card does nothing.
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.pin.is_some() && this.selected == index {
+                    return;
+                }
+                this.pin = None;
+                this.message = None;
+                this.selected = index;
+                this.choose(window, cx);
+            }))
             .w(px(150.))
             .flex()
             .flex_col()

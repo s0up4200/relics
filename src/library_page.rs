@@ -7,12 +7,14 @@ use std::sync::Arc;
 use chrono::Datelike as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
+use crate::click::Clickable as _;
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
@@ -100,7 +102,9 @@ impl LibraryPage {
                     .ok();
                 }
                 // The filter menu works without genres.
-                Err(err) => eprintln!("silo-omarchy: cannot read the genres of library {id}: {err}"),
+                Err(err) => {
+                    eprintln!("silo-omarchy: cannot read the genres of library {id}: {err}")
+                }
             }
         });
         Self {
@@ -297,6 +301,7 @@ impl LibraryPage {
         let focused = self.active && self.in_bar && self.bar == index;
         div()
             .id(("library-bar", index))
+            .clickable()
             .px(px(18.))
             .py(px(9.))
             .rounded_full()
@@ -307,6 +312,7 @@ impl LibraryPage {
             .border_2()
             .border_color(if focused { t.accent } else { gpui::transparent_black() })
             .on_click(cx.listener(move |this, _, window, cx| {
+                this.in_bar = true;
                 this.bar = index;
                 if let Some(control) = this.controls().get(index).cloned() {
                     this.activate(control, window, cx);
@@ -325,6 +331,7 @@ impl LibraryPage {
                 let label = if tab == Tab::Recommended { "Recommended" } else { "Library" };
                 return div()
                     .id(("library-tab", index))
+                    .clickable()
                     .pb(px(4.))
                     .text_size(px(14.))
                     .text_color(if focused {
@@ -342,7 +349,11 @@ impl LibraryPage {
                     } else {
                         gpui::transparent_black()
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_tab(tab, window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.in_bar = true;
+                        this.bar = index;
+                        this.open_tab(tab, window, cx);
+                    }))
                     .child(label)
                     .into_any_element();
             }
@@ -378,6 +389,7 @@ impl LibraryPage {
             let focused = self.active && row == menu.row;
             div()
                 .id(("library-menu", row))
+                .clickable()
                 .px(px(14.))
                 .py(px(6.))
                 .rounded_full()
@@ -386,7 +398,12 @@ impl LibraryPage {
                 .text_color(if on { t.background } else { t.foreground })
                 .border_2()
                 .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .on_click(cx.listener(move |this, _, _, cx| this.choose(row, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(menu) = &mut this.menu {
+                        menu.row = row;
+                    }
+                    this.choose(row, cx);
+                }))
                 .child(choice.label())
         });
         div()
@@ -477,6 +494,19 @@ impl Render for LibraryPage {
                 .into_any_element(),
             (Tab::Library, _) => div().size_full().px(px(40.)).child(self.grid.clone()).into_any_element(),
         };
-        div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(content))
+        div().size_full().flex().flex_col().child(header).child(
+            div()
+                .flex_1()
+                .min_h_0()
+                // A click in the content moves the focus from the bar to the content.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.in_bar = false;
+                        this.sync(cx);
+                    }),
+                )
+                .child(content),
+        )
     }
 }

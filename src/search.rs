@@ -6,14 +6,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    Render, RenderImage, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, Render, RenderImage, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache};
 use crate::browse::PAGE_SIZE;
+use crate::click::Clickable as _;
 use crate::grid::{Grid, Move};
 use crate::home::{Open, Play};
 use crate::keys::Key;
@@ -248,8 +249,9 @@ impl Search {
 
     fn open_person(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(person) = self.people.get(index) {
-            self.focus = Focus::Person(index);
-            cx.emit(OpenPerson { id: person.id.to_string(), name: person.name.clone() });
+            let open = OpenPerson { id: person.id.to_string(), name: person.name.clone() };
+            self.set_focus(Focus::Person(index), cx);
+            cx.emit(open);
         }
     }
 
@@ -317,6 +319,7 @@ impl Search {
             let url = person.photo_url.as_deref().and_then(|url| self.client.server().url.join(url).ok());
             div()
                 .id(("search-person", i))
+                .clickable()
                 .w(px(PHOTO + 16.))
                 .flex_none()
                 .flex()
@@ -358,6 +361,9 @@ impl Render for Search {
         let in_field = self.active && self.focus == Focus::Field;
         let text = self.field.text();
         let field = div()
+            .id("search-field")
+            .clickable()
+            .on_click(cx.listener(|this, _, _, cx| this.set_focus(Focus::Field, cx)))
             .w_full()
             .max_w(px(640.))
             .px(px(16.))
@@ -404,7 +410,12 @@ impl Render for Search {
                 .text_color(t.bright)
                 .child(format!("No results for {}", self.shown))
                 .into_any_element(),
-            Some(grid) => div().size_full().px(px(40.)).child(grid.clone()).into_any_element(),
+            Some(grid) => div()
+                .size_full()
+                .px(px(40.))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.set_focus(Focus::Titles, cx)))
+                .child(grid.clone())
+                .into_any_element(),
             None => div().into_any_element(),
         };
         div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(content))

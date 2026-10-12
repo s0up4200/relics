@@ -12,6 +12,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
+use crate::click::Clickable as _;
 use crate::keys::Key;
 
 /// The user pressed p on a card, or Play on the detail page.
@@ -224,6 +225,21 @@ impl Home {
         true
     }
 
+    /// Makes a card a focus target. A click focuses the card and opens it, like Enter.
+    fn card_target(&self, row: usize, col: usize, card: impl IntoElement, cx: &Context<Self>) -> AnyElement {
+        div()
+            .id(("home-card", row * 10_000 + col))
+            .flex_none()
+            .clickable()
+            .child(card)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.focus = Focus::Card { row, col };
+                this.key(Key::Other("enter"), cx);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     fn row(&self, index: usize, section: &HomeSection, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
         let wide = is_wide(&section.section_type);
@@ -253,34 +269,39 @@ impl Home {
                             .child(item.title.clone()),
                     ),
                 );
-                return art.into_any_element();
+                return self.card_target(index, col, art, cx);
             }
             if wide && let Some(progress) = progress(item.position_seconds, item.duration_seconds) {
                 art = art.child(progress_bar(progress, t.accent));
             }
-            div()
-                .w(px(width))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(art)
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if focused { t.bright } else { t.foreground })
-                        .truncate()
-                        .child(item.title.clone()),
-                )
-                .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item)))
-                .into_any_element()
+            self.card_target(
+                index,
+                col,
+                div()
+                    .w(px(width))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(art)
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if focused { t.bright } else { t.foreground })
+                            .truncate()
+                            .child(item.title.clone()),
+                    )
+                    .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(short_line(item))),
+                cx,
+            )
         });
         let col = section.items.len();
         let view_all = section.view_all.then(|| {
             let focused = self.active && self.focus == Focus::Card { row: index, col };
             div()
                 .id(("view-all", index))
+                .clickable()
                 .w(px(width))
                 .h(px(height))
                 .flex_none()
