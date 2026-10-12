@@ -225,11 +225,21 @@ pub struct Client {
     /// The `client_features` of the last start request. A replan sends the same list.
     features: Mutex<Vec<&'static str>>,
     on_trouble: Mutex<Box<dyn Fn(Trouble) + Send + Sync>>,
-    /// The Item of each Playback session that this client started: its content id and duration in seconds.
+    /// The Item of each Playback session that this client started.
     // ponytail: never pruned; one small entry for each Item played in this run.
-    sessions: Mutex<HashMap<String, (String, i64)>>,
+    sessions: Mutex<HashMap<String, SessionItem>>,
     /// The last position of each Item whose report failed, keyed by Profile id and content id.
     pending: Mutex<HashMap<(String, String), Pending>>,
+}
+
+/// The Item of a Playback session.
+#[derive(Clone)]
+struct SessionItem {
+    content_id: String,
+    /// Seconds.
+    duration: i64,
+    /// The file from the Version picker. A new start after an ended session asks for it again.
+    file_id: Option<String>,
 }
 
 /// A position that the server did not get. `sync_progress` sends it.
@@ -522,11 +532,11 @@ impl Client {
             Err(Error::Problem(problem))
                 if matches!(problem.code(), "playback_session_ended" | "playback_session_not_found") =>
             {
-                let content_id = self.sessions.lock().unwrap().get(&replan.session_id).map(|(id, _)| id.clone());
-                let Some(content_id) = content_id else {
+                let item = self.sessions.lock().unwrap().get(&replan.session_id).cloned();
+                let Some(item) = item else {
                     return Err(Error::Problem(problem));
                 };
-                return self.start_playback(&content_id, Some(replan.position.max(0.0))).await;
+                return self.start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0))).await;
             }
             result => result?,
         };
@@ -551,9 +561,28 @@ impl Client {
     /// Starts a Playback session for the Item `content_id`. With no `start_position`, the
     /// server starts at the saved resume point of the Profile.
     pub async fn start_playback(&self, content_id: &str, start_position: Option<f64>) -> Result<Decision, Error> {
+        self.start_version(content_id, None, start_position).await
+    }
+
+    /// The file versions of the Item `content_id`. The first one is the default.
+    pub async fn versions(&self, content_id: &str) -> Result<Vec<wire::FileVersion>, Error> {
         let versions: wire::FileVersionCollection =
             self.call(Method::GET, &format!("catalog/items/{content_id}/versions"), None).await?;
-        let Some(version) = versions.items.first() else {
+        Ok(versions.items)
+    }
+
+    /// Starts a Playback session like `start_playback`, for the file version `file_id` from the Version picker.
+    /// The server then keeps that file, also for a quality change and a failure recovery. With no `file_id`, or
+    /// a file that the Item no longer has, the first version plays and the server can pick another one.
+    pub async fn start_version(
+        &self,
+        content_id: &str,
+        file_id: Option<&str>,
+        start_position: Option<f64>,
+    ) -> Result<Decision, Error> {
+        let versions = self.versions(content_id).await?;
+        let chosen = file_id.and_then(|id| versions.iter().find(|v| *v.file_id == *id));
+        let Some(version) = chosen.or(versions.first()) else {
             return Ok(Decision::Unavailable {
                 reason: "no_file".into(),
                 message: "This Item has no file to play".into(),
@@ -573,10 +602,18 @@ impl Client {
         if let Some(position) = start_position {
             body["start_position"] = position.into();
         }
+        if chosen.is_some() {
+            body["allow_alternate_versions"] = false.into();
+        }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
         if let Decision::Playable { session_id, plan, audio_language, markers, attempt_id } = &mut decision {
-            self.sessions.lock().unwrap().insert(session_id.clone(), (content_id.to_string(), version.duration));
+            let item = SessionItem {
+                content_id: content_id.to_string(),
+                duration: version.duration,
+                file_id: chosen.map(|v| v.file_id.to_string()),
+            };
+            self.sessions.lock().unwrap().insert(session_id.clone(), item);
             self.absolute_urls(plan)?;
             *attempt_id = attempt;
             *audio_language = audio_language_of(version, plan);
@@ -700,7 +737,7 @@ impl Client {
         result: Result<wire::PlaybackMutation, Error>,
     ) -> Result<(), Error> {
         let item = self.sessions.lock().unwrap().get(session_id).cloned();
-        let (Some((content_id, duration)), Some(sample)) = (item, sample) else {
+        let (Some(SessionItem { content_id, duration, .. }), Some(sample)) = (item, sample) else {
             return result.map(drop);
         };
         let key = (self.auth.lock().unwrap().profile_id.clone().unwrap_or_default(), content_id);

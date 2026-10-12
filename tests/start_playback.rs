@@ -17,6 +17,7 @@ fn fake(start: &'static str) -> (Client, Log) {
     let (http, seen) = common::http(move |req| {
         let (status, body) = match (req.method.as_str(), req.path.as_str()) {
             ("GET", "catalog/items/movie:heat-1995/versions") => (200, fixture("list_catalog_item_versions_ok.json")),
+            ("GET", "catalog/items/movie:two-files/versions") => (200, two_versions()),
             ("GET", "playback/capabilities") => (200, fixture("playback_capability_available.json")),
             ("GET", "markers/files/120") => (200, markers()),
             ("GET", "catalog/series/series:severance/seasons/1/episodes?image_size=small") => {
@@ -51,6 +52,16 @@ fn markers() -> String {
     body.to_string()
 }
 
+/// The versions fixture with a second file, 121.
+fn two_versions() -> String {
+    let mut body: Value = serde_json::from_str(&fixture("list_catalog_item_versions_ok.json")).unwrap();
+    let mut second = body["items"][0].clone();
+    second["file_id"] = json!("121");
+    second["resolution"] = json!("1080p");
+    body["items"].as_array_mut().unwrap().push(second);
+    body.to_string()
+}
+
 /// Season 2 of the fixture series: episode 1 has only an unreadable file, episode 2 plays.
 fn season_two() -> String {
     let mut body: Value = serde_json::from_str(&fixture("list_catalog_item_episodes_ok.json")).unwrap();
@@ -80,6 +91,19 @@ fn the_start_request_matches_the_snapshot() {
     body["client_playback_context"]["app_version"] = json!("<version>");
     let snapshot: Value = serde_json::from_str(&fixture("../../snapshots/start_request.json")).unwrap();
     assert_eq!(body, snapshot, "the start request changed:\n{}", serde_json::to_string_pretty(&body).unwrap());
+}
+
+#[test]
+fn the_start_request_asks_for_the_chosen_version_and_keeps_it() {
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_version("movie:two-files", Some("121"), None)).unwrap();
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!((&body["file_id"], &body["allow_alternate_versions"]), (&json!("121"), &json!(false)));
+    // With no choice, the first version plays and the server can pick another one.
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_version("movie:two-files", None, None)).unwrap();
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!((&body["file_id"], body.get("allow_alternate_versions")), (&json!("120"), None));
 }
 
 #[test]

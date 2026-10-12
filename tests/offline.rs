@@ -172,12 +172,12 @@ fn a_report_that_the_server_refuses_is_synced_at_once() {
 }
 
 #[test]
-fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position() {
+fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position_with_the_same_version() {
     let (client, seen, _) = fake(|req| match req.path.as_str() {
         p if p.ends_with("/replan") => problem(410, "playback_session_ended"),
         _ => playback(req),
     });
-    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    block_on(client.start_version("movie:heat-1995", Some("120"), None)).unwrap();
     let replan = Replan {
         session_id: SESSION.into(),
         attempt_id: "attempt".into(),
@@ -194,6 +194,7 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position() {
         seen.iter().filter(|s| s.path == "playback/start").map(|s| serde_json::from_str(&s.body).unwrap()).collect();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[1]["start_position"], 1234.5);
+    assert_eq!((&starts[1]["file_id"], &starts[1]["allow_alternate_versions"]), (&json!("120"), &json!(false)));
 }
 
 #[test]

@@ -31,6 +31,8 @@ pub struct PlayItem {
     find_season: bool,
     /// Start at the beginning instead of the saved position.
     pub start_over: bool,
+    /// The file version from the Version picker. `None` plays the first version.
+    pub file_id: Option<String>,
 }
 
 impl From<&wire::CatalogItem> for PlayItem {
@@ -44,6 +46,7 @@ impl From<&wire::CatalogItem> for PlayItem {
             runtime: item.duration_seconds.or(item.runtime.map(|minutes| minutes as f64 * 60.0)),
             season,
             start_over: false,
+            file_id: None,
         }
     }
 }
@@ -58,6 +61,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 season: item.play_season_number.map(|season| (item.content_id.clone(), season)),
                 find_season: item.play_season_number.is_none(),
                 start_over: false,
+            file_id: None,
             },
             _ => Self {
                 content_id: item.content_id.clone(),
@@ -65,6 +69,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 season: item.series_id.clone().zip(item.season_number),
                 find_season: false,
                 start_over: false,
+            file_id: None,
             },
         }
     }
@@ -78,6 +83,7 @@ impl PlayItem {
             season: Some((series_id, episode.season_number)),
             find_season: false,
             start_over: false,
+            file_id: None,
         }
     }
 
@@ -174,10 +180,10 @@ impl PlayerWindow {
         (self.track, self.art, self.duration) = (None, None, None);
         self.describing = Some(self.describe(client.clone(), item.content_id.clone(), cx));
         let start = item.start_position();
-        let content_id = item.content_id;
+        let (content_id, file_id) = (item.content_id, item.file_id);
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
-            let input = match client.start_playback(&content_id, start).await {
+            let input = match client.start_version(&content_id, file_id.as_deref(), start).await {
                 Ok(decision) => Input::Started { decision, access: client.media_access() },
                 Err(err) => Input::StartFailed(err.to_string()),
             };

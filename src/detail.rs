@@ -33,6 +33,10 @@ pub struct Detail {
     /// The id of the Item.
     id: String,
     item: Option<wire::CatalogItemDetail>,
+    /// The file versions of a movie. A series has none here.
+    versions: Vec<wire::FileVersion>,
+    /// The index of the chosen version in `versions`.
+    version: usize,
     seasons: Vec<wire::Season>,
     /// The index of the chosen season in `seasons`.
     season: usize,
@@ -78,6 +82,8 @@ impl Detail {
             client,
             id,
             item: None,
+            versions: Vec::new(),
+            version: 0,
             seasons: Vec::new(),
             season: 0,
             wanted_season: season,
@@ -109,13 +115,17 @@ impl Detail {
         self._loading = cx.spawn(async move |this, cx| {
             let result: Result<_, Error> = async {
                 let item = client.item(&id, image_size).await?;
-                let seasons = if item.type_ == "series" { client.seasons(&id).await? } else { Vec::new() };
-                Ok((item, seasons))
+                let (seasons, versions) = if item.type_ == "series" {
+                    (client.seasons(&id).await?, Vec::new())
+                } else {
+                    (Vec::new(), client.versions(&id).await?)
+                };
+                Ok((item, seasons, versions))
             }
             .await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok((item, seasons)) => {
+                    Ok((item, seasons, versions)) => {
                         let thumbs = [&item.backdrop_thumbhash, &item.poster_thumbhash]
                             .into_iter()
                             .chain(item.cast.iter().map(|c| &c.photo_thumbhash))
@@ -127,6 +137,8 @@ impl Detail {
                         let number = this.wanted_season.take().or(item.play_season_number);
                         this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
                         this.seasons = seasons;
+                        this.version = this.version.min(versions.len().saturating_sub(1));
+                        this.versions = versions;
                         this.item = Some(item);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                         this.load_episodes(cx);
@@ -172,12 +184,28 @@ impl Detail {
     fn rows(&self) -> Rows {
         Rows {
             actions: self.item.as_ref().map_or(0, |item| actions(item).len()),
+            versions: self.picker_len(),
+            version: self.version,
             seasons: self.seasons.len(),
             season: self.season,
             cast: self.item.as_ref().filter(|item| item.type_ != "series").map_or(0, |item| item.cast.len()),
             episodes: self.episodes.len(),
             columns: self.columns,
         }
+    }
+
+    /// The pills of the Version picker: one for each version, or none for a single version.
+    fn picker_len(&self) -> usize {
+        if self.versions.len() > 1 { self.versions.len() } else { 0 }
+    }
+
+    /// The Item that Play starts, with the version from the Version picker.
+    fn play_item(&self, item: &wire::CatalogItemDetail) -> PlayItem {
+        let mut play = PlayItem::from(item);
+        if self.picker_len() > 0 {
+            play.file_id = self.versions.get(self.version).map(|v| v.file_id.to_string());
+        }
+        play
     }
 
     /// Handles a key. Returns false when the page does not use it, for example Esc or h at the left edge.
@@ -187,10 +215,11 @@ impl Detail {
         };
         match (self.focus, key) {
             (Focus::Action(i), Key::Other("enter")) => self.act(actions(item)[i], cx),
+            (Focus::Version(i), Key::Other("enter")) => self.choose_version(i, cx),
             (Focus::Season(i), Key::Other("enter")) => self.choose_season(i, cx),
             (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
             (Focus::Cast(i), Key::Other("enter")) => self.open_person(i, cx),
-            (_, Key::Other("p")) => cx.emit(Play(item.into())),
+            (_, Key::Other("p")) => cx.emit(Play(self.play_item(item))),
             (focus, key) => match self.rows().step(focus, key) {
                 Step::To(focus) => {
                     self.focus = focus;
@@ -198,7 +227,8 @@ impl Detail {
                     // the focused card below the window.
                     self.scroll.scroll_to_item(match focus {
                         Focus::Action(_) => 0,
-                        Focus::Season(_) | Focus::Cast(_) => 1,
+                        Focus::Season(_) | Focus::Version(_) => 1,
+                        Focus::Cast(_) => 1 + usize::from(self.picker_len() > 0),
                         Focus::Episode(_) => 2,
                     });
                 }
@@ -210,13 +240,13 @@ impl Detail {
     }
 
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
-        let Some(item) = &mut self.item else {
+        let play = self.item.as_ref().map(|item| self.play_item(item));
+        let (Some(item), Some(mut play)) = (&mut self.item, play) else {
             return;
         };
         match action {
-            Action::Play { .. } => cx.emit(Play(PlayItem::from(&*item))),
+            Action::Play { .. } => cx.emit(Play(play)),
             Action::StartOver => {
-                let mut play = PlayItem::from(&*item);
                 play.start_over = true;
                 cx.emit(Play(play));
             }
@@ -242,6 +272,12 @@ impl Detail {
                 });
             }
         }
+        cx.notify();
+    }
+
+    fn choose_version(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.focus = Focus::Version(index);
+        self.version = index;
         cx.notify();
     }
 
@@ -325,7 +361,8 @@ impl Detail {
                 },
             ))
         });
-        let badges = quality_badges(item).into_iter().map(|badge| {
+        let labels = self.versions.get(self.version).map_or_else(|| quality_badges(item), version_labels);
+        let badges = labels.into_iter().map(|badge| {
             div().px(px(8.)).py(px(2.)).rounded_full().bg(gpui::hsla(0., 0., 1., 0.1)).text_size(px(10.)).child(badge)
         });
         div()
@@ -379,6 +416,18 @@ impl Detail {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The Version picker: a pill for each file version, with its quality labels and size. A check marks the
+    /// version that Play starts.
+    fn version_pills(&self, cx: &Context<Self>) -> AnyElement {
+        let pills = self.versions.iter().enumerate().map(|(i, version)| {
+            let mark = if i == self.version { "✓ " } else { "" };
+            let label = format!("{mark}{}", version_row(version)).into();
+            self.pill(("detail-version", i), label, i == self.version, Focus::Version(i), cx)
+                .on_click(cx.listener(move |this, _, _, cx| this.choose_version(i, cx)))
+        });
+        div().px(px(MARGIN)).flex().flex_wrap().gap(px(8.)).children(pills).into_any_element()
     }
 
     fn season_pills(&self, cx: &Context<Self>) -> AnyElement {
@@ -501,7 +550,8 @@ impl Render for Detail {
             (None, None) => Some(div().px(px(MARGIN)).text_color(t.secondary).child("Loading…")),
             _ => None,
         };
-        // The children keep the order hero, seasons, episodes, so that `key` can scroll to them by index.
+        // The children keep the order hero, versions, seasons, episodes, cast, so that `key` can scroll to them by
+        // index. A series has no versions and a movie has no seasons.
         let mut page = div()
             .id("detail-page")
             .size_full()
@@ -513,6 +563,9 @@ impl Render for Detail {
             .track_scroll(&self.scroll);
         if let Some(item) = &self.item {
             page = page.child(self.hero(item, viewport - crate::pages::sidebar_width(viewport, true), cx));
+            if self.picker_len() > 0 {
+                page = page.child(self.version_pills(cx));
+            }
             if item.type_ == "series" {
                 page = page.child(self.season_pills(cx)).child(self.episode_grid(cx));
             } else if !item.cast.is_empty() {
@@ -553,10 +606,11 @@ pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
     actions
 }
 
-/// The focused control: a hero button, a season pill, an episode card or a cast card, by index.
+/// The focused control: a hero button, a version pill, a season pill, an episode card or a cast card, by index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Action(usize),
+    Version(usize),
     Season(usize),
     Episode(usize),
     Cast(usize),
@@ -576,6 +630,10 @@ pub enum Step {
 #[derive(Debug, Clone, Copy)]
 pub struct Rows {
     pub actions: usize,
+    /// The pills of the Version picker. The page shows the picker only for more than one version.
+    pub versions: usize,
+    /// The index of the chosen version.
+    pub version: usize,
     pub seasons: usize,
     /// The index of the chosen season.
     pub season: usize,
@@ -596,13 +654,18 @@ impl Rows {
         };
         let (down, up) = (key == Key::Down, key == Key::Up);
         match focus {
+            Focus::Action(_) if down && self.versions > 0 => Step::To(Focus::Version(self.version)),
             Focus::Action(_) if down && self.seasons > 0 => Step::To(Focus::Season(self.season)),
             Focus::Action(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
             Focus::Action(_) if down && self.cast > 0 => Step::To(Focus::Cast(0)),
             Focus::Action(i) => along(i, self.actions, Focus::Action),
+            Focus::Version(_) if up => Step::To(Focus::Action(0)),
+            Focus::Version(_) if down && self.cast > 0 => Step::To(Focus::Cast(0)),
+            Focus::Version(i) => along(i, self.versions, Focus::Version),
             Focus::Season(_) if up => Step::To(Focus::Action(0)),
             Focus::Season(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
             Focus::Season(i) => along(i, self.seasons, Focus::Season),
+            Focus::Cast(_) if up && self.versions > 0 => Step::To(Focus::Version(self.version)),
             Focus::Cast(_) if up => Step::To(Focus::Action(0)),
             Focus::Cast(i) => along(i, self.cast, Focus::Cast),
             Focus::Episode(i) => match crate::grid::move_focus(i, key, self.episodes, self.columns) {
@@ -633,15 +696,78 @@ pub fn meta_line(item: &wire::CatalogItemDetail) -> String {
         .join(" · ")
 }
 
-/// The quality badges of the version that plays: the resolution, HDR and the video codec.
-pub fn quality_badges(item: &wire::CatalogItemDetail) -> Vec<String> {
-    let resolution = item.effective_version_resolution.as_deref().map(|r| match r {
+fn resolution(resolution: &str) -> String {
+    match resolution {
         "2160p" | "4k" | "4K" => "4K".to_string(),
         other => other.to_string(),
-    });
+    }
+}
+
+/// The quality badges of the version that plays, when the page has no version list: the resolution, HDR and
+/// the video codec.
+pub fn quality_badges(item: &wire::CatalogItemDetail) -> Vec<String> {
+    let resolution = item.effective_version_resolution.as_deref().map(resolution);
     let hdr = (item.effective_version_hdr == Some(true)).then(|| "HDR".to_string());
     let codec = item.effective_version_codec_video.as_deref().map(str::to_uppercase);
     [resolution, hdr, codec].into_iter().flatten().collect()
+}
+
+/// The dynamic range of a version: "DV", "DV HDR10", "DV HDR10+", "DV HLG", "HDR10+", "HDR10", "HLG", "HDR"
+/// for a file with only the `hdr` flag, or "" for SDR. The words and the rules are the same as in the web app.
+pub fn video_range(version: &wire::FileVersion) -> String {
+    let tracks = &version.video_tracks;
+    let dolby_vision = tracks.iter().any(|t| {
+        t.dolby_vision.as_deref().is_some_and(|dv| !dv.trim().is_empty())
+            || t.dv_profile.is_some_and(|profile| profile > 0)
+            || t.video_range_type.as_deref().is_some_and(|r| r.trim().starts_with("DOVI"))
+    });
+    let hdr_type = tracks.iter().find_map(|t| {
+        let range = t.video_range_type.as_deref().unwrap_or_default().trim();
+        let transfer = t.color_transfer.as_deref().unwrap_or_default().to_lowercase();
+        if t.hdr10_plus == Some(true) || range.contains("HDR10Plus") {
+            Some("HDR10+")
+        } else if range == "HDR10" || range.ends_with("WithHDR10") || transfer.contains("smpte2084") {
+            Some("HDR10")
+        } else if range == "HLG" || range.ends_with("WithHLG") || transfer.contains("arib-std-b67") {
+            Some("HLG")
+        } else {
+            None
+        }
+    });
+    match (dolby_vision, hdr_type) {
+        (true, Some(hdr)) => format!("DV {hdr}"),
+        (true, None) => "DV".into(),
+        (false, Some(hdr)) => hdr.into(),
+        (false, None) if version.hdr => "HDR".into(),
+        (false, None) => String::new(),
+    }
+}
+
+/// The quality labels of a version: the resolution, the dynamic range and the video codec.
+pub fn version_labels(version: &wire::FileVersion) -> Vec<String> {
+    [resolution(&version.resolution), video_range(version), version.codec_video.to_uppercase()]
+        .into_iter()
+        .filter(|label| !label.is_empty())
+        .collect()
+}
+
+/// The text of a row of the Version picker: the quality labels, the audio codec and the file size.
+pub fn version_row(version: &wire::FileVersion) -> String {
+    let mut parts = version_labels(version);
+    parts.push(version.codec_audio.to_uppercase());
+    parts.push(file_size(version.file_size));
+    parts.retain(|part| !part.is_empty());
+    parts.join(" · ")
+}
+
+/// A file size with 1024-based units and the GB, MB and KB labels of the web app, for example "10.6 GB".
+fn file_size(bytes: i64) -> String {
+    let bytes = bytes as f64;
+    match [("GB", 3), ("MB", 2), ("KB", 1)].into_iter().find(|(_, power)| bytes >= 1024_f64.powi(*power)) {
+        Some((unit, power)) => format!("{:.1} {unit}", bytes / 1024_f64.powi(power)),
+        None if bytes > 0. => format!("{bytes} B"),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -695,7 +821,7 @@ mod tests {
     #[test]
     fn hjkl_moves_between_the_buttons_the_seasons_and_the_episode_grid() {
         // 3 buttons, 2 seasons with season 1 chosen, 5 episodes in 2 columns.
-        let rows = Rows { actions: 3, seasons: 2, season: 1, episodes: 5, cast: 0, columns: 2 };
+        let rows = Rows { actions: 3, versions: 0, version: 0, seasons: 2, season: 1, episodes: 5, cast: 0, columns: 2 };
         let to = |focus| Step::To(focus);
         assert_eq!(rows.step(Focus::Action(0), Key::Right), to(Focus::Action(1)));
         assert_eq!(rows.step(Focus::Action(2), Key::Right), Step::Stay);
@@ -708,7 +834,7 @@ mod tests {
         assert_eq!(rows.step(Focus::Episode(1), Key::Up), to(Focus::Season(1)));
         assert_eq!(rows.step(Focus::Episode(2), Key::Left), Step::OutLeft);
         assert_eq!(rows.step(Focus::Action(0), Key::Up), Step::Stay);
-        let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, cast: 0, columns: 4 };
+        let movie = Rows { actions: 2, versions: 0, version: 0, seasons: 0, season: 0, episodes: 0, cast: 0, columns: 4 };
         assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
         let loading = Rows { episodes: 0, ..rows };
         assert_eq!(loading.step(Focus::Season(0), Key::Down), Step::Stay);
@@ -716,7 +842,7 @@ mod tests {
 
     #[test]
     fn hjkl_moves_between_the_buttons_and_the_cast_of_a_movie() {
-        let movie = Rows { actions: 2, seasons: 0, season: 0, episodes: 0, cast: 3, columns: 4 };
+        let movie = Rows { actions: 2, versions: 0, version: 0, seasons: 0, season: 0, episodes: 0, cast: 3, columns: 4 };
         let to = |focus| Step::To(focus);
         assert_eq!(movie.step(Focus::Action(1), Key::Down), to(Focus::Cast(0)));
         assert_eq!(movie.step(Focus::Cast(0), Key::Right), to(Focus::Cast(1)));
@@ -724,6 +850,61 @@ mod tests {
         assert_eq!(movie.step(Focus::Cast(0), Key::Left), Step::OutLeft);
         assert_eq!(movie.step(Focus::Cast(1), Key::Up), to(Focus::Action(0)));
         assert_eq!(movie.step(Focus::Cast(1), Key::Down), Step::Stay);
+    }
+
+    fn version(fields: serde_json::Value) -> wire::FileVersion {
+        let body: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/list_catalog_item_versions_ok.json")).unwrap();
+        let mut version = body["items"][0].clone();
+        version.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        serde_json::from_value(version).unwrap()
+    }
+
+    fn range(hdr: bool, track: serde_json::Value) -> String {
+        let mut track_fields = json!({"interlaced": false, "dv_bl_compat_id_present": false, "dv_config_present": false});
+        track_fields.as_object_mut().unwrap().extend(track.as_object().unwrap().clone());
+        video_range(&version(json!({"hdr": hdr, "video_tracks": [track_fields]})))
+    }
+
+    #[test]
+    fn the_video_range_names_dolby_vision_and_the_hdr_type() {
+        assert_eq!(video_range(&version(json!({"hdr": false}))), "");
+        assert_eq!(video_range(&version(json!({"hdr": true}))), "HDR", "a file probed before the range fields");
+        assert_eq!(range(true, json!({"dolby_vision": "Profile 5"})), "DV");
+        assert_eq!(range(true, json!({"dv_profile": 8})), "DV");
+        assert_eq!(range(true, json!({"video_range_type": "DOVIWithSDR"})), "DV");
+        assert_eq!(range(true, json!({"dolby_vision": "Profile 8", "video_range_type": "DOVIWithHDR10"})), "DV HDR10");
+        assert_eq!(range(true, json!({"dolby_vision": "Profile 7", "color_transfer": "smpte2084"})), "DV HDR10");
+        assert_eq!(range(true, json!({"video_range_type": "DOVIWithHLG"})), "DV HLG");
+        assert_eq!(range(true, json!({"video_range_type": "DOVIWithELHDR10Plus"})), "DV HDR10+");
+        assert_eq!(range(true, json!({"hdr10_plus": true})), "HDR10+");
+        assert_eq!(range(true, json!({"video_range_type": "HDR10"})), "HDR10");
+        assert_eq!(range(true, json!({"color_transfer": "arib-std-b67"})), "HLG");
+    }
+
+    #[test]
+    fn a_version_row_has_the_labels_and_the_file_size() {
+        let uhd = version(json!({
+            "resolution": "2160p", "codec_video": "hevc", "codec_audio": "eac3", "hdr": true, "file_size": 11_381_663_334_i64,
+            "video_tracks": [{"video_range_type": "DOVIWithHDR10", "interlaced": false,
+                              "dv_bl_compat_id_present": false, "dv_config_present": false}],
+        }));
+        assert_eq!(version_labels(&uhd), ["4K", "DV HDR10", "HEVC"]);
+        assert_eq!(version_row(&uhd), "4K · DV HDR10 · HEVC · EAC3 · 10.6 GB");
+        let small = version(json!({"resolution": "720p", "codec_video": "h264", "file_size": 734_003_200}));
+        assert_eq!(version_row(&small), "720p · H264 · 700.0 MB");
+    }
+
+    #[test]
+    fn hjkl_moves_through_the_version_picker_of_a_movie() {
+        let movie = Rows { actions: 2, versions: 3, version: 1, seasons: 0, season: 0, episodes: 0, cast: 2, columns: 4 };
+        let to = |focus| Step::To(focus);
+        assert_eq!(movie.step(Focus::Action(0), Key::Down), to(Focus::Version(1)), "down goes to the chosen version");
+        assert_eq!(movie.step(Focus::Version(1), Key::Right), to(Focus::Version(2)));
+        assert_eq!(movie.step(Focus::Version(0), Key::Left), Step::OutLeft);
+        assert_eq!(movie.step(Focus::Version(2), Key::Up), to(Focus::Action(0)));
+        assert_eq!(movie.step(Focus::Version(2), Key::Down), to(Focus::Cast(0)));
+        assert_eq!(movie.step(Focus::Cast(1), Key::Up), to(Focus::Version(1)));
     }
 
     #[test]
