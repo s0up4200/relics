@@ -293,6 +293,18 @@ impl ArtworkCache {
                 self.bytes += entry.bytes;
             }
         }
+        // A queued download that this frame did not draw goes, so that the downloads of the current page do not
+        // wait behind those of a page that the user left. The image queues again when a view draws it again.
+        let jobs = self.queue.iter().filter_map(|job| {
+            let entry = self.entries.get(&job.key)?;
+            let cover = matches!(&entry.state, State::Fetching(_, covers) if !covers.is_empty());
+            Some((job.key.clone(), entry.last_use, cover))
+        });
+        let unwanted: HashSet<String> = unwanted(jobs, self.frame).into_iter().collect();
+        if !unwanted.is_empty() {
+            self.queue.retain(|job| !unwanted.contains(&job.key));
+            self.entries.retain(|key, _| !unwanted.contains(key));
+        }
         let images = self.entries.iter().map(|(key, entry)| (key.clone(), entry.last_use, entry.bytes));
         for key in evictions(images, self.frame, self.bytes, MEMORY_LIMIT) {
             let entry = self.entries.remove(&key).expect("the key comes from the map");
@@ -327,6 +339,12 @@ pub fn evictions<K>(
         })
         .map(|(key, ..)| key)
         .collect()
+}
+
+/// The keys of the queued downloads to drop after `frame`. Each download is (key, last frame that drew its image,
+/// an MPRIS cover waits for it). A download stays when `frame` drew its image, or when a cover waits for it.
+pub fn unwanted<K>(jobs: impl IntoIterator<Item = (K, u64, bool)>, frame: u64) -> Vec<K> {
+    jobs.into_iter().filter(|&(_, last, cover)| last < frame && !cover).map(|(key, ..)| key).collect()
 }
 
 impl ArtworkCache {

@@ -219,6 +219,13 @@ fn eviction_drops_the_oldest_images_but_never_one_drawn_in_this_frame() {
 }
 
 #[test]
+fn a_queued_download_goes_when_this_frame_did_not_draw_its_image() {
+    // (key, last frame that drew it, a cover waits for it). Frame 7 is the current frame.
+    let jobs = [("left-page", 5, false), ("drawn", 7, false), ("cover", 2, true)];
+    assert_eq!(artwork::unwanted(jobs, 7), ["left-page"]);
+}
+
+#[test]
 fn a_discarded_file_downloads_again() {
     let dir = empty_dir("discard");
     let (http, seen) = host(vec![(200, Some("\"e1\""), "broken"), (200, Some("\"e2\""), "poster")]);
