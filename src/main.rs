@@ -25,7 +25,8 @@ gpui_kit::assets::icon_assets!(
         Captions,
         Gauge,
         Info,
-        ListVideo
+        ListVideo,
+        SkipForward
     ]
 );
 

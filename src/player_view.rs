@@ -305,6 +305,8 @@ impl PlayerView {
             Key::Other("z") => self.add_sub_delay(-DELAY_STEP, cx),
             Key::Other("x") => self.add_sub_delay(DELAY_STEP, cx),
             Key::Other("space") => self.step(Input::PlayPause, cx),
+            // Skip: the next shuffle pick or the next episode.
+            Key::Other("n") => self.step(Input::Next, cx),
             Key::Left => self.step(Input::SeekBy(-SEEK_STEP), cx),
             Key::Right => self.step(Input::SeekBy(SEEK_STEP), cx),
             Key::Up => self.add_volume(VOLUME_STEP, cx),
@@ -510,6 +512,11 @@ impl PlayerView {
             .items_center()
             .gap(px(8.))
             .child(self.button("player-play", play, cx, |this, _, cx| this.step(Input::PlayPause, cx)))
+            .when(player.can_go_next(), |row| {
+                row.child(
+                    self.button("player-next", IconName::SkipForward, cx, |this, _, cx| this.step(Input::Next, cx)),
+                )
+            })
             .child(div().text_color(t.secondary).child(time))
             .child(div().flex_1())
             .child(self.button("player-audio", IconName::AudioLines, cx, |this, _, cx| this.toggle(List::Audio, cx)))

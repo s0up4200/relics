@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    Render, RenderImage, ScrollStrategy, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement, Render, RenderImage, ScrollStrategy, StatefulInteractiveElement as _, Styled, Subscription, Task,
     UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
@@ -14,8 +14,10 @@ use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::browse::Paging;
 use crate::click::Clickable as _;
+use crate::filter_panel::bar_pill;
 use crate::home::{Open, Play, card};
 use crate::keys::Key;
+use crate::player::start_shuffle;
 
 pub const POSTER_WIDTH: f32 = 150.;
 pub const POSTER_HEIGHT: f32 = 225.;
@@ -297,10 +299,20 @@ impl Render for Grid {
 }
 
 /// A page with a title and the grid of one source: the Watchlist, the History, the full list of a row
-/// ("View all"), or the Items of a collection.
+/// ("View all"), or the Items of a collection. A collection page has a Shuffle pill above the grid.
 pub struct GridPage {
+    client: Arc<Client>,
     title: String,
     grid: Entity<Grid>,
+    /// The id of the collection, which a Shuffle shuffles. `None` on a page with no Shuffle.
+    collection: Option<String>,
+    /// The Shuffle pill has the keyboard focus.
+    in_bar: bool,
+    /// The page has the keyboard focus.
+    active: bool,
+    /// Why the last Shuffle failed.
+    shuffle_error: Option<String>,
+    _shuffle: Task<()>,
     _events: Vec<Subscription>,
 }
 
@@ -315,24 +327,77 @@ impl GridPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let grid = cx.new(|cx| Grid::new(client, source, window, cx));
+        let source = source.into();
+        let collection = match &source {
+            Source::Collection { id, .. } => Some(id.clone()),
+            Source::Query(_) => None,
+        };
+        let grid = cx.new(|cx| Grid::new(client.clone(), source, window, cx));
         let events = vec![
             cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
             cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),
         ];
-        Self { title, grid, _events: events }
+        Self {
+            client,
+            title,
+            grid,
+            collection,
+            in_bar: false,
+            active: false,
+            shuffle_error: None,
+            _shuffle: Task::ready(()),
+            _events: events,
+        }
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        self.grid.update(cx, |grid, cx| {
-            grid.active = active;
+        self.active = active;
+        self.sync(cx);
+    }
+
+    /// Gives the focus ring to the Shuffle pill or to the grid.
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        let grid = self.active && !self.in_bar;
+        self.grid.update(cx, |g, cx| {
+            g.active = grid;
             cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn shuffle(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.collection.clone() else {
+            return;
+        };
+        self.shuffle_error = None;
+        self._shuffle = start_shuffle(self.client.clone(), "library_collection", id, cx, |this, err| {
+            this.shuffle_error = Some(err)
         });
     }
 
-    /// Handles a key. Returns false when the key leaves the grid or the grid does not use it.
+    /// Handles a key. Returns false when the key leaves the page or the page does not use it. Up from the top
+    /// row of the grid goes to the Shuffle pill, and Down from it goes back.
     pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
-        matches!(self.grid.update(cx, |grid, cx| grid.key(key, cx)), Move::To(_))
+        if self.in_bar {
+            match key {
+                Key::Down => {
+                    self.in_bar = false;
+                    self.sync(cx);
+                }
+                Key::Other("enter") => self.shuffle(cx),
+                _ => return false,
+            }
+            return true;
+        }
+        match self.grid.update(cx, |grid, cx| grid.key(key, cx)) {
+            Move::To(_) => true,
+            Move::OutTop if self.collection.is_some() => {
+                self.in_bar = true;
+                self.sync(cx);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -346,6 +411,24 @@ impl Render for GridPage {
             div().size_full().px(px(40.)).child(self.grid.clone()).into_any_element()
         };
         let count = grid.total().map(|total| format!("{total} titles"));
+        let shuffle = self.collection.as_ref().map(|_| {
+            div()
+                .px(px(40.))
+                .pb(px(18.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(bar_pill("grid-shuffle", "Shuffle".into(), false, self.active && self.in_bar, &t).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.in_bar = true;
+                        this.sync(cx);
+                        this.shuffle(cx);
+                    }),
+                ))
+                .children(
+                    self.shuffle_error.clone().map(|err| div().text_size(px(13.)).text_color(t.danger).child(err)),
+                )
+        });
         div()
             .size_full()
             .flex()
@@ -369,7 +452,21 @@ impl Render for GridPage {
                         count.map(|count| div().pb(px(6.)).text_size(px(13.)).text_color(t.secondary).child(count)),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(content))
+            .children(shuffle)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    // A click in the grid moves the focus from the Shuffle pill to the grid.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.in_bar = false;
+                            this.sync(cx);
+                        }),
+                    )
+                    .child(content),
+            )
     }
 }
 

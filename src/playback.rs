@@ -112,6 +112,9 @@ pub enum Input {
     Action,
     /// The Item has a next episode.
     NextEpisode,
+    /// The Item is a pick of a server shuffle with a next pick. The next pick plays at the end, also when the Server
+    /// settings do not auto-play the next episode.
+    Shuffle,
     /// The Item has a previous episode.
     PreviousEpisode,
     /// mpv ended a seek at this player position, or started the file there.
@@ -126,7 +129,7 @@ pub enum Input {
     SeekBy(f64),
     /// MPRIS SetPosition: go to this player position.
     SetPosition(f64),
-    /// MPRIS Next.
+    /// MPRIS Next, or Skip in the Player view.
     Next,
     /// MPRIS Previous.
     Previous,
@@ -236,6 +239,8 @@ pub struct Session {
     resolved: Vec<usize>,
     prompt: Option<Prompt>,
     has_next: bool,
+    /// The next Item is the next pick of a shuffle.
+    shuffle: bool,
     has_previous: bool,
     /// The headers for the next load.
     access: Option<Access>,
@@ -316,6 +321,7 @@ impl Session {
             resolved: Vec::new(),
             prompt: None,
             has_next: false,
+            shuffle: false,
             has_previous: false,
             access: None,
             mpv_expires: None,
@@ -475,6 +481,10 @@ impl Session {
                 self.has_next = true;
                 Vec::new()
             }
+            Input::Shuffle => {
+                (self.has_next, self.shuffle) = (true, true);
+                Vec::new()
+            }
             Input::PreviousEpisode => {
                 self.has_previous = true;
                 Vec::new()
@@ -500,7 +510,7 @@ impl Session {
             }
             Input::EndOfFile => {
                 let (position, normal) = self.end_position();
-                if normal && self.has_next && self.settings.auto_play_next {
+                if normal && self.auto_next() {
                     self.play_next(position)
                 } else if normal {
                     self.finish(position, true)
@@ -786,10 +796,11 @@ impl Session {
                 }
             },
             MarkerKind::Credits if to_end && self.has_next => {
-                if self.settings.auto_skip_credits && self.settings.auto_play_next {
+                if self.settings.auto_skip_credits && self.auto_next() {
                     commands.extend(self.play_next(self.source_position()));
                 } else {
-                    commands.push(self.show("Next episode", Action::Next, false, now));
+                    let label = if self.shuffle { "Next in shuffle" } else { "Next episode" };
+                    commands.push(self.show(label, Action::Next, false, now));
                 }
             }
             MarkerKind::Credits if !to_end && self.settings.auto_skip_credits => {
@@ -822,6 +833,12 @@ impl Session {
     fn show(&mut self, label: &str, action: Action, stays: bool, now: SystemTime) -> Command {
         self.prompt = Some(Prompt { action, until: now + PROMPT_TIME, stays });
         Command::ShowPrompt(label.into())
+    }
+
+    /// The next Item plays at the end: the next pick of a shuffle, or the next episode when the Server settings
+    /// auto-play it.
+    fn auto_next(&self) -> bool {
+        self.has_next && (self.shuffle || self.settings.auto_play_next)
     }
 
     /// Ends the session at `position` and plays the next episode in the same Player view or Player window.

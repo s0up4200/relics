@@ -1,7 +1,7 @@
 //! The Library page. The Recommended tab shows the rows of the Library like Home, and the Collections tab its
-//! collections. The Library tab shows the poster grid, with a bar of pills (sort, filters, A to Z, and
-//! Series/Episodes on a Shows library) and a chip for each active filter. The page keeps its sort and filters
-//! while the app runs.
+//! collections. The Library tab shows the poster grid, with a bar of pills (sort, filters, A to Z,
+//! Series/Episodes on a Shows library, and Shuffle) and a chip for each active filter. The page keeps its sort
+//! and filters while the app runs.
 
 use std::sync::Arc;
 
@@ -21,6 +21,7 @@ use crate::filter_panel::{Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
+use crate::player::start_shuffle;
 
 /// A Shows library: its grid lists series, or episodes in Episodes mode.
 pub fn is_shows(library_type: &str) -> bool {
@@ -42,6 +43,7 @@ enum Control {
     Filter,
     Letter,
     Mode,
+    Shuffle,
     Chip(Choice),
     ClearAll,
 }
@@ -67,6 +69,9 @@ pub struct LibraryPage {
     menu: Option<Panel>,
     /// The page has the keyboard focus.
     active: bool,
+    /// Why the last Shuffle failed.
+    shuffle_error: Option<String>,
+    _shuffle: Task<()>,
     _facets: Task<()>,
     _events: Vec<Subscription>,
 }
@@ -120,6 +125,8 @@ impl LibraryPage {
             bar: 3,
             menu: None,
             active: false,
+            shuffle_error: None,
+            _shuffle: Task::ready(()),
             _facets: facets,
             _events: events,
         }
@@ -163,6 +170,7 @@ impl LibraryPage {
             if self.shows {
                 controls.push(Control::Mode);
             }
+            controls.push(Control::Shuffle);
             let chips = self.browse.chips();
             if !chips.is_empty() {
                 controls.extend(chips.into_iter().map(Control::Chip));
@@ -208,6 +216,11 @@ impl LibraryPage {
             Control::Mode => {
                 self.browse.episodes = !self.browse.episodes;
                 self.apply(cx);
+            }
+            Control::Shuffle => {
+                self.shuffle_error = None;
+                let (client, id) = (self.client.clone(), self.library.id.to_string());
+                self._shuffle = start_shuffle(client, "library", id, cx, |this, err| this.shuffle_error = Some(err));
             }
             Control::Chip(chip) => {
                 self.browse.remove(&chip);
@@ -375,6 +388,7 @@ impl LibraryPage {
             },
             Control::Mode => ((if b.episodes { "Episodes" } else { "Series" }).into(), false),
             Control::Chip(chip) => (format!("{} ×", chip.chip_label()).into(), false),
+            Control::Shuffle => ("Shuffle".into(), false),
             Control::ClearAll => ("Clear all".into(), false),
         };
         self.pill(index, label, on, cx)
@@ -418,6 +432,9 @@ impl Render for LibraryPage {
                     .items_center()
                     .gap(px(8.))
                     .children(pills)
+                    .children(
+                        self.shuffle_error.clone().map(|err| div().text_size(px(13.)).text_color(t.danger).child(err)),
+                    )
                     .child(div().flex_1())
                     .children(count.map(|count| div().text_size(px(13.)).text_color(t.secondary).child(count))),
             );

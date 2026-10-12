@@ -16,6 +16,7 @@ use mpris_server::PlaybackStatus;
 
 use crate::api::types::Marker;
 use crate::api::{Client, wire};
+use crate::home::Play;
 use crate::mpris::{self, Track};
 use crate::playback::tracks::{self, Carry};
 use crate::playback::{Command, Input, Session};
@@ -39,6 +40,8 @@ pub struct PlayItem {
     pub file_id: Option<String>,
     /// Start at this source position, for a version switch. It wins over `start_over`.
     start: Option<f64>,
+    /// The id of the server shuffle that picked the Item, and whether the shuffle has a next pick.
+    shuffle: Option<(String, bool)>,
 }
 
 impl From<&wire::CatalogItem> for PlayItem {
@@ -54,6 +57,7 @@ impl From<&wire::CatalogItem> for PlayItem {
             start_over: false,
             file_id: None,
             start: None,
+            shuffle: None,
         }
     }
 }
@@ -70,6 +74,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 start_over: false,
                 file_id: None,
                 start: None,
+                shuffle: None,
             },
             _ => Self {
                 content_id: item.content_id.clone(),
@@ -79,6 +84,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 start_over: false,
                 file_id: None,
                 start: None,
+                shuffle: None,
             },
         }
     }
@@ -94,13 +100,42 @@ impl PlayItem {
             start_over: false,
             file_id: None,
             start: None,
+            shuffle: None,
         }
+    }
+
+    /// The current pick of a shuffle. A pick plays from the beginning, as in the web app.
+    pub fn shuffled(shuffle: &wire::Shuffle) -> Self {
+        let next = shuffle.next.content_id != shuffle.current.content_id;
+        Self { start_over: true, shuffle: Some((shuffle.id.to_string(), next)), ..Self::from(&shuffle.current) }
     }
 
     /// Where playback starts: `None` resumes at the saved position.
     pub fn start_position(&self) -> Option<f64> {
         self.start.or(self.start_over.then_some(0.))
     }
+}
+
+/// Starts a server shuffle of the scope `kind` and `id` (a Library, or a collection of a Library) and emits
+/// `Play` with its first pick. A failure gives the text for the user to `failed`.
+pub fn start_shuffle<T: EventEmitter<Play>>(
+    client: Arc<Client>,
+    kind: &'static str,
+    id: String,
+    cx: &mut Context<T>,
+    failed: fn(&mut T, String),
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let shuffle = client.start_shuffle(kind, &id, artwork::Rung::Small).await;
+        this.update(cx, |this, cx| {
+            match shuffle {
+                Ok(shuffle) => cx.emit(Play(PlayItem::shuffled(&shuffle))),
+                Err(err) => failed(this, format!("Cannot shuffle: {err}")),
+            }
+            cx.notify();
+        })
+        .ok();
+    })
 }
 
 /// The width of the poster that MPRIS shows, in pixels.
@@ -239,7 +274,16 @@ impl PlayerWindow {
         // A new Item drops these tasks, so an older answer never reaches the new session.
         self.next = None;
         self.previous = None;
-        self.finding = self.find_episodes(&client, &item, cx);
+        // A shuffle replaces the series order: Next plays the next pick, and Previous does nothing.
+        self.finding = match item.shuffle {
+            Some((_, next)) => {
+                if next {
+                    self.step(Input::Shuffle, cx);
+                }
+                None
+            }
+            None => self.find_episodes(&client, &item, cx),
+        };
         (self.track, self.art, self.duration) = (None, None, None);
         self.describing = Some(self.describe(client.clone(), item.content_id.clone(), cx));
         let start = item.start_position();
@@ -566,8 +610,13 @@ impl PlayerWindow {
                 }
             }
             Command::PlayNext => {
-                if let Some(next) = self.next.take() {
-                    self.play(client, next, cx);
+                match self.item.as_ref().and_then(|i| Some((i.shuffle.clone()?.0, i.content_id.clone()))) {
+                    Some((id, from)) => self.advance(client, id, from, cx),
+                    None => {
+                        if let Some(next) = self.next.take() {
+                            self.play(client, next, cx);
+                        }
+                    }
                 }
             }
             Command::PlayPrevious => {
@@ -597,6 +646,22 @@ impl PlayerWindow {
         }
     }
 
+    /// Moves the shuffle `id` past the Item `from`, which ended, and plays the new pick in the same Player view.
+    /// Back while the call runs drops it. A failed call closes the player.
+    fn advance(&mut self, client: Arc<Client>, id: String, from: String, cx: &mut Context<Self>) {
+        self.starting = Some(cx.spawn(async move |this, cx| {
+            let shuffle = client.advance_shuffle(&id, &from, artwork::Rung::Small).await;
+            this.update(cx, |this, cx| match shuffle {
+                Ok(shuffle) => this.play(client, PlayItem::shuffled(&shuffle), cx),
+                Err(err) => {
+                    cx.emit(PlaybackError(format!("Cannot continue the shuffle: {err}")));
+                    this.close_mpv(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
     /// Runs `request` and gives its input to the session, unless a new Item started meanwhile. A new Item does
     /// not drop the task: a dropped refresh can lose the new refresh token.
     fn answer(&self, cx: &mut Context<Self>, request: impl Future<Output = Input> + 'static) {
@@ -611,6 +676,11 @@ impl PlayerWindow {
             .ok();
         })
         .detach();
+    }
+
+    /// The Item has a next episode or a next shuffle pick, so Skip works.
+    pub fn can_go_next(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::can_go_next)
     }
 
     /// The mpv handle is open.
@@ -863,5 +933,26 @@ mod tests {
         );
         assert_eq!(item.start_position(), None, "the server resumes at the saved position");
         assert_eq!(PlayItem { start_over: true, ..item }.start_position(), Some(0.));
+    }
+
+    fn shuffle(next: usize) -> wire::Shuffle {
+        let page: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/query_catalog_items_ok.json")).unwrap();
+        serde_json::from_value(serde_json::json!({
+            "id": "s1", "created_at": "2026-01-01T00:00:00.000Z", "updated_at": "2026-01-01T00:00:00.000Z",
+            "scope": {"kind": "library", "id": "1", "title": "Movies"},
+            "current": page["items"][0], "next": page["items"][next],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_shuffle_pick_plays_from_the_beginning_and_knows_if_a_next_pick_exists() {
+        let item = PlayItem::shuffled(&shuffle(1));
+        assert_eq!(item.content_id, shuffle(1).current.content_id);
+        assert_eq!(item.start_position(), Some(0.), "a pick does not resume");
+        assert_eq!(item.shuffle, Some(("s1".into(), true)));
+        let only = PlayItem::shuffled(&shuffle(0));
+        assert_eq!(only.shuffle, Some(("s1".into(), false)), "a scope with one Item has no next pick");
     }
 }

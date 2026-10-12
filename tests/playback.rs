@@ -426,6 +426,34 @@ fn a_normal_end_plays_the_next_episode_when_autoplay_is_on() {
     assert_eq!(session.step(Input::EndOfFile, at(2)), vec![Command::Refresh], "an Early end");
 }
 
+// Shuffle (#62).
+
+#[test]
+fn a_shuffled_item_plays_the_next_pick_at_its_end_also_with_autoplay_off() {
+    let settings = ServerSettings { auto_play_next: false, ..ServerSettings::default() };
+    let mut session = with_markers(settings, vec![]);
+    session.step(Input::Shuffle, at(0));
+    session.step(Input::Position(998.0), at(1));
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![stop(1100.0, 1), Command::PlayNext]);
+}
+
+#[test]
+fn skip_ends_the_shuffled_item_at_its_position_and_plays_the_next_pick() {
+    let mut session = with_markers(ServerSettings::default(), vec![]);
+    session.step(Input::Shuffle, at(0));
+    session.step(Input::Position(300.0), at(1));
+    assert_eq!(session.step(Input::Next, at(2)), vec![stop(400.0, 1), Command::PlayNext]);
+    assert_eq!(session.step(Input::Tick, at(30)), vec![], "the session ended");
+}
+
+#[test]
+fn credits_to_the_end_of_a_shuffled_item_offer_the_next_pick() {
+    let mut session = end_credits(ServerSettings::default());
+    session.step(Input::Shuffle, at(0));
+    assert_eq!(session.step(Input::Position(950.0), at(1)), vec![prompt("Next in shuffle")]);
+    assert_eq!(session.step(Input::Action, at(2)), vec![prompt(""), stop(1050.0, 1), Command::PlayNext]);
+}
+
 #[test]
 fn the_end_of_a_session_hides_its_prompt() {
     let mut session = intro_with(IntroSkipMode::Ask);
