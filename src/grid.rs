@@ -62,10 +62,24 @@ pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
     }
 }
 
+/// Where the Items of a grid come from.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A catalog query, with the cursor of the first page.
+    Query(Box<wire::CatalogQuery>),
+    /// The Items of a collection of a Library.
+    Collection { library_id: String, id: String },
+}
+
+impl From<wire::CatalogQuery> for Source {
+    fn from(query: wire::CatalogQuery) -> Self {
+        Source::Query(Box::new(query))
+    }
+}
+
 pub struct Grid {
     client: Arc<Client>,
-    /// The query of the first page.
-    query: wire::CatalogQuery,
+    source: Source,
     paging: Paging,
     thumbs: Vec<Option<Arc<RenderImage>>>,
     /// The focused card.
@@ -85,11 +99,11 @@ impl EventEmitter<Play> for Grid {}
 impl EventEmitter<Open> for Grid {}
 
 impl Grid {
-    pub fn new(client: Arc<Client>, query: wire::CatalogQuery, window: &Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Arc<Client>, source: impl Into<Source>, window: &Window, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.drop_thumbs(cx)).detach();
         let mut grid = Self {
             client,
-            query,
+            source: source.into(),
             paging: Paging::default(),
             thumbs: Vec::new(),
             focus: 0,
@@ -108,7 +122,7 @@ impl Grid {
     /// Starts again with a new query, for example after a filter change.
     pub fn set_query(&mut self, query: wire::CatalogQuery, cx: &mut Context<Self>) {
         self.drop_thumbs(cx);
-        self.query = query;
+        self.source = query.into();
         self.paging = Paging::default();
         self.focus = 0;
         self.loading = None;
@@ -129,29 +143,37 @@ impl Grid {
 
     /// The query loaded, and nothing matches it.
     pub fn is_empty(&self) -> bool {
-        self.paging.items.is_empty() && self.paging.next_query(&self.query).is_none()
+        self.paging.items.is_empty() && self.paging.next_cursor().is_none()
     }
 
     /// Loads the next page, unless a load runs or the last page is in.
     fn load_more(&mut self, cx: &mut Context<Self>) {
-        let Some(query) = self.paging.next_query(&self.query) else {
+        let Some(cursor) = self.paging.next_cursor() else {
             return;
         };
         if self.loading.is_some() {
             return;
         }
         self.error = None;
-        let (client, image_size) = (self.client.clone(), self.image_size);
+        let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
         self.loading = Some(cx.spawn(async move |this, cx| {
-            let result = client.query_catalog(&query, image_size).await;
+            let result = match source {
+                Source::Query(query) => {
+                    let query = wire::CatalogQuery { cursor, ..*query };
+                    client.query_catalog(&query, image_size).await.map(|p| (p.items, Some(p.total), p.page))
+                }
+                Source::Collection { library_id, id } => client
+                    .library_collection_items(&library_id, &id, cursor.as_deref())
+                    .await
+                    .map(|p| (p.items, None, p.page)),
+            };
             this.update(cx, |this, cx| {
                 this.loading = None;
                 match result {
-                    Ok(page) => {
-                        this.thumbs.extend(
-                            page.items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)),
-                        );
-                        this.paging.add(page);
+                    Ok((items, total, page)) => {
+                        this.thumbs
+                            .extend(items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)));
+                        this.paging.add(items, total, page);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
                     // The Library window shows Offline or the sign-in screen. The grid keeps what it shows.
@@ -274,8 +296,8 @@ impl Render for Grid {
     }
 }
 
-/// A page with a title and the grid of one catalog query: the titles of a Person, the Watchlist, the History,
-/// or the full list of a row ("View all").
+/// A page with a title and the grid of one source: the Watchlist, the History, the full list of a row
+/// ("View all"), or the Items of a collection.
 pub struct GridPage {
     title: String,
     grid: Entity<Grid>,
@@ -289,11 +311,11 @@ impl GridPage {
     pub fn new(
         client: Arc<Client>,
         title: String,
-        query: wire::CatalogQuery,
+        source: impl Into<Source>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let grid = cx.new(|cx| Grid::new(client, query, window, cx));
+        let grid = cx.new(|cx| Grid::new(client, source, window, cx));
         let events = vec![
             cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
             cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),

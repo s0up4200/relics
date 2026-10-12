@@ -35,6 +35,10 @@ _Avoid_: media, title, video
 A collection of Items of one media type on a Silo server, for example Movies or Shows. The user opens each one from the sidebar.
 _Avoid_: Collection (Silo uses Collection for a curated group of Items)
 
+**Collection**:
+A curated group of Items on a Silo server. An administrator makes it, or a Profile makes a personal one. A Library lists its collections in its Collections tab, in collection groups. The Collections page lists the collections of the Server for each Library. The app only browses collections: it does not make, change or order them.
+_Avoid_: Library, list, playlist
+
 **Home section**:
 One row on the home page. The server defines it, with a type, a title and an order.
 _Avoid_: Shelf, carousel, rail

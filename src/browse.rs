@@ -460,15 +460,18 @@ pub struct Paging {
 }
 
 impl Paging {
-    /// The query of the next page, or `None` after the last page.
-    pub fn next_query(&self, first: &wire::CatalogQuery) -> Option<wire::CatalogQuery> {
-        (!self.done).then(|| wire::CatalogQuery { cursor: self.next_cursor.clone(), ..first.clone() })
+    /// The cursor of the next page (`Some(None)` for the first page), or `None` after the last page.
+    pub fn next_cursor(&self) -> Option<Option<String>> {
+        (!self.done).then(|| self.next_cursor.clone())
     }
 
-    pub fn add(&mut self, page: wire::CatalogBrowseCollection) {
-        self.items.extend(page.items);
-        self.total.get_or_insert(page.total);
-        self.next_cursor = page.page.filter(|p| p.has_more).and_then(|p| p.next_cursor);
+    /// Adds a page. `total` is the number of Items in the whole result, when the server sends it.
+    pub fn add(&mut self, items: Vec<wire::CatalogItem>, total: Option<i64>, page: Option<wire::PageInfo>) {
+        self.items.extend(items);
+        if self.total.is_none() {
+            self.total = total;
+        }
+        self.next_cursor = page.filter(|p| p.has_more).and_then(|p| p.next_cursor);
         self.done = self.next_cursor.is_none();
     }
 }

@@ -1,6 +1,7 @@
-//! The Library page. The Recommended tab shows the rows of the Library like Home. The Library tab shows the
-//! poster grid, with a bar of pills (sort, filters, A to Z, and Series/Episodes on a Shows library) and a chip
-//! for each active filter. The page keeps its sort and filters while the app runs.
+//! The Library page. The Recommended tab shows the rows of the Library like Home, and the Collections tab its
+//! collections. The Library tab shows the poster grid, with a bar of pills (sort, filters, A to Z, and
+//! Series/Episodes on a Shows library) and a chip for each active filter. The page keeps its sort and filters
+//! while the app runs.
 
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
 use crate::click::Clickable as _;
+use crate::collections::{Collections, OpenCollection, Scope};
 use crate::filter_panel::{Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
@@ -29,6 +31,7 @@ pub fn is_shows(library_type: &str) -> bool {
 enum Tab {
     Recommended,
     Library,
+    Collections,
 }
 
 /// A control of the bar, in the order that h and l move through them.
@@ -50,6 +53,8 @@ pub struct LibraryPage {
     tab: Tab,
     /// The rows of the Recommended tab, made when the tab opens first.
     recommended: Option<Entity<Home>>,
+    /// The collection rows of the Collections tab, made when the tab opens first.
+    collections: Option<Entity<Collections>>,
     grid: Entity<Grid>,
     browse: Browse,
     /// The filter values of the Library, for the filter panel.
@@ -69,6 +74,7 @@ pub struct LibraryPage {
 impl EventEmitter<Play> for LibraryPage {}
 impl EventEmitter<Open> for LibraryPage {}
 impl EventEmitter<OpenGrid> for LibraryPage {}
+impl EventEmitter<OpenCollection> for LibraryPage {}
 
 impl LibraryPage {
     pub fn new(client: Arc<Client>, library: wire::UserLibrary, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -106,11 +112,12 @@ impl LibraryPage {
             shows,
             tab: Tab::Library,
             recommended: None,
+            collections: None,
             grid,
             browse,
             facets: Facets::default(),
             in_bar: false,
-            bar: 2,
+            bar: 3,
             menu: None,
             active: false,
             _facets: facets,
@@ -135,6 +142,12 @@ impl LibraryPage {
                 cx.notify();
             });
         }
+        if let Some(collections) = &self.collections {
+            collections.update(cx, |collections, cx| {
+                collections.active = content && tab == Tab::Collections;
+                cx.notify();
+            });
+        }
         self.grid.update(cx, |grid, cx| {
             grid.active = content && tab == Tab::Library;
             cx.notify();
@@ -143,7 +156,8 @@ impl LibraryPage {
     }
 
     fn controls(&self) -> Vec<Control> {
-        let mut controls = vec![Control::Tab(Tab::Recommended), Control::Tab(Tab::Library)];
+        let mut controls =
+            vec![Control::Tab(Tab::Recommended), Control::Tab(Tab::Library), Control::Tab(Tab::Collections)];
         if self.tab == Tab::Library {
             controls.extend([Control::Sort, Control::Filter, Control::Letter]);
             if self.shows {
@@ -174,6 +188,12 @@ impl LibraryPage {
             self._events.push(cx.subscribe(&home, |_, _, Open(item), cx| cx.emit(Open(item.clone()))));
             self._events.push(cx.subscribe(&home, |_, _, open: &OpenGrid, cx| cx.emit(open.clone())));
             self.recommended = Some(home);
+        }
+        if tab == Tab::Collections && self.collections.is_none() {
+            let scope = Scope::Library(self.library.id.to_string());
+            let collections = cx.new(|cx| Collections::new(self.client.clone(), scope, cx));
+            self._events.push(cx.subscribe(&collections, |_, _, open: &OpenCollection, cx| cx.emit(open.clone())));
+            self.collections = Some(collections);
         }
         self.sync(cx);
     }
@@ -254,6 +274,13 @@ impl LibraryPage {
                 }
                 key == Key::Up
             }
+            Tab::Collections => {
+                let collections = self.collections.clone();
+                if collections.is_some_and(|c| c.update(cx, |c, cx| c.key(key, cx))) {
+                    return true;
+                }
+                key == Key::Up
+            }
             Tab::Library => match self.grid.update(cx, |grid, cx| grid.key(key, cx)) {
                 Move::OutTop => true,
                 Move::OutLeft => return false,
@@ -272,8 +299,10 @@ impl LibraryPage {
         };
         if into_bar {
             self.in_bar = true;
-            if self.tab == Tab::Recommended {
-                self.bar = 0;
+            match self.tab {
+                Tab::Recommended => self.bar = 0,
+                Tab::Collections => self.bar = 2,
+                Tab::Library => {}
             }
             self.sync(cx);
         }
@@ -299,7 +328,11 @@ impl LibraryPage {
         let (label, on): (SharedString, bool) = match control {
             &Control::Tab(tab) => {
                 let focused = self.active && self.in_bar && self.bar == index;
-                let label = if tab == Tab::Recommended { "Recommended" } else { "Library" };
+                let label = match tab {
+                    Tab::Recommended => "Recommended",
+                    Tab::Library => "Library",
+                    Tab::Collections => "Collections",
+                };
                 return div()
                     .id(("library-tab", index))
                     .clickable()
@@ -398,6 +431,10 @@ impl Render for LibraryPage {
         let content = match (self.tab, &self.recommended) {
             (Tab::Recommended, Some(home)) => home.clone().into_any_element(),
             (Tab::Recommended, None) => div().into_any_element(),
+            (Tab::Collections, _) => match &self.collections {
+                Some(collections) => collections.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             (Tab::Library, _) if empty && self.browse.chips().is_empty() => {
                 div().px(px(40.)).text_color(t.secondary).child("This Library is empty.").into_any_element()
             }

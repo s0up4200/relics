@@ -397,7 +397,13 @@ pub(crate) fn progress(position: Option<f64>, duration: Option<f64>) -> Option<f
 }
 
 /// The artwork of a card of `size` (width, height), with the accent border when it has the focus.
-fn art(url: Option<String>, thumb: Option<Arc<RenderImage>>, size: (f32, f32), focused: bool, t: &Theme) -> gpui::Div {
+pub(crate) fn art(
+    url: Option<String>,
+    thumb: Option<Arc<RenderImage>>,
+    size: (f32, f32),
+    focused: bool,
+    t: &Theme,
+) -> gpui::Div {
     div()
         .relative()
         .w(px(size.0))

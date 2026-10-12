@@ -436,13 +436,14 @@ fn page(titles: &[&str], next: Option<&str>) -> silo_omarchy::api::wire::Catalog
 
 #[test]
 fn the_grid_pages_with_the_cursor_until_the_last_page() {
-    let query = Browse::default().query("1", false);
+    let add =
+        |paging: &mut Paging, page: wire::CatalogBrowseCollection| paging.add(page.items, Some(page.total), page.page);
     let mut paging = Paging::default();
-    assert_eq!(paging.next_query(&query).unwrap().cursor, None, "the first page has no cursor");
-    paging.add(page(&["a", "b"], Some("c2")));
-    assert_eq!(paging.next_query(&query).unwrap().cursor.as_deref(), Some("c2"));
-    paging.add(page(&["c"], None));
-    assert!(paging.next_query(&query).is_none(), "the last page ends the paging");
+    assert_eq!(paging.next_cursor(), Some(None), "the first page has no cursor");
+    add(&mut paging, page(&["a", "b"], Some("c2")));
+    assert_eq!(paging.next_cursor(), Some(Some("c2".into())));
+    add(&mut paging, page(&["c"], None));
+    assert_eq!(paging.next_cursor(), None, "the last page ends the paging");
     let titles: Vec<_> = paging.items.iter().map(|i| i.title.as_str()).collect();
     assert_eq!(titles, ["a", "b", "c"]);
     assert_eq!(paging.total, Some(9));

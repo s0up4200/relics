@@ -3,6 +3,7 @@ pub mod api;
 pub mod artwork;
 pub mod browse;
 pub mod click;
+pub mod collections;
 pub mod detail;
 pub mod filter_panel;
 pub mod grid;
