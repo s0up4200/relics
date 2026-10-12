@@ -24,13 +24,13 @@ fn a_series_lists_its_seasons_and_the_episodes_of_the_chosen_season() {
         "catalog/series/series:severance/seasons?include_artwork=false" => {
             ok("list_series_seasons_without_artwork.json")
         }
-        "catalog/series/series:severance/seasons/1/episodes" => ok("list_season_episodes_ok.json"),
+        "catalog/series/series:severance/seasons/1/episodes?image_size=medium" => ok("list_season_episodes_ok.json"),
         _ => not_found(),
     });
     let seasons = block_on(client.seasons("series:severance")).unwrap();
     assert_eq!(seasons.len(), 1);
     assert_eq!((seasons[0].season_number, seasons[0].title.as_str()), (1, "Season 1"));
-    let episodes = block_on(client.season_episodes("series:severance", 1)).unwrap();
+    let episodes = block_on(client.season_episodes("series:severance", 1, Rung::Medium)).unwrap();
     assert_eq!(episodes[0].title, "Good News About Hell");
 }
 

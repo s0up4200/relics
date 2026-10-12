@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::executor::block_on;
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response};
+use image::GenericImageView as _;
 use silo_omarchy::artwork::{self, Rung};
 
 fn empty_dir(name: &str) -> PathBuf {
@@ -113,20 +114,20 @@ fn prune_deletes_the_least_recently_used_files_and_left_over_temp_files() {
 }
 
 #[test]
-fn home_uses_small_at_scale_1_and_medium_above_it() {
-    assert_eq!(Rung::home(1.0), Rung::Small);
-    assert_eq!(Rung::home(1.25), Rung::Medium);
-    assert_eq!(Rung::home(2.0), Rung::Medium);
-    assert_eq!(Rung::home(3.0), Rung::Medium);
-    assert!(Rung::Medium > Rung::Small && Rung::Large > Rung::Medium, "a smaller scale keeps the loaded list");
+fn each_surface_gets_the_smallest_rung_at_least_as_wide_as_its_pixels() {
+    use artwork::Kind::{Backdrop, Poster, Profile, Still};
+    // The widths come from the server docs: poster and still 300/500/780, backdrop 300/1920/1920, profile 300/500/500.
+    assert_eq!(Rung::fit(Poster, 150.0, 1.0), Rung::Small);
+    assert_eq!(Rung::fit(Poster, 150.0, 2.0), Rung::Small, "300 px fits exactly");
+    assert_eq!(Rung::fit(Poster, 150.0, 3.0), Rung::Medium);
+    assert_eq!(Rung::fit(Poster, 512.0, 1.0), Rung::Large);
+    assert_eq!(Rung::fit(Poster, 2000.0, 1.0), Rung::Large, "nothing is wider than large");
+    assert_eq!(Rung::fit(Still, 290.0, 2.0), Rung::Large);
+    assert_eq!(Rung::fit(Backdrop, 290.0, 1.0), Rung::Small);
+    assert_eq!(Rung::fit(Backdrop, 290.0, 2.0), Rung::Medium, "medium is as wide as large");
+    assert_eq!(Rung::fit(Profile, 200.0, 2.0), Rung::Medium);
+    assert!(Rung::Medium > Rung::Small && Rung::Large > Rung::Medium, "a request takes the largest rung it needs");
     assert_eq!(Rung::Medium.to_string(), "medium");
-}
-
-#[test]
-fn other_cards_follow_the_card_width_times_the_scale() {
-    assert_eq!(Rung::card(150.0, 1.0), Rung::Small);
-    assert_eq!(Rung::card(150.0, 3.0), Rung::Medium);
-    assert_eq!(Rung::card(512.0, 1.0), Rung::Large);
 }
 
 #[test]
@@ -183,4 +184,51 @@ fn only_a_revision_between_the_width_and_the_extension_is_revisioned() {
     assert!(!artwork::is_revisioned("https://silo.test/api/v2/artwork/poster/abc/w500.webp?exp=1&sig=a"));
     assert!(!artwork::is_revisioned("https://s3.example.test/poster.r1.jpg"));
     assert!(!artwork::is_revisioned("https://s3.example.test/v1.2/poster.jpg"));
+}
+
+/// A PNG of `width` x `height` pixels.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbImage::new(width, height).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+#[test]
+fn an_image_much_wider_than_its_target_shrinks_to_the_target_width() {
+    let small = artwork::shrink(&png(600, 900), 200).expect("600 px is 3 times 200 px");
+    assert_eq!(image::load_from_memory(&small).unwrap().dimensions(), (200, 300), "the aspect ratio stays");
+    assert!(artwork::shrink(&png(600, 900), 500).is_none(), "600 px is near 500 px, so it stays");
+    assert!(artwork::shrink(b"not an image", 200).is_none());
+}
+
+/// The width and height of the image in a cache file. Cache files have no extension.
+fn dimensions(file: &std::path::Path) -> (u32, u32) {
+    image::ImageReader::open(file).unwrap().with_guessed_format().unwrap().into_dimensions().unwrap()
+}
+
+/// A fake artwork host that sends the same image for each request, and counts the requests.
+fn image_host(body: Vec<u8>) -> (Arc<dyn HttpClient>, Arc<Mutex<usize>>) {
+    let count = Arc::new(Mutex::new(0));
+    let log = count.clone();
+    let http = FakeHttpClient::create(move |_| {
+        *log.lock().unwrap() += 1;
+        let body = body.clone();
+        async move { Ok(Response::builder().status(200).body(AsyncBody::from(body)).unwrap()) }
+    });
+    (http, count)
+}
+
+#[test]
+fn a_shrunk_copy_stays_on_disk_for_each_target_width() {
+    let dir = empty_dir("shrunk");
+    let (http, count) = image_host(png(600, 900));
+    let (copy, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, 200)).unwrap();
+    assert_eq!(dimensions(&copy), (200, 300));
+    let resigned = REVISIONED.replace("exp=1&sig=a", "exp=2&sig=b");
+    assert_eq!(block_on(artwork::download_sized(&http, &dir, &resigned, 200)).unwrap(), (copy.clone(), 0));
+    assert_eq!(*count.lock().unwrap(), 1, "the later load uses the copy on disk");
+    let (other, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, 300)).unwrap();
+    assert_ne!(other, copy, "another target width has its own copy");
+    let (full, _) = block_on(artwork::download_sized(&http, &dir, REVISIONED, 500)).unwrap();
+    assert_eq!(dimensions(&full), (600, 900), "an image near the target stays as it is");
 }

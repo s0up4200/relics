@@ -199,7 +199,7 @@ impl Pages {
     fn open_item(&mut self, item: &wire::CatalogItem, window: &mut Window, cx: &mut Context<Self>) {
         let (id, season) = detail::target(item);
         let client = self.client.clone();
-        let page = cx.new(|cx| Detail::new(client, id, season, cx));
+        let page = cx.new(|cx| Detail::new(client, id, season, window, cx));
         cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
         cx.subscribe_in(&page, window, |this, _, person, window, cx| this.open_person(person, window, cx)).detach();
         self.open(Page::Detail(page), cx);

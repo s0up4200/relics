@@ -23,7 +23,7 @@ oo7 = { version = "=0.6.0", default-features = false, features = ["async-std", "
 uuid = { version = "1.28.0", features = ["v4"] }
 gethostname = "1.1.0"
 # Artwork cache. image, sha2 and base64 are already in Cargo.lock from gpui.
-image = { version = "0.25.10", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 sha2 = "0.10.9"
 base64 = "0.22.1"
 thumbhash = "=0.1.0"

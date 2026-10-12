@@ -4,14 +4,13 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, ImageSource, InteractiveElement as _, IntoElement,
-    ObjectFit, ParentElement, Render, RenderImage, Resource, ScrollHandle, StatefulInteractiveElement as _, Styled,
-    StyledImage as _, Subscription, Task, Window, div, img, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
+    RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, HomeSection, wire};
-use crate::artwork::{self, ArtworkCache, Rung};
+use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::keys::Key;
 
 /// The user pressed p on a card, or Play on the detail page.
@@ -51,8 +50,8 @@ pub struct Home {
     /// The decoded Thumbhash of each card, in the order of `sections`.
     thumbs: Vec<Vec<Option<Arc<RenderImage>>>>,
     artwork: Entity<ArtworkCache>,
-    /// The rung of the Artwork ladder of the loaded list.
-    image_size: Rung,
+    /// The window scale of the loaded list. Each section has the rung for its cards at this scale.
+    scale: f32,
     _loading: Task<()>,
     _scale: Subscription,
 }
@@ -90,12 +89,15 @@ pub fn move_focus(focus: Focus, key: Key, rows: &[usize]) -> Focus {
 
 impl Home {
     pub fn new(client: Arc<Client>, rows: Rows, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // A larger scale loads the list again only when the rung goes up.
+        // A larger scale loads the list again only when the rung of a section goes up.
         let scale = cx.observe_window_bounds(window, |this, window, cx| {
-            let size = Rung::home(window.scale_factor());
-            if size > this.image_size {
-                this.image_size = size;
-                this.load(cx);
+            let (old, new) = (this.scale, window.scale_factor());
+            if new > old {
+                this.scale = new;
+                let rung = |s: &HomeSection, scale| rung(&s.section_type, s.featured, scale);
+                if this.sections.iter().any(|s| rung(s, new) != rung(s, old)) {
+                    this.load(cx);
+                }
             }
         });
         cx.on_release(|this, cx| {
@@ -110,7 +112,7 @@ impl Home {
             sections: Vec::new(),
             thumbs: Vec::new(),
             artwork: artwork::global(cx),
-            image_size: Rung::home(window.scale_factor()),
+            scale: window.scale_factor(),
             status: Some("Loading…".into()),
             failed: false,
             focus: Focus::Outside,
@@ -124,14 +126,15 @@ impl Home {
         home
     }
 
-    /// Loads the Home sections, with artwork URLs for `image_size`.
+    /// Loads the Home sections, with the artwork URLs of each section in the rung for its cards.
     fn load(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let (image_size, rows) = (self.image_size, self.rows.clone());
+        let (scale, rows) = (self.scale, self.rows.clone());
         self._loading = cx.spawn(async move |this, cx| {
+            let size = |entry: &wire::SectionLayoutEntry| rung(&entry.section_type, entry.featured, scale);
             let result = match rows {
-                Rows::Home => client.home(image_size).await,
-                Rows::Library(id) => client.library_rows(&id, image_size).await,
+                Rows::Home => client.home(size).await,
+                Rows::Library(id) => client.library_rows(&id, size).await,
             };
             this.update(cx, |this, cx| {
                 match result {
@@ -211,12 +214,8 @@ impl Home {
 
     fn row(&self, index: usize, section: &HomeSection, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let wide = is_wide(section);
-        let (width, height) = match (section.featured, wide) {
-            (true, _) => (560., 300.),
-            (false, true) => (artwork::HOME_CARD_WIDTH, 163.),
-            (false, false) => (150., 225.),
-        };
+        let wide = is_wide(&section.section_type);
+        let (width, height) = card_size(&section.section_type, section.featured);
         let cards = section.items.iter().enumerate().map(|(col, item)| {
             let focused = self.active && self.focus == Focus::Card { row: index, col };
             let url = art_url(section, item).and_then(|url| self.client.server().url.join(url).ok());
@@ -231,7 +230,7 @@ impl Home {
                 .bg(t.surface)
                 .border_2()
                 .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .child(div().absolute().inset_0().child(artwork_image(url.map(String::from), thumb)));
+                .child(div().absolute().inset_0().child(artwork::image(url.map(String::from), thumb, width)));
             if section.featured {
                 art = art.child(
                     div().absolute().inset_0().flex().items_end().p(px(14.)).child(
@@ -320,7 +319,6 @@ impl Render for Home {
         let t = cx.omarchy().clone();
         let rows: Vec<_> = self.sections.iter().enumerate().map(|(i, s)| self.row(i, s, cx)).collect();
         div()
-            .image_cache(self.artwork.clone())
             .id("home-page")
             .size_full()
             .flex()
@@ -347,39 +345,44 @@ impl Render for Home {
 }
 
 /// Continue watching and Next up use 16:9 cards. Other sections use 2:3 posters.
-fn is_wide(section: &HomeSection) -> bool {
-    matches!(section.section_type.as_str(), "continue_watching" | "next_up")
+fn is_wide(section_type: &str) -> bool {
+    matches!(section_type, "continue_watching" | "next_up")
+}
+
+/// The width and height of the cards of a section: a hero, a 16:9 card, or a poster.
+fn card_size(section_type: &str, featured: bool) -> (f32, f32) {
+    match (featured, is_wide(section_type)) {
+        (true, _) => (560., 300.),
+        (false, true) => (290., 163.),
+        (false, false) => (150., 225.),
+    }
+}
+
+/// The rung of the artwork of a section at the window `scale`. A hero or a 16:9 card shows a backdrop, or the
+/// still of an episode.
+pub fn rung(section_type: &str, featured: bool, scale: f32) -> Rung {
+    let (width, _) = card_size(section_type, featured);
+    if featured || is_wide(section_type) {
+        Rung::fit(Kind::Backdrop, width, scale).max(Rung::fit(Kind::Still, width, scale))
+    } else {
+        Rung::fit(Kind::Poster, width, scale)
+    }
 }
 
 /// The artwork URL of a card: the backdrop (the still for an episode) on a 16:9 card
 /// or a hero, else the poster.
 fn art_url<'a>(section: &HomeSection, item: &'a wire::CatalogItem) -> Option<&'a str> {
-    let url = if section.featured || is_wide(section) { &item.backdrop_url } else { &item.poster_url };
+    let url = if section.featured || is_wide(&section.section_type) { &item.backdrop_url } else { &item.poster_url };
     url.as_deref().filter(|url| !url.is_empty())
 }
 
 fn thumb(section: &HomeSection, item: &wire::CatalogItem) -> Option<Arc<RenderImage>> {
-    let hash = if section.featured || is_wide(section) { &item.backdrop_thumbhash } else { &item.poster_thumbhash };
-    hash.as_deref().and_then(artwork::thumbhash)
-}
-
-/// The artwork of a card. The Thumbhash shows while the image loads and after it fails.
-pub(crate) fn artwork_image(url: Option<String>, thumb: Option<Arc<RenderImage>>) -> AnyElement {
-    let preview = move || match thumb.clone() {
-        Some(thumb) => img(ImageSource::Render(thumb)).size_full().object_fit(ObjectFit::Cover).into_any_element(),
-        None => div().into_any_element(),
+    let hash = if section.featured || is_wide(&section.section_type) {
+        &item.backdrop_thumbhash
+    } else {
+        &item.poster_thumbhash
     };
-    match url {
-        // GPUI keeps the loading state, and thus shows the Thumbhash, only for an image with an id.
-        Some(url) => img(ImageSource::Resource(Resource::Uri(url.clone().into())))
-            .id(gpui::SharedString::from(url))
-            .size_full()
-            .object_fit(ObjectFit::Cover)
-            .with_loading(preview.clone())
-            .with_fallback(preview)
-            .into_any_element(),
-        None => preview(),
-    }
+    hash.as_deref().and_then(artwork::thumbhash)
 }
 
 /// The watched part of an Item, from 0 to 1, when the user started it.
@@ -409,8 +412,18 @@ pub(crate) fn short_line(item: &wire::CatalogItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Focus, move_focus};
+    use super::{Focus, move_focus, rung};
+    use crate::artwork::Rung;
     use crate::keys::Key;
+
+    #[test]
+    fn each_section_gets_the_rung_for_its_cards() {
+        assert_eq!(rung("recently_added", false, 1.0), Rung::Small, "a 150 px poster");
+        assert_eq!(rung("recently_added", false, 3.0), Rung::Medium);
+        assert_eq!(rung("continue_watching", false, 1.0), Rung::Small, "a 290 px card fits 300 px");
+        assert_eq!(rung("next_up", false, 2.0), Rung::Large, "a 580 px still needs 780 px");
+        assert_eq!(rung("recently_added", true, 1.0), Rung::Large, "a 560 px hero");
+    }
 
     #[test]
     fn hjkl_and_arrows_move_between_the_sidebar_and_the_cards() {

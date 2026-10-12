@@ -381,13 +381,31 @@ impl Client {
         Ok(profiles.items)
     }
 
-    /// The Home sections of the active Profile, in the order of the server Home layout.
-    /// `image_size` is the rung of the Artwork ladder for the artwork URLs.
-    pub async fn home(&self, image_size: Rung) -> Result<Vec<HomeSection>, Error> {
+    /// The Home sections of the active Profile, in the order of the server Home layout. `image_size` gives the
+    /// rung of the Artwork ladder for the artwork URLs of each section. The list loads at the smallest rung. A
+    /// section that needs a larger rung loads again alone. When that load fails, the section keeps its items.
+    pub async fn home(
+        &self,
+        image_size: impl Fn(&wire::SectionLayoutEntry) -> Rung,
+    ) -> Result<Vec<HomeSection>, Error> {
         let layout: wire::SectionLayout = self.call(Method::GET, "home/layout", None).await?;
-        let path = format!("home/sections?image_size={image_size}");
-        let sections: wire::SectionCollection = self.call(Method::GET, &path, None).await?;
-        Ok(rows(layout, sections.sections))
+        let smallest = layout.sections.iter().map(&image_size).min().unwrap_or(Rung::Small);
+        let path = format!("home/sections?image_size={smallest}");
+        let mut sections = self.call::<wire::SectionCollection>(Method::GET, &path, None).await?.sections;
+        let larger = layout.sections.iter().filter(|entry| {
+            image_size(entry) != smallest && sections.iter().any(|s| s.id == entry.id && !s.items.is_empty())
+        });
+        let again = futures::future::join_all(larger.map(|entry| {
+            let path = format!("home/sections/{}/items?image_size={}", entry.id, image_size(entry));
+            async move { (entry.id.clone(), self.call::<wire::Section>(Method::GET, &path, None).await) }
+        }))
+        .await;
+        for (id, section) in again {
+            if let (Ok(section), Some(old)) = (section, sections.iter_mut().find(|s| s.id == id)) {
+                old.items = section.items;
+            }
+        }
+        Ok(rows(layout, sections))
     }
 
     async fn call<T: DeserializeOwned>(
@@ -592,14 +610,14 @@ impl Client {
         content_id: &str,
     ) -> Result<Option<wire::Episode>, Error> {
         let playable = |episode: &wire::Episode| episode.files.iter().any(|file| file.unreadable != Some(true));
-        let episodes = self.season_episodes(series_id, season).await?;
+        let episodes = self.season_episodes(series_id, season, Rung::Small).await?;
         let Some(index) = episodes.iter().position(|episode| episode.content_id == content_id) else {
             return Ok(None);
         };
         if let Some(next) = episodes.into_iter().skip(index + 1).find(playable) {
             return Ok(Some(next));
         }
-        match self.season_episodes(series_id, season + 1).await {
+        match self.season_episodes(series_id, season + 1, Rung::Small).await {
             Ok(episodes) => Ok(episodes.into_iter().find(playable)),
             Err(Error::Status(404)) => Ok(None),
             Err(Error::Problem(problem)) if problem.status == 404 => Ok(None),
@@ -616,7 +634,7 @@ impl Client {
         content_id: &str,
     ) -> Result<Option<wire::Episode>, Error> {
         let playable = |episode: &wire::Episode| episode.files.iter().any(|file| file.unreadable != Some(true));
-        let episodes = self.season_episodes(series_id, season).await?;
+        let episodes = self.season_episodes(series_id, season, Rung::Small).await?;
         let Some(index) = episodes.iter().position(|episode| episode.content_id == content_id) else {
             return Ok(None);
         };
@@ -626,7 +644,7 @@ impl Client {
         if season <= 1 {
             return Ok(None);
         }
-        match self.season_episodes(series_id, season - 1).await {
+        match self.season_episodes(series_id, season - 1, Rung::Small).await {
             Ok(episodes) => Ok(episodes.into_iter().rfind(playable)),
             Err(Error::Status(404)) => Ok(None),
             Err(Error::Problem(problem)) if problem.status == 404 => Ok(None),
@@ -635,9 +653,14 @@ impl Client {
     }
 
     /// The episodes of a season. The server sends the whole season in one reply: `listSeasonEpisodes` has no
-    /// cursor.
-    pub async fn season_episodes(&self, series_id: &str, season: i64) -> Result<Vec<wire::Episode>, Error> {
-        let path = format!("catalog/series/{series_id}/seasons/{season}/episodes");
+    /// cursor. `image_size` is the rung of the Artwork ladder for the stills.
+    pub async fn season_episodes(
+        &self,
+        series_id: &str,
+        season: i64,
+        image_size: Rung,
+    ) -> Result<Vec<wire::Episode>, Error> {
+        let path = format!("catalog/series/{series_id}/seasons/{season}/episodes?image_size={image_size}");
         Ok(self.call::<wire::EpisodeCollection>(Method::GET, &path, None).await?.items)
     }
 
@@ -847,10 +870,15 @@ impl Client {
     }
 
     /// The rows of the Recommended tab of a Library, like the Home sections.
-    pub async fn library_rows(&self, library_id: &str, image_size: Rung) -> Result<Vec<HomeSection>, Error> {
+    /// `image_size` gives the rung of the Artwork ladder for the artwork URLs of each section.
+    pub async fn library_rows(
+        &self,
+        library_id: &str,
+        image_size: impl Fn(&wire::SectionLayoutEntry) -> Rung,
+    ) -> Result<Vec<HomeSection>, Error> {
         let layout: wire::SectionLayout = self.call(Method::GET, &format!("library/{library_id}/layout"), None).await?;
         let sections = futures::future::try_join_all(layout.sections.iter().map(|entry| {
-            let path = format!("library/{library_id}/sections/{}/items?image_size={image_size}", entry.id);
+            let path = format!("library/{library_id}/sections/{}/items?image_size={}", entry.id, image_size(entry));
             async move { self.call::<wire::Section>(Method::GET, &path, None).await }
         }))
         .await?;

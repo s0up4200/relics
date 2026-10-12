@@ -19,10 +19,10 @@ fn fake(start: &'static str) -> (Client, Log) {
             ("GET", "catalog/items/movie:heat-1995/versions") => (200, fixture("list_catalog_item_versions_ok.json")),
             ("GET", "playback/capabilities") => (200, fixture("playback_capability_available.json")),
             ("GET", "markers/files/120") => (200, markers()),
-            ("GET", "catalog/series/series:severance/seasons/1/episodes") => {
+            ("GET", "catalog/series/series:severance/seasons/1/episodes?image_size=small") => {
                 (200, fixture("list_catalog_item_episodes_ok.json"))
             }
-            ("GET", "catalog/series/series:severance/seasons/2/episodes") => (200, season_two()),
+            ("GET", "catalog/series/series:severance/seasons/2/episodes?image_size=small") => (200, season_two()),
             ("POST", "playback/start") => (201, fixture(start)),
             ("POST", "auth/refresh") => (
                 200,

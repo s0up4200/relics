@@ -10,8 +10,9 @@ use base64::Engine as _;
 use futures::AsyncReadExt as _;
 use gpui::http_client::{AsyncBody, HttpClient, Request};
 use gpui::{
-    App, AppContext as _, Context, Entity, EntityId, ImageCache, ImageCacheError, ImageCacheItem, RenderImage,
-    Resource, WeakEntity, Window,
+    AnyElement, App, AppContext as _, Context, Entity, EntityId, ImageCacheError, ImageCacheItem, ImageSource,
+    InteractiveElement as _, IntoElement as _, ObjectFit, RenderImage, Resource, SharedString, Styled as _,
+    StyledImage as _, WeakEntity, Window, div, img,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -26,14 +27,14 @@ const DOWNLOADS: usize = 6;
 
 /// The Artwork cache. It keeps an LRU of decoded images in memory, limited by decoded
 /// bytes, and the files in `$XDG_CACHE_HOME/silo-omarchy/artwork/`. GPUI decodes each
-/// image from a `Resource::Path`. The app has one Artwork cache, see [`global`].
+/// image from a `Resource::Path`. The app has one Artwork cache, see [`global`]. Views show artwork with [`image`].
 pub struct ArtworkCache {
     this: WeakEntity<Self>,
     http: Arc<dyn HttpClient>,
     dir: PathBuf,
     entries: HashMap<String, Entry>,
-    /// The downloads that wait for a free slot, in render order: (key, URL).
-    queue: VecDeque<(String, String)>,
+    /// The downloads that wait for a free slot, in render order.
+    queue: VecDeque<Job>,
     running: usize,
     /// The decoded bytes of the images in memory.
     bytes: usize,
@@ -59,7 +60,15 @@ enum State {
     /// The file is queued or downloading. The views wait for it.
     Fetching(HashSet<EntityId>),
     Failed(ImageCacheError),
-    Ready(ImageCacheItem),
+    /// The image, and the cache file that it decodes from.
+    Ready(ImageCacheItem, PathBuf),
+}
+
+/// A download: the artwork at `url` for `target` pixels wide, see [`download_sized`].
+struct Job {
+    key: String,
+    url: String,
+    target: u32,
 }
 
 struct GlobalArtworkCache(Entity<ArtworkCache>);
@@ -110,11 +119,12 @@ impl ArtworkCache {
     /// Starts the queued downloads while fewer than `DOWNLOADS` run.
     fn start_downloads(&mut self, cx: &mut App) {
         while self.running < DOWNLOADS
-            && let Some((key, url)) = self.queue.pop_front()
+            && let Some(Job { key, url, target }) = self.queue.pop_front()
         {
             self.running += 1;
             let (http, dir, this) = (self.http.clone(), self.dir.clone(), self.this.clone());
-            let download = cx.background_executor().spawn(async move { download(&http, &dir, &url).await });
+            let download =
+                cx.background_executor().spawn(async move { download_sized(&http, &dir, &url, target).await });
             cx.spawn(async move |cx| {
                 let result = download.await;
                 this.update(cx, |this, cx| this.finish(key, result, cx)).ok();
@@ -133,7 +143,7 @@ impl ArtworkCache {
         }
         if let Some(entry) = self.entries.get_mut(&key) {
             let state = match result {
-                Ok((file, _)) => State::Ready(ImageCacheItem::new(&Resource::Path(file.into()), cx)),
+                Ok((file, _)) => State::Ready(ImageCacheItem::new(&Resource::Path(file.clone().into()), cx), file),
                 Err(err) => State::Failed(ImageCacheError::Other(Arc::new(err))),
             };
             if let State::Fetching(views) = std::mem::replace(&mut entry.state, state) {
@@ -174,7 +184,7 @@ impl ArtworkCache {
         for key in evictions(images, self.frame, self.bytes, MEMORY_LIMIT) {
             let entry = self.entries.remove(&key).expect("the key comes from the map");
             self.bytes -= entry.bytes;
-            if let State::Ready(item) = entry.state
+            if let State::Ready(item, _) = entry.state
                 && let Some(Ok(image)) = item.get()
             {
                 cx.drop_image(image, Some(window));
@@ -206,18 +216,16 @@ pub fn evictions<K>(
         .collect()
 }
 
-impl ImageCache for ArtworkCache {
+impl ArtworkCache {
+    /// The image at `url` for `target` pixels wide. `None` while it loads.
     fn load(
         &mut self,
-        resource: &Resource,
+        url: &str,
+        target: u32,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        let (key, url) = match resource {
-            Resource::Uri(uri) => (file_name(uri).unwrap_or_else(|| uri.to_string()), Some(uri.to_string())),
-            Resource::Path(path) => (path.display().to_string(), None),
-            Resource::Embedded(name) => (name.to_string(), None),
-        };
+        let key = format!("{}-w{target}", file_name(url).unwrap_or_else(|| url.to_string()));
         if !self.frame_open {
             self.frame_open = true;
             let this = self.this.clone();
@@ -227,14 +235,8 @@ impl ImageCache for ArtworkCache {
             });
         }
         let entry = self.entries.entry(key.clone()).or_insert_with(|| {
-            let state = match &url {
-                Some(url) => {
-                    self.queue.push_back((key.clone(), url.clone()));
-                    State::Fetching(HashSet::new())
-                }
-                None => State::Ready(ImageCacheItem::new(resource, cx)),
-            };
-            Entry { state, last_use: 0, bytes: 0, refetched: false }
+            self.queue.push_back(Job { key: key.clone(), url: url.to_string(), target });
+            Entry { state: State::Fetching(HashSet::new()), last_use: 0, bytes: 0, refetched: false }
         });
         entry.last_use = self.frame;
         let result = match &mut entry.state {
@@ -243,16 +245,16 @@ impl ImageCache for ArtworkCache {
                 None
             }
             State::Failed(err) => Some(Err(err.clone())),
-            State::Ready(item) => item.use_image(window),
+            State::Ready(item, _) => item.use_image(window),
         };
         // A cache file that does not decode goes, so that a revisioned file does not stay broken. The cache
         // downloads it again once.
-        if let (Some(Err(_)), Some(url), State::Ready(_)) = (&result, &url, &entry.state) {
-            discard(&self.dir.join(&key));
+        if let (Some(Err(_)), State::Ready(_, file)) = (&result, &entry.state) {
+            discard(file);
             if !entry.refetched {
                 entry.refetched = true;
                 entry.state = State::Fetching(HashSet::from([window.current_view()]));
-                self.queue.push_back((key, url.clone()));
+                self.queue.push_back(Job { key, url: url.to_string(), target });
                 self.start_downloads(cx);
                 return None;
             }
@@ -267,6 +269,31 @@ impl ImageCache for ArtworkCache {
         self.start_downloads(cx);
         result
     }
+}
+
+/// The artwork at `url`, shown `width` logical pixels wide. It loads through the Artwork cache, in the size
+/// for `width` at the window scale. The Thumbhash `thumb` shows while the image loads and after it fails.
+pub fn image(url: Option<String>, thumb: Option<Arc<RenderImage>>, width: f32) -> AnyElement {
+    let preview = move || match thumb.clone() {
+        Some(thumb) => img(ImageSource::Render(thumb)).size_full().object_fit(ObjectFit::Cover).into_any_element(),
+        None => div().into_any_element(),
+    };
+    let Some(url) = url else {
+        return preview();
+    };
+    let id = SharedString::from(url.clone());
+    let source = move |window: &mut Window, cx: &mut App| {
+        let target = (width * window.scale_factor()).ceil() as u32;
+        global(cx).update(cx, |cache, cx| cache.load(&url, target, window, cx))
+    };
+    // GPUI keeps the loading state, and thus shows the Thumbhash, only for an image with an id.
+    img(ImageSource::Custom(Arc::new(source)))
+        .id(id)
+        .size_full()
+        .object_fit(ObjectFit::Cover)
+        .with_loading(preview.clone())
+        .with_fallback(preview)
+        .into_any_element()
 }
 
 /// Decodes a base64 Thumbhash to a small blurred image.
@@ -375,6 +402,51 @@ pub async fn download(http: &Arc<dyn HttpClient>, dir: &Path, url: &str) -> anyh
     }
 }
 
+/// [`download`] for an image that shows `target` pixels wide. When the image is much wider, the cache also keeps
+/// a copy that is `target` pixels wide, and returns that copy. Later calls use the copy while the image on disk
+/// stays the same. The number is the bytes that the call wrote to `dir`.
+pub async fn download_sized(
+    http: &Arc<dyn HttpClient>,
+    dir: &Path,
+    url: &str,
+    target: u32,
+) -> anyhow::Result<(PathBuf, u64)> {
+    let (file, written) = download(http, dir, url).await?;
+    let mut name = file.file_name().context("a cache file has a name")?.to_os_string();
+    name.push(format!("-w{target}"));
+    let copy = file.with_file_name(name);
+    if written == 0 && copy.exists() {
+        std::fs::File::options().write(true).open(&copy)?.set_modified(SystemTime::now())?;
+        return Ok((copy, 0));
+    }
+    let Some(small) = shrink(&std::fs::read(&file)?, target) else {
+        _ = std::fs::remove_file(&copy);
+        return Ok((file, written));
+    };
+    let temp = copy.with_extension("tmp");
+    let copied = small.len() as u64;
+    std::fs::write(&temp, small)?;
+    std::fs::rename(&temp, &copy)?;
+    Ok((copy, written + copied))
+}
+
+/// An image that is at least this many times wider than its target gets a shrunk copy.
+const SHRINK_RATIO: f32 = 1.5;
+
+/// The image in `bytes` shrunk to `target` pixels wide, as a JPEG, when it is at least [`SHRINK_RATIO`] times
+/// wider. Else `None`, also when the bytes are not an image.
+pub fn shrink(bytes: &[u8], target: u32) -> Option<Vec<u8>> {
+    let reader = || image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok();
+    let (width, _) = reader()?.into_dimensions().ok()?;
+    if target == 0 || (width as f32) < target as f32 * SHRINK_RATIO {
+        return None;
+    }
+    let small = reader()?.decode().ok()?.resize(target, u32::MAX, image::imageops::FilterType::CatmullRom);
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90).encode_image(&small.to_rgb8()).ok()?;
+    Some(jpeg)
+}
+
 /// The name of the cache file for an artwork URL: the hex SHA-256 of the origin plus
 /// the path. The query holds only the signature, which changes, so the name ignores it.
 pub fn file_name(url: &str) -> Option<String> {
@@ -397,32 +469,44 @@ pub fn is_revisioned(url: &str) -> bool {
     }
 }
 
-/// The widest card on Home: the 16:9 card of Continue watching and Next up.
-pub const HOME_CARD_WIDTH: f32 = 290.;
+/// A kind of artwork. Each kind has its own widths on the Artwork ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Poster,
+    /// The 16:9 image of an episode.
+    Still,
+    Backdrop,
+    /// The photo of a person.
+    Profile,
+}
 
-/// A rung of the Artwork ladder of posters and stills, from the smallest. It is the `image_size` of a request.
+impl Kind {
+    /// The widths in pixels of `small`, `medium` and `large`, from the server docs (`docs/images-api.md`).
+    // ponytail: hard-coded; read `/images/capabilities` when the server changes its ladder.
+    fn widths(self) -> [u32; 3] {
+        match self {
+            Kind::Poster | Kind::Still => [300, 500, 780],
+            Kind::Backdrop => [300, 1920, 1920],
+            Kind::Profile => [300, 500, 500],
+        }
+    }
+}
+
+/// A rung of the Artwork ladder, from the smallest. It is the `image_size` of a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rung {
-    /// 300 px wide.
     Small,
-    /// 500 px wide.
     Medium,
     Large,
 }
 
 impl Rung {
-    /// The rung for a card of `width` logical pixels at the window `scale`.
-    pub fn card(width: f32, scale: f32) -> Self {
-        match width * scale {
-            w if w <= 300. => Rung::Small,
-            w if w <= 500. => Rung::Medium,
-            _ => Rung::Large,
-        }
-    }
-
-    /// The rung of Home: `small` at scale 1 and `medium` above it.
-    pub fn home(scale: f32) -> Self {
-        if scale > 1. { Rung::Medium } else { Rung::Small }
+    /// The smallest rung whose `kind` image is at least as wide as `width` logical pixels at the window `scale`.
+    /// When no rung is wide enough, `Large`. A request with more kinds takes the largest of their rungs.
+    pub fn fit(kind: Kind, width: f32, scale: f32) -> Self {
+        let pixels = width * scale;
+        let rungs = [Rung::Small, Rung::Medium, Rung::Large];
+        rungs.into_iter().zip(kind.widths()).find(|&(_, w)| w as f32 >= pixels).map_or(Rung::Large, |(rung, _)| rung)
     }
 }
 

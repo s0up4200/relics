@@ -6,6 +6,7 @@ mod common;
 use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
 use serde_json::json;
+use silo_omarchy::api::wire;
 use silo_omarchy::artwork::Rung;
 use silo_omarchy::browse::{self, Browse, Choice, Paging, SortField, Watch};
 
@@ -40,7 +41,7 @@ fn the_fixture_libraries_decode() {
 fn the_recommended_tab_reads_the_library_layout_and_the_items_of_each_section() {
     let (client, seen) = fake(|req| match req.path.as_str() {
         "library/1/layout" => ok("get_library_layout_ok.json"),
-        "library/1/sections/continue_watching/items?image_size=small" => ok("get_library_section_items_ok.json"),
+        "library/1/sections/continue_watching/items?image_size=medium" => ok("get_library_section_items_ok.json"),
         "library/1/sections/recently_added/items?image_size=small" => {
             let mut section: serde_json::Value =
                 serde_json::from_str(&fixture("get_library_section_items_ok.json")).unwrap();
@@ -50,7 +51,11 @@ fn the_recommended_tab_reads_the_library_layout_and_the_items_of_each_section() 
         }
         _ => not_found(),
     });
-    let rows = block_on(client.library_rows("1", Rung::Small)).unwrap();
+    // Each section loads with its own rung.
+    let size = |entry: &wire::SectionLayoutEntry| {
+        if entry.section_type == "continue_watching" { Rung::Medium } else { Rung::Small }
+    };
+    let rows = block_on(client.library_rows("1", size)).unwrap();
     let titles: Vec<_> = rows.iter().map(|r| r.title.as_str()).collect();
     assert_eq!(titles, ["Continue Watching", "Recently Added"]);
     assert_eq!(rows[0].section_type, "continue_watching");

@@ -15,7 +15,7 @@ use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache};
 use crate::browse::PAGE_SIZE;
 use crate::grid::{Grid, Move};
-use crate::home::{Open, Play, artwork_image};
+use crate::home::{Open, Play};
 use crate::keys::Key;
 
 /// The pause after the last key before Search sends the text.
@@ -332,7 +332,11 @@ impl Search {
                         .bg(t.surface)
                         .border_2()
                         .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                        .child(artwork_image(url.map(String::from), self.people_thumbs.get(i).cloned().flatten())),
+                        .child(artwork::image(
+                            url.map(String::from),
+                            self.people_thumbs.get(i).cloned().flatten(),
+                            PHOTO,
+                        )),
                 )
                 .child(
                     div()
@@ -403,13 +407,7 @@ impl Render for Search {
             Some(grid) => div().size_full().px(px(40.)).child(grid.clone()).into_any_element(),
             None => div().into_any_element(),
         };
-        div()
-            .image_cache(self.artwork.clone())
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(div().flex_1().min_h_0().child(content))
+        div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(content))
     }
 }
 

@@ -10,9 +10,9 @@ use gpui::{
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
-use crate::artwork::{self, ArtworkCache, Rung};
+use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::browse::Paging;
-use crate::home::{Open, Play, artwork_image, short_line};
+use crate::home::{Open, Play, short_line};
 use crate::keys::Key;
 
 pub const POSTER_WIDTH: f32 = 150.;
@@ -74,7 +74,6 @@ impl EventEmitter<Open> for Grid {}
 impl Grid {
     pub fn new(client: Arc<Client>, query: wire::CatalogQuery, window: &Window, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.drop_thumbs(cx)).detach();
-        // ponytail: the rung is read once; a move to a larger scale keeps it until the query changes.
         let mut grid = Self {
             client,
             query,
@@ -85,7 +84,7 @@ impl Grid {
             columns: 1,
             error: None,
             loading: None,
-            image_size: Rung::card(POSTER_WIDTH, window.scale_factor()),
+            image_size: Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()),
             scroll: ScrollHandle::new(),
             artwork: artwork::global(cx),
         };
@@ -218,7 +217,11 @@ impl Grid {
                     .bg(t.surface)
                     .border_2()
                     .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                    .child(div().absolute().inset_0().child(artwork_image(url.map(String::from), thumb))),
+                    .child(div().absolute().inset_0().child(artwork::image(
+                        url.map(String::from),
+                        thumb,
+                        POSTER_WIDTH,
+                    ))),
             )
             .child(
                 div()
@@ -237,6 +240,8 @@ impl Render for Grid {
         let t = cx.omarchy().clone();
         // The grid fills the page between the sidebar and the 40 px page margins.
         let viewport = window.viewport_size().width.to_f64() as f32;
+        // The next page loads in the rung for the current scale. The loaded pages keep their rung.
+        self.image_size = self.image_size.max(Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()));
         self.columns = columns(viewport - crate::pages::sidebar_width(viewport, false) - 80.);
         let cards: Vec<_> = self.paging.items.iter().enumerate().map(|(i, item)| self.card(i, item, cx)).collect();
         let status = match (&self.error, &self.loading) {
@@ -258,7 +263,6 @@ impl Render for Grid {
             _ => None,
         };
         div()
-            .image_cache(self.artwork.clone())
             .id("grid")
             .size_full()
             .flex()

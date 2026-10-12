@@ -67,7 +67,7 @@ fn requests_carry_the_token_and_the_profile() {
     let profiles = block_on(client.profiles()).unwrap();
     assert_eq!(profiles[0].name, "Laura");
     client.set_profile(Some(profiles[0].id.to_string()));
-    block_on(client.home(Rung::Small)).unwrap();
+    block_on(client.home(|_| Rung::Small)).unwrap();
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0].header("Authorization"), Some("Bearer acc"));
@@ -171,15 +171,21 @@ fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
     let mut watching = section("continue_watching", "Continue Watching", false);
     watching["items"] = serde_json::json!([item("Heat"), item("Ronin")]);
     watching["total_count"] = 9.into();
-    let sections = serde_json::json!({"sections": [recent, picks, watching]});
+    let sections = serde_json::json!({"sections": [recent, picks, watching.clone()]});
+    // The 16:9 cards need a larger rung, so their section loads again with its own rung.
+    watching["items"] = serde_json::json!([item("Heat wide"), item("Ronin wide")]);
     let (http, _) = http(move |req| match req.path.as_str() {
         "home/layout" => json(200, layout.to_string()),
-        "home/sections?image_size=medium" => json(200, sections.to_string()),
+        "home/sections?image_size=small" => json(200, sections.to_string()),
+        "home/sections/continue_watching/items?image_size=medium" => json(200, watching.to_string()),
         _ => reply(404, "text/plain", String::new()),
     });
     let client = signed_in(http, "acc");
     client.set_profile(Some("p-owner".into()));
-    let home = block_on(client.home(Rung::Medium)).unwrap();
+    let size = |entry: &wire::SectionLayoutEntry| {
+        if entry.section_type == "continue_watching" { Rung::Medium } else { Rung::Small }
+    };
+    let home = block_on(client.home(size)).unwrap();
     let rows: Vec<_> = home
         .iter()
         .map(|s| {
@@ -196,7 +202,7 @@ fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
         [
             ("picks", true, false, vec!["Alien"]),
             ("recently_added", false, true, vec!["Heat", "Ronin"]),
-            ("continue_watching", false, false, vec!["Heat", "Ronin"]),
+            ("continue_watching", false, false, vec!["Heat wide", "Ronin wide"]),
         ]
     );
 }

@@ -1,6 +1,6 @@
 //! The detail page of an Item: a hero with the backdrop, the poster, the title, the metadata line, the quality
 //! badges, the overview and the buttons. A movie shows its cast. A series shows its seasons and a grid of 16:9
-//! episode cards. The page loads `large` artwork.
+//! episode cards. Each request asks for the artwork rung that the page needs at the window scale.
 
 use std::sync::Arc;
 
@@ -12,9 +12,9 @@ use gpui::{
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, Error, wire};
-use crate::artwork::{self, ArtworkCache, Rung};
+use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::grid::Move;
-use crate::home::{Play, artwork_image, progress, progress_bar};
+use crate::home::{Play, progress, progress_bar};
 use crate::keys::Key;
 use crate::player::PlayItem;
 use crate::search::OpenPerson;
@@ -24,6 +24,8 @@ const EPISODE_HEIGHT: f32 = 140.;
 const GAP: f32 = 14.;
 /// The left and right margin of the page.
 const MARGIN: f32 = 48.;
+const POSTER_WIDTH: f32 = 200.;
+const CAST_WIDTH: f32 = 110.;
 
 pub struct Detail {
     client: Arc<Client>,
@@ -47,6 +49,10 @@ pub struct Detail {
     episode_thumbs: Vec<Option<Arc<RenderImage>>>,
     scroll: ScrollHandle,
     artwork: Entity<ArtworkCache>,
+    /// The artwork rung of the Item and of the episodes, at the window scale when the page opened.
+    // ponytail: read once; a move to a larger scale keeps it until the page opens again.
+    image_size: Rung,
+    episode_size: Rung,
     _loading: Task<()>,
     _episodes: Task<()>,
     _watchlist: Task<()>,
@@ -56,7 +62,11 @@ impl EventEmitter<Play> for Detail {}
 impl EventEmitter<OpenPerson> for Detail {}
 
 impl Detail {
-    pub fn new(client: Arc<Client>, id: String, season: Option<i64>, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Arc<Client>, id: String, season: Option<i64>, window: &Window, cx: &mut Context<Self>) -> Self {
+        let scale = window.scale_factor();
+        // The backdrop fills the page next to the sidebar.
+        let viewport = window.viewport_size().width.to_f64() as f32;
+        let width = viewport - crate::pages::sidebar_width(viewport, true);
         cx.on_release(|this, cx| {
             for thumb in this.thumbs.drain(..).chain(this.episode_thumbs.drain(..)).flatten() {
                 cx.drop_image(thumb, None);
@@ -79,6 +89,10 @@ impl Detail {
             episode_thumbs: Vec::new(),
             scroll: ScrollHandle::new(),
             artwork: artwork::global(cx),
+            image_size: Rung::fit(Kind::Backdrop, width, scale)
+                .max(Rung::fit(Kind::Poster, POSTER_WIDTH, scale))
+                .max(Rung::fit(Kind::Profile, CAST_WIDTH, scale)),
+            episode_size: Rung::fit(Kind::Still, EPISODE_WIDTH, scale),
             _loading: Task::ready(()),
             _episodes: Task::ready(()),
             _watchlist: Task::ready(()),
@@ -90,10 +104,10 @@ impl Detail {
     /// Loads the Item, and the seasons of a series.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
-        let (client, id) = (self.client.clone(), self.id.clone());
+        let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.image_size);
         self._loading = cx.spawn(async move |this, cx| {
             let result: Result<_, Error> = async {
-                let item = client.item(&id, Rung::Large).await?;
+                let item = client.item(&id, image_size).await?;
                 let seasons = if item.type_ == "series" { client.seasons(&id).await? } else { Vec::new() };
                 Ok((item, seasons))
             }
@@ -134,9 +148,9 @@ impl Detail {
             cx.drop_image(old, None);
         }
         self.episodes.clear();
-        let (client, id) = (self.client.clone(), self.id.clone());
+        let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.episode_size);
         self._episodes = cx.spawn(async move |this, cx| {
-            let result = client.season_episodes(&id, season).await;
+            let result = client.season_episodes(&id, season, image_size).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(episodes) => {
@@ -291,7 +305,8 @@ impl Detail {
             .child(label)
     }
 
-    fn hero(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
+    /// The hero. The backdrop is `width` logical pixels wide.
+    fn hero(&self, item: &wire::CatalogItemDetail, width: f32, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
         let buttons = actions(item).into_iter().enumerate().map(|(i, action)| {
             let label: SharedString = match action {
@@ -316,7 +331,7 @@ impl Detail {
             .w_full()
             .h(px(420.))
             .flex_none()
-            .child(div().absolute().inset_0().child(artwork_image(self.url(&item.backdrop_url), self.thumb(0))))
+            .child(div().absolute().inset_0().child(artwork::image(self.url(&item.backdrop_url), self.thumb(0), width)))
             .child(div().absolute().inset_0().bg(linear_gradient(
                 180.,
                 linear_color_stop(gpui::hsla(0., 0., 0., 0.), 0.),
@@ -333,13 +348,13 @@ impl Detail {
                     .pb(px(28.))
                     .child(
                         div()
-                            .w(px(200.))
+                            .w(px(POSTER_WIDTH))
                             .h(px(300.))
                             .flex_none()
                             .rounded(px(12.))
                             .overflow_hidden()
                             .bg(t.surface)
-                            .child(artwork_image(self.url(&item.poster_url), self.thumb(1))),
+                            .child(artwork::image(self.url(&item.poster_url), self.thumb(1), POSTER_WIDTH)),
                     )
                     .child(
                         div()
@@ -387,7 +402,11 @@ impl Detail {
                 .bg(t.surface)
                 .border_2()
                 .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .child(div().absolute().inset_0().child(artwork_image(self.url(&episode.still_url), thumb)));
+                .child(div().absolute().inset_0().child(artwork::image(
+                    self.url(&episode.still_url),
+                    thumb,
+                    EPISODE_WIDTH,
+                )));
             if let Some(progress) = progress {
                 art = art.child(progress_bar(progress, t.accent));
             }
@@ -418,7 +437,7 @@ impl Detail {
             let focused = self.active && self.focus == Focus::Cast(i);
             div()
                 .id(("detail-cast", i))
-                .w(px(110.))
+                .w(px(CAST_WIDTH))
                 .flex_none()
                 .flex()
                 .flex_col()
@@ -426,14 +445,14 @@ impl Detail {
                 .on_click(cx.listener(move |this, _, _, cx| this.open_person(i, cx)))
                 .child(
                     div()
-                        .w(px(110.))
+                        .w(px(CAST_WIDTH))
                         .h(px(150.))
                         .rounded(px(10.))
                         .overflow_hidden()
                         .bg(t.surface)
                         .border_2()
                         .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                        .child(artwork_image(self.url(&credit.photo_url), self.thumb(i + 2))),
+                        .child(artwork::image(self.url(&credit.photo_url), self.thumb(i + 2), CAST_WIDTH)),
                 )
                 .child(
                     div()
@@ -480,7 +499,6 @@ impl Render for Detail {
         };
         // The children keep the order hero, seasons, episodes, so that `key` can scroll to them by index.
         let mut page = div()
-            .image_cache(self.artwork.clone())
             .id("detail-page")
             .size_full()
             .flex()
@@ -490,7 +508,7 @@ impl Render for Detail {
             .overflow_y_scroll()
             .track_scroll(&self.scroll);
         if let Some(item) = &self.item {
-            page = page.child(self.hero(item, cx));
+            page = page.child(self.hero(item, viewport - crate::pages::sidebar_width(viewport, true), cx));
             if item.type_ == "series" {
                 page = page.child(self.season_pills(cx)).child(self.episode_grid(cx));
             } else if !item.cast.is_empty() {
