@@ -79,8 +79,9 @@ _Avoid_: Blurhash (a different format)
 The image cache of the app. It keeps decoded images in memory and the files in `$XDG_CACHE_HOME`, keyed by the origin plus the path.
 _Avoid_: Image cache (that is the name of the GPUI trait)
 
-**Player window**:
-The window that libmpv draws video in. Its app id is `silo-player`. The app has at most one Player window. It can show several Playback sessions one after another. It closes when the user quits it or the last item ends.
+**Player view**:
+The page in the Library window that plays an Item. It shows the video and the controls over it. Back leaves it and ends the Playback session.
+_Avoid_: player window, player page
 
 **Playback session**:
 One viewing of one Item, from the start request to the stop report. The server knows it by its session id. A reload at the current position and a replan stay in the same Playback session.

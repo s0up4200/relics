@@ -1,6 +1,7 @@
-//! The Player window controller. It holds the current Playback session and the mpv
-//! handle, feeds the session the mpv events and a tick each second, and carries out
-//! the commands of the session. The app has at most one Player window.
+//! The playback controller. It holds the current Playback session and the mpv handle, feeds the session the
+//! mpv events and a tick each second, and carries out the commands of the session. The video shows in the
+//! Player view of the Library window (`player_view.rs`), or in the Player window when the Library window has no
+//! video surface. The app plays at most one Item.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use futures::StreamExt as _;
-use futures::channel::mpsc;
+use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{AppContext as _, Context, EventEmitter, Hsla, Rgba, Task};
 use gpui_omarchy::ActiveTheme as _;
 use mpris_server::PlaybackStatus;
@@ -17,6 +18,7 @@ use crate::api::{Client, wire};
 use crate::mpris::{self, Track};
 use crate::playback::{Command, Input, Session};
 use crate::settings::LocalSettings;
+use crate::video::Surface;
 use crate::{artwork, mpv};
 
 /// What the Player window needs to play an Item.
@@ -61,7 +63,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 season: item.play_season_number.map(|season| (item.content_id.clone(), season)),
                 find_season: item.play_season_number.is_none(),
                 start_over: false,
-            file_id: None,
+                file_id: None,
             },
             _ => Self {
                 content_id: item.content_id.clone(),
@@ -69,7 +71,7 @@ impl From<&wire::CatalogItemDetail> for PlayItem {
                 season: item.series_id.clone().zip(item.season_number),
                 find_season: false,
                 start_over: false,
-            file_id: None,
+                file_id: None,
             },
         }
     }
@@ -99,8 +101,11 @@ const MPRIS_POSTER_WIDTH: f32 = 512.0;
 /// The text of a playback error, for the Library window.
 pub struct PlaybackError(pub String);
 
-/// The Player window closed.
+/// The mpv handle closed: the Player window closed, or the video in the Player view stopped.
 pub struct PlayerClosed;
+
+/// The Player view closed: playback ended, or the video moved to a Player window.
+pub struct ViewClosed;
 
 pub struct PlayerWindow {
     client: Option<Arc<Client>>,
@@ -129,13 +134,22 @@ pub struct PlayerWindow {
     generation: u64,
     _mpv_events: Option<Task<()>>,
     _ticks: Task<()>,
+    /// The video surface of the Library window. `None` plays in a Player window.
+    video: Option<Rc<Surface>>,
+    /// The Player view shows: from `play` until playback ends.
+    in_view: bool,
+    /// The player position, for the Player view.
+    position: Option<f64>,
+    /// The label of the Skip prompt that shows. Empty when none shows.
+    prompt: String,
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
 impl EventEmitter<PlayerClosed> for PlayerWindow {}
+impl EventEmitter<ViewClosed> for PlayerWindow {}
 
 impl PlayerWindow {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(video: Option<Rc<Surface>>, cx: &mut Context<Self>) -> Self {
         let ticks = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -163,6 +177,10 @@ impl PlayerWindow {
             generation: 0,
             _mpv_events: None,
             _ticks: ticks,
+            video,
+            in_view: false,
+            position: None,
+            prompt: String::new(),
         }
     }
 
@@ -171,6 +189,8 @@ impl PlayerWindow {
     pub fn play(&mut self, client: Arc<Client>, item: PlayItem, cx: &mut Context<Self>) {
         self.step(Input::End, cx);
         self.generation += 1;
+        self.in_view = self.video.is_some();
+        (self.position, self.prompt) = (None, String::new());
         self.session = Some(Session::new(item.runtime, client.server_settings()));
         self.client = Some(client.clone());
         // A new Item drops these tasks, so an older answer never reaches the new session.
@@ -337,7 +357,20 @@ impl PlayerWindow {
         self.stopping.take().unwrap_or_else(|| Task::ready(()))
     }
 
-    fn step(&mut self, input: Input, cx: &mut Context<Self>) {
+    /// Back in the Player view: ends the Playback session with the stop report, and closes the view.
+    pub fn back(&mut self, cx: &mut Context<Self>) {
+        self.quit(cx).detach();
+    }
+
+    /// Gives `input` to the Playback session, for example a control of the Player view.
+    pub fn step(&mut self, input: Input, cx: &mut Context<Self>) {
+        if let Input::Position(position) | Input::Seeked(position) = input {
+            self.position = Some(position);
+        }
+        // The tick each second redraws the Player view with the new position.
+        if self.in_view && !matches!(input, Input::Position(_)) {
+            cx.notify();
+        }
         // MPRIS reads the position when it needs it. The other inputs can change what MPRIS shows.
         let sync = match input {
             Input::Position(position) => {
@@ -429,6 +462,7 @@ impl PlayerWindow {
                 }
             }
             Command::ShowPrompt(label) => {
+                self.prompt.clone_from(&label);
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.show_prompt(&label)) {
                     eprintln!("silo-omarchy: cannot send the skip prompt to the player: {err}");
                 }
@@ -481,38 +515,102 @@ impl PlayerWindow {
         .detach();
     }
 
-    /// The Player window is open.
+    /// The mpv handle is open.
     pub fn is_open(&self) -> bool {
         self.mpv.is_some()
+    }
+
+    /// The Player view shows.
+    pub fn in_view(&self) -> bool {
+        self.in_view
+    }
+
+    /// The player position in seconds, once the file plays.
+    pub fn position(&self) -> Option<f64> {
+        self.position
+    }
+
+    /// The duration of the file in seconds, in player time.
+    pub fn duration(&self) -> Option<f64> {
+        self.duration
+    }
+
+    pub fn paused(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::paused)
+    }
+
+    /// The title of the Item that plays, once it is known.
+    pub fn title(&self) -> Option<&str> {
+        self.track.as_ref().map(|track| track.title.as_str())
+    }
+
+    /// The label of the Skip prompt that shows, or an empty text.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    /// The volume in percent, and whether the audio is muted.
+    pub fn volume(&self) -> Option<(f64, bool)> {
+        self.mpv.as_ref()?.volume().ok()
+    }
+
+    pub fn add_volume(&mut self, delta: f64, cx: &mut Context<Self>) {
+        if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_volume(delta)) {
+            eprintln!("silo-omarchy: cannot change the volume: {err}");
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        if let Some(Err(err)) = self.mpv.as_ref().map(mpv::Player::toggle_mute) {
+            eprintln!("silo-omarchy: cannot mute: {err}");
+        }
+        cx.notify();
     }
 
     fn close_mpv(&mut self, cx: &mut Context<Self>) {
         // Dropping the MPRIS player and its task gives up the bus name.
         self.mpris = None;
         self._mpris = None;
+        // The render thread stops before mpv, and before the window can close its Wayland connection.
+        if let Some(video) = &self.video {
+            video.stop();
+        }
         if self.mpv.take().is_some() {
             cx.emit(PlayerClosed);
         }
         self.mpv_id += 1;
+        self.leave_view(cx);
     }
 
-    /// Returns the mpv handle, and opens a Player window first when there is none.
+    fn leave_view(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.in_view) {
+            cx.emit(ViewClosed);
+        }
+    }
+
+    /// Returns the mpv handle, and opens one first when there is none: in the Player view when it shows, else
+    /// in a Player window. When the video surface fails, the video plays in a Player window for the rest of
+    /// the run.
     fn open_mpv(&mut self, cx: &mut Context<Self>) -> Result<&mpv::Player, mpv::Error> {
         if self.mpv.is_none() {
-            let (tx, mut rx) = mpsc::unbounded();
-            let controls = mpv::find_controls(|name| std::env::var_os(name));
-            let options = match controls.as_deref().and_then(|path| path.to_str()) {
-                Some(path) => vec![("scripts", path)],
-                None => {
-                    eprintln!("silo-omarchy: silo-controls.lua not found, so the player has no controls");
-                    vec![]
-                }
-            };
             // Each new mpv handle reads the hardware decoding Local setting again.
             let hwdec = LocalSettings::load(&LocalSettings::dir()).hwdec();
-            self.mpv = Some(mpv::Player::open(hwdec, &options, move |input| {
-                tx.unbounded_send(input).ok();
-            })?);
+            let in_view = self.video.as_ref().filter(|_| self.in_view).map(|video| open_in_view(video, hwdec));
+            let (player, mut rx) = match in_view {
+                Some(Ok(opened)) => opened,
+                failed => {
+                    if let Some(Err(err)) = failed {
+                        eprintln!(
+                            "silo-omarchy: the video cannot show in the Player view, so it opens a window: {err}"
+                        );
+                        self.video = None;
+                        self.leave_view(cx);
+                    }
+                    open_window(hwdec)?
+                }
+            };
+            self.mpv = Some(player);
             self.mpv_id += 1;
             self.start_mpris(cx);
             let id = self.mpv_id;
@@ -531,6 +629,33 @@ impl PlayerWindow {
         }
         Ok(self.mpv.as_ref().expect("opened above"))
     }
+}
+
+/// An mpv handle and the channel of its inputs.
+type Opened = (mpv::Player, UnboundedReceiver<Input>);
+
+/// Opens mpv with no window, and starts the render thread of the Player view on it.
+fn open_in_view(video: &Surface, hwdec: &str) -> Result<Opened, String> {
+    let (tx, rx) = mpsc::unbounded();
+    let player = mpv::Player::open(hwdec, &[("vo", "libmpv")], move |input| drop(tx.unbounded_send(input)))
+        .map_err(|err| err.to_string())?;
+    video.start(player.video())?;
+    Ok((player, rx))
+}
+
+/// Opens mpv in a Player window with the Lua controller.
+fn open_window(hwdec: &str) -> Result<Opened, mpv::Error> {
+    let (tx, rx) = mpsc::unbounded();
+    let controls = mpv::find_controls(|name| std::env::var_os(name));
+    let options = match controls.as_deref().and_then(|path| path.to_str()) {
+        Some(path) => vec![("scripts", path)],
+        None => {
+            eprintln!("silo-omarchy: silo-controls.lua not found, so the player has no controls");
+            vec![]
+        }
+    };
+    let player = mpv::Player::open(hwdec, &options, move |input| drop(tx.unbounded_send(input)))?;
+    Ok((player, rx))
 }
 
 /// A color as `#RRGGBB`.

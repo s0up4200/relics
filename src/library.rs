@@ -20,12 +20,14 @@ use crate::accounts::{AccountChoice, AccountPicker};
 use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
 use crate::home;
 use crate::pages::{MenuChoice, Pages};
-use crate::player::{PlaybackError, PlayerClosed, PlayerWindow};
+use crate::player::{PlaybackError, PlayerClosed, PlayerWindow, ViewClosed};
+use crate::player_view::PlayerView;
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
 use crate::settings_page::AccountAction;
 use crate::sign_in::{SignIn, SignedIn};
 use crate::state::{Pair, SavedAccount, SavedServer, State};
+use crate::video;
 
 /// The Server of a saved Server, named by the host of its URL.
 fn server_of(saved: &SavedServer) -> Option<Server> {
@@ -58,6 +60,10 @@ pub struct LibraryWindow {
     player_error: Option<String>,
     _player: Subscription,
     _player_closed: Subscription,
+    /// The Player view. It shows in place of the screen while the controller plays in it, so Back returns to
+    /// the page where playback started. `None` when the window has no video surface.
+    player_view: Option<Entity<PlayerView>>,
+    _view_closed: Subscription,
     /// The client of the active Account.
     client: Option<Arc<Client>>,
     /// The Server does not answer. The window shows the Offline banner.
@@ -128,7 +134,18 @@ impl LibraryWindow {
         });
         let device =
             Device { id: state.device_id.clone(), name: gethostname::gethostname().to_string_lossy().into_owned() };
-        let player = cx.new(PlayerWindow::new);
+        let video = video::Surface::new(window);
+        let player = cx.new(|cx| PlayerWindow::new(video.clone(), cx));
+        let player_view = video.map(|video| cx.new(|cx| PlayerView::new(player.clone(), video, cx)));
+        let view_closed = cx.subscribe_in(&player, window, |this, _, _: &ViewClosed, window, cx| {
+            if let Some(view) = &this.player_view {
+                view.update(cx, |view, _| view.closed(window));
+            }
+            if let Screen::Pages(pages) = &this.screen {
+                pages.update(cx, |pages, cx| pages.focus(window, cx));
+            }
+            cx.notify();
+        });
         let player_events = cx.subscribe(&player, |this, _, PlaybackError(text), cx| {
             this.player_error = Some(text.clone());
             cx.notify();
@@ -166,6 +183,8 @@ impl LibraryWindow {
             player_error: None,
             _player: player_events,
             _player_closed: player_closed,
+            player_view,
+            _view_closed: view_closed,
             client: None,
             offline: false,
             probe: None,
@@ -366,11 +385,15 @@ impl LibraryWindow {
 
     fn show_pages(&mut self, client: Arc<Client>, pages: Entity<Pages>, window: &mut Window, cx: &mut Context<Self>) {
         pages.update(cx, |pages, cx| pages.focus(window, cx));
-        let play = cx.subscribe(&pages, {
+        let play = cx.subscribe_in(&pages, window, {
             let client = client.clone();
-            move |this, _, home::Play(item), cx| {
+            move |this, _, home::Play(item), window, cx| {
                 this.player_error = None;
                 this.player.update(cx, |player, cx| player.play(client.clone(), item.clone(), cx));
+                if let Some(view) = this.player_view.clone().filter(|_| this.player.read(cx).in_view()) {
+                    view.update(cx, |view, cx| view.open(window, cx));
+                }
+                cx.notify();
             }
         });
         let menu = cx.subscribe_in(&pages, window, move |this, pages, choice: &MenuChoice, window, cx| match choice {
@@ -789,6 +812,10 @@ impl LibraryWindow {
 
 impl Render for LibraryWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(view) = self.player_view.clone().filter(|_| self.player.read(cx).in_view()) {
+            // No background and no other screen: the video shows through the Player view.
+            return focus_scope("library").size_full().child(view).into_any_element();
+        }
         let t = cx.omarchy().clone();
         let page = focus_scope("library")
             .size_full()
@@ -843,5 +870,6 @@ impl Render for LibraryWindow {
                 .text_color(t.danger)
                 .child(text)
         }))
+        .into_any_element()
     }
 }

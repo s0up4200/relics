@@ -114,6 +114,20 @@ fn a_closed_window_sends_the_stop_report_and_closes_the_player() {
     assert_eq!(session.step(Input::Tick, at(60)), vec![], "an ended session sends nothing more");
 }
 
+// Back in the Player view and a closed Library window both end the session with `Input::End`, then the
+// controller closes the player.
+#[test]
+fn back_in_the_player_view_and_a_closed_library_window_send_the_stop_report_once() {
+    let mut session = playing(None);
+    session.step(Input::Position(300.0), at(1));
+    session.step(Input::Paused(true), at(2));
+    let paused = Sample { sequence: 1, position: 300.0, paused: true };
+    let stop = Command::Stop { session_id: SESSION.into(), sample: Some(paused) };
+    assert_eq!(session.step(Input::End, at(3)), vec![stop]);
+    assert_eq!(session.step(Input::Tick, at(60)), vec![], "an ended session sends nothing more");
+    assert_eq!(session.step(Input::End, at(61)), vec![], "the controller ends the session once");
+}
+
 #[test]
 fn the_app_ends_the_session_with_a_stop_report_and_keeps_the_player() {
     let mut session = playing(None);

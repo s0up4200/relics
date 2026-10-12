@@ -84,7 +84,7 @@ pub enum Input {
     LoadFailed,
     /// The user closed the Player window, pressed q, or sent the MPRIS Stop.
     Shutdown,
-    /// The app ends the session: a new Item replaces it, or the Library window closes.
+    /// The app ends the session: Back in the Player view, a new Item replaces it, or the Library window closes.
     End,
     /// The periodic tick of the caller.
     Tick,

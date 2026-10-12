@@ -2,13 +2,17 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use gpui::{
-    AppContext as _, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    AppContext as _, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, px, size,
 };
 use reqwest_client::ReqwestClient;
 use silo_omarchy::library::LibraryWindow;
 
-// The sidebar icons that the default gpui-kit bundle does not have.
-gpui_kit::assets::icon_assets!(SidebarIcons, [House, Film, Tv, Layers, Bookmark, RotateCcwClock]);
+// The sidebar and Player view icons that the default gpui-kit bundle does not have.
+gpui_kit::assets::icon_assets!(
+    SidebarIcons,
+    [House, Film, Tv, Layers, Bookmark, RotateCcwClock, Minimize, Volume2, VolumeX]
+);
 
 /// The default gpui-kit assets and the sidebar icons.
 struct Assets;
@@ -39,6 +43,8 @@ fn main() {
             WindowOptions {
                 app_id: Some("silo-omarchy".into()),
                 titlebar: Some(TitlebarOptions { title: Some("Silo".into()), ..Default::default() }),
+                // The Player view leaves a transparent hole where the video shows (ADR 0003).
+                window_background: WindowBackgroundAppearance::Transparent,
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1400.), px(900.)), cx))),
                 ..Default::default()
             },

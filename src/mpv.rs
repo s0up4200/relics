@@ -3,12 +3,13 @@
 //! session and turns mpv events into Playback session inputs.
 #![allow(clippy::disallowed_types)]
 
-use std::ffi::OsString;
+use std::ffi::{OsString, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use libmpv2::events::{Event, PropertyData};
+use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
 use libmpv2::{Format, Mpv, mpv_end_file_reason};
 
 use crate::api::types::Marker;
@@ -133,6 +134,26 @@ impl Player {
         self.mpv.set_property("pause", paused)
     }
 
+    /// Changes the volume by `delta` percent. mpv keeps it between 0 and `volume-max`.
+    pub fn add_volume(&self, delta: f64) -> Result<(), Error> {
+        self.mpv.command("add", &["volume", &delta.to_string()])
+    }
+
+    pub fn toggle_mute(&self) -> Result<(), Error> {
+        self.mpv.command("cycle", &["mute"])
+    }
+
+    /// The volume in percent, and whether the audio is muted.
+    pub fn volume(&self) -> Result<(f64, bool), Error> {
+        Ok((self.mpv.get_property("volume")?, self.mpv.get_property("mute")?))
+    }
+
+    /// The handle that the render thread of the Player view draws the video with. Open the Player with
+    /// `vo=libmpv`, and make the render context before the first load, else mpv plays no video.
+    pub fn video(&self) -> Video {
+        Video(self.mpv.clone())
+    }
+
     /// Runs one mpv input command, for example `["keypress", "a"]`. The tests use it.
     pub fn command(&self, args: &[&str]) -> Result<(), Error> {
         let (name, args) = args.split_first().expect("a command has a name");
@@ -142,6 +163,27 @@ impl Player {
     /// Reads an mpv property as text. The tests use it.
     pub fn property(&self, name: &str) -> Result<String, Error> {
         self.mpv.get_property(name)
+    }
+}
+
+/// The mpv handle of the render thread of the Player view.
+pub struct Video(Arc<Mpv>);
+
+impl Video {
+    /// Makes the OpenGL render context. Call it on the render thread, with the GL context current. Drop the
+    /// render context on the same thread, before the Player.
+    pub fn render_context<C: 'static>(
+        &self,
+        get_proc_address: fn(&C, &str) -> *mut c_void,
+        gl: C,
+        wl_display: *const c_void,
+    ) -> Result<RenderContext<'_>, Error> {
+        self.0.create_render_context([
+            RenderParam::ApiType(RenderParamApiType::OpenGl),
+            RenderParam::InitParams(OpenGLInitParams { get_proc_address, ctx: gl }),
+            // VA-API decoding needs the Wayland display to share the frames with OpenGL.
+            RenderParam::WaylandDisplay(wl_display),
+        ])
     }
 }
 

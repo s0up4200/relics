@@ -203,6 +203,17 @@ fn closing_the_player_ends_with_shutdown() {
     wait_for(&rx, |input| matches!(input, Input::Shutdown));
 }
 
+#[test]
+fn the_player_view_changes_the_volume_and_mutes() {
+    let (player, _rx) = open();
+    let (volume, _) = player.volume().unwrap();
+    player.add_volume(-5.0).unwrap();
+    player.toggle_mute().unwrap();
+    assert_eq!(player.volume().unwrap(), (volume - 5.0, true));
+    player.toggle_mute().unwrap();
+    assert!(!player.volume().unwrap().1);
+}
+
 fn open_with_controls() -> (Player, Receiver<Input>) {
     let (tx, rx) = mpsc::channel();
     let script = format!("{}/data/silo-controls.lua", env!("CARGO_MANIFEST_DIR"));
