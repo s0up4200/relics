@@ -1,5 +1,5 @@
 //! The panel of the sort, the filters or the A to Z jump, in sections. The Library page opens it from its bar.
-//! Search can open it on its own `Browse` and add its text to `Filters::groups` (#63).
+//! Search opens it on its own `Browse` and adds its text to the query.
 //!
 //! The arrows move through the entries, and Up and Down jump to the previous or next section. A text field
 //! takes the typed text: a year field takes digits, a Person field takes a name, and the field of a studio,
@@ -8,10 +8,10 @@
 use std::collections::HashMap;
 
 use gpui::{
-    Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, div, px,
+    Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement, ScrollHandle,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, div, px,
 };
-use gpui_omarchy::ActiveTheme;
+use gpui_omarchy::{ActiveTheme, Theme};
 
 use crate::api::wire;
 use crate::browse::{ADDED_SPANS, Browse, Choice, Facet, RELEASED_SPANS, SortField, Watch};
@@ -60,6 +60,24 @@ pub enum Outcome {
     Changed,
     /// The panel closes, after a pick in the sort or A to Z menu, or after Esc.
     Closed,
+}
+
+/// A pill of the bar above a grid: the sort, the filters, a chip or Clear all. `on` fills it, `focused` shows
+/// the focus ring. The caller adds the click.
+pub fn bar_pill(id: impl Into<ElementId>, label: SharedString, on: bool, focused: bool, t: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .clickable()
+        .px(px(18.))
+        .py(px(9.))
+        .rounded_full()
+        .text_size(px(14.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .bg(if on { t.foreground } else { gpui::hsla(0., 0., 1., 0.1) })
+        .text_color(if on { t.background } else { t.foreground })
+        .border_2()
+        .border_color(if focused { t.accent } else { gpui::transparent_black() })
+        .child(label)
 }
 
 /// The filter values that the server lists for a Library or for the catalog.

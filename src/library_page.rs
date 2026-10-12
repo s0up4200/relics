@@ -15,7 +15,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
 use crate::click::Clickable as _;
-use crate::filter_panel::{Facets, MenuKind, Outcome, Panel};
+use crate::filter_panel::{Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
@@ -281,20 +281,8 @@ impl LibraryPage {
     }
 
     fn pill(&self, index: usize, label: SharedString, on: bool, cx: &Context<Self>) -> AnyElement {
-        let t = cx.omarchy();
         let focused = self.active && self.in_bar && self.bar == index;
-        div()
-            .id(("library-bar", index))
-            .clickable()
-            .px(px(18.))
-            .py(px(9.))
-            .rounded_full()
-            .text_size(px(14.))
-            .font_weight(FontWeight::SEMIBOLD)
-            .bg(if on { t.foreground } else { gpui::hsla(0., 0., 1., 0.1) })
-            .text_color(if on { t.background } else { t.foreground })
-            .border_2()
-            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+        bar_pill(("library-bar", index), label, on, focused, cx.omarchy())
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.in_bar = true;
                 this.bar = index;
@@ -302,7 +290,6 @@ impl LibraryPage {
                     this.activate(control, window, cx);
                 }
             }))
-            .child(label)
             .into_any_element()
     }
 

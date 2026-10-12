@@ -48,7 +48,7 @@ A cast or crew member that the Silo server knows, with the titles that they took
 _Avoid_: Actor, as the general name. Actor is one role that a Person can have.
 
 **Filter panel**:
-The panel below the bar of a Library grid where the user picks the filters, in sections: watch status, video quality, rating, year, "added or released in the last", genres, and the facets. The app does not have the Advanced rule mode of the web client.
+The panel below the bar of a Library grid or of the Search titles where the user picks the filters, in sections: watch status, video quality, rating, year, "added or released in the last", genres, and the facets. The app does not have the Advanced rule mode of the web client.
 _Avoid_: Filter menu, Guided mode
 
 **Facet**:

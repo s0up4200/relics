@@ -1,20 +1,23 @@
 //! The Search page and the filmography query of the Person page. Search sends the text 200 ms after the last key.
 //! It shows the matching people in a row above a grid of the matching titles. Enter on a person opens the Person
-//! page.
+//! page. A bar below the field sorts and filters the titles with the sort and filter panel of a Library.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Datelike as _;
 use gpui::{
-    AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement, Render, RenderImage, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement, Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache};
-use crate::browse::PAGE_SIZE;
+use crate::browse::{Browse, Choice, PAGE_SIZE, SortField};
 use crate::click::Clickable as _;
+use crate::filter_panel::{Facets, MenuKind, Outcome, Panel, bar_pill};
 use crate::grid::{Grid, Move};
 use crate::home::{Open, Play};
 use crate::keys::Key;
@@ -29,13 +32,24 @@ pub struct OpenPerson {
     pub name: String,
 }
 
-/// The query of the titles that match `text`.
-pub fn query(text: &str) -> wire::CatalogQuery {
+/// The sort and filters of Search when the app starts: the newest added titles first, as in the web client.
+pub fn browse() -> Browse {
+    Browse { sort: SortField::DateAdded, descending: true, ..Browse::default() }
+}
+
+/// The query of the titles that match `text`, with the sort and the filters of `browse`. Search has no A to Z
+/// jump and no Episodes mode, so the letter and the mode stay out of the query.
+pub fn query(text: &str, browse: &Browse) -> wire::CatalogQuery {
+    let (groups, match_) = browse.filters.groups();
     wire::CatalogQuery {
         source: Some("query".into()),
         q: Some(text.into()),
         type_: Some("video".into()),
+        sort: Some(browse.sort.wire().into()),
+        order: Some(if browse.descending { "desc" } else { "asc" }.into()),
         limit: std::num::NonZeroU64::new(PAGE_SIZE),
+        match_,
+        groups,
         ..Default::default()
     }
 }
@@ -123,8 +137,19 @@ impl Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Field,
+    /// A control of the sort and filter bar.
+    Bar(usize),
     Person(usize),
     Titles,
+}
+
+/// A control of the sort and filter bar, in the order that h and l move through them.
+#[derive(Debug, Clone, PartialEq)]
+enum Control {
+    Sort,
+    Filter,
+    Chip(Choice),
+    ClearAll,
 }
 
 pub struct Search {
@@ -141,7 +166,14 @@ pub struct Search {
     people_loading: bool,
     /// The grid of the titles, made at the first search.
     titles: Option<Entity<Grid>>,
+    /// The sort and filters of the titles. They stay while the app runs.
+    browse: Browse,
+    /// The filter values of the whole catalog, for the filter panel.
+    facets: Facets,
+    /// The open sort or filter panel.
+    menu: Option<Panel>,
     artwork: Entity<ArtworkCache>,
+    _facets: Task<()>,
     _debounce: Task<()>,
     _people: Task<()>,
     _events: Vec<Subscription>,
@@ -154,6 +186,24 @@ impl EventEmitter<OpenPerson> for Search {}
 impl Search {
     pub fn new(client: Arc<Client>, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.drop_thumbs(cx)).detach();
+        let facets = cx.spawn({
+            let client = client.clone();
+            async move |this, cx| match client.filters(None).await {
+                Ok(filters) => {
+                    this.update(cx, |this, cx| {
+                        this.facets = filters.into();
+                        if let Some(menu) = &mut this.menu {
+                            menu.facets = this.facets.clone();
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                // The filter panel works without the values: it has no genre, language, studio, network or
+                // country section then.
+                Err(err) => eprintln!("silo-omarchy: cannot read the filter values of the catalog: {err}"),
+            }
+        });
         Self {
             client,
             field: Field::default(),
@@ -165,7 +215,11 @@ impl Search {
             people_error: None,
             people_loading: false,
             titles: None,
+            browse: browse(),
+            facets: Facets::default(),
+            menu: None,
             artwork: artwork::global(cx),
+            _facets: facets,
             _debounce: Task::ready(()),
             _people: Task::ready(()),
             _events: Vec::new(),
@@ -188,8 +242,16 @@ impl Search {
         self.set_focus(Focus::Field, cx);
     }
 
+    /// Moves the focus. A focus outside the bar closes the panel. A bar control that went away with a removed
+    /// chip gives the focus to the last control.
     fn set_focus(&mut self, focus: Focus, cx: &mut Context<Self>) {
-        self.focus = focus;
+        self.focus = match focus {
+            Focus::Bar(i) => Focus::Bar(i.min(self.controls().len() - 1)),
+            focus => {
+                self.menu = None;
+                focus
+            }
+        };
         let titles = self.active && focus == Focus::Titles;
         if let Some(grid) = &self.titles {
             grid.update(cx, |grid, cx| {
@@ -198,6 +260,65 @@ impl Search {
             });
         }
         cx.notify();
+    }
+
+    fn controls(&self) -> Vec<Control> {
+        let mut controls = vec![Control::Sort, Control::Filter];
+        let chips = self.browse.chips();
+        if !chips.is_empty() {
+            controls.extend(chips.into_iter().map(Control::Chip));
+            controls.push(Control::ClearAll);
+        }
+        controls
+    }
+
+    /// Loads the titles again with the sort and filters.
+    fn apply(&mut self, cx: &mut Context<Self>) {
+        if let Some(grid) = self.titles.as_ref().filter(|_| !self.shown.is_empty()) {
+            let query = query(&self.shown, &self.browse);
+            grid.update(cx, |grid, cx| grid.set_query(query, cx));
+        }
+        cx.notify();
+    }
+
+    /// Enter on bar control `index`: open the sort or filter panel, or remove a chip or all of them.
+    fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(control) = self.controls().get(index).cloned() else {
+            return;
+        };
+        let menu = |kind| Some(Panel::new(kind, self.facets.clone(), chrono::Local::now().year().into()));
+        match control {
+            Control::Sort => self.menu = menu(MenuKind::Sort),
+            Control::Filter => self.menu = menu(MenuKind::Filter),
+            Control::Chip(chip) => {
+                self.browse.remove(&chip);
+                self.apply(cx);
+            }
+            Control::ClearAll => {
+                self.browse.clear();
+                self.apply(cx);
+            }
+        }
+        self.set_focus(Focus::Bar(index), cx);
+    }
+
+    /// Closes the panel after a sort pick or Esc, and loads the titles again when the sort or a filter changed.
+    fn after_menu(&mut self, outcome: Outcome, before: Browse, cx: &mut Context<Self>) {
+        if outcome == Outcome::Closed {
+            self.menu = None;
+        }
+        if self.browse != before {
+            self.apply(cx);
+        }
+        self.set_focus(self.focus, cx);
+    }
+
+    fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
+        let before = self.browse.clone();
+        if let Some(menu) = &mut self.menu {
+            let outcome = menu.click(row, &mut self.browse);
+            self.after_menu(outcome, before, cx);
+        }
     }
 
     fn has_titles(&self, cx: &gpui::App) -> bool {
@@ -211,12 +332,15 @@ impl Search {
         self.people_error = None;
         self._people = Task::ready(());
         self.shown = text.clone();
-        self.set_focus(Focus::Field, cx);
+        // The old results go away. The bar and its panel stay.
+        if !matches!(self.focus, Focus::Bar(_)) {
+            self.set_focus(Focus::Field, cx);
+        }
         if text.is_empty() {
             self.people_loading = false;
             return;
         }
-        let query = query(&text);
+        let query = query(&text, &self.browse);
         match &self.titles {
             Some(grid) => grid.update(cx, |grid, cx| grid.set_query(query, cx)),
             None => {
@@ -260,6 +384,12 @@ impl Search {
     /// Handles a key. `typed` is the text that the key types. Returns false when the page does not use the key,
     /// for example Esc in an empty field.
     pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(menu) = &mut self.menu {
+            let before = self.browse.clone();
+            let outcome = menu.key(key, typed, &mut self.browse);
+            self.after_menu(outcome, before, cx);
+            return outcome != Outcome::Unused;
+        }
         let focus = match self.focus {
             Focus::Field => match self.field.key(key, typed, Instant::now()) {
                 FieldKey::Edited => {
@@ -280,12 +410,27 @@ impl Search {
                     self.search(String::new(), window, cx);
                     Focus::Field
                 }
+                FieldKey::Results if key == Key::Down => Focus::Bar(0),
                 FieldKey::Results if !self.people.is_empty() => Focus::Person(0),
                 FieldKey::Results if self.has_titles(cx) => Focus::Titles,
                 FieldKey::Results | FieldKey::Stay => Focus::Field,
                 FieldKey::Back | FieldKey::Unused => return false,
             },
             _ if key == Key::Other("/") => Focus::Field,
+            Focus::Bar(i) => match key {
+                Key::Other("enter") => {
+                    self.activate(i, cx);
+                    return true;
+                }
+                Key::Left if i == 0 => return false,
+                Key::Left => Focus::Bar(i - 1),
+                Key::Right => Focus::Bar(i + 1),
+                Key::Up => Focus::Field,
+                Key::Down if !self.people.is_empty() => Focus::Person(0),
+                Key::Down if self.has_titles(cx) => Focus::Titles,
+                Key::Down => Focus::Bar(i),
+                _ => return false,
+            },
             Focus::Person(i) => match key {
                 Key::Other("enter") => {
                     self.open_person(i, cx);
@@ -295,7 +440,7 @@ impl Search {
                 Key::Right if i + 1 < self.people.len() => Focus::Person(i + 1),
                 Key::Right => Focus::Person(i),
                 Key::Down if self.has_titles(cx) => Focus::Titles,
-                Key::Up => Focus::Field,
+                Key::Up => Focus::Bar(0),
                 _ => return false,
             },
             Focus::Titles => {
@@ -305,13 +450,45 @@ impl Search {
                 match grid.update(cx, |grid, cx| grid.key(key, cx)) {
                     Move::To(_) => Focus::Titles,
                     Move::OutTop if !self.people.is_empty() => Focus::Person(0),
-                    Move::OutTop => Focus::Field,
+                    Move::OutTop => Focus::Bar(0),
                     Move::OutLeft | Move::Stay => return false,
                 }
             }
         };
         self.set_focus(focus, cx);
         true
+    }
+
+    /// The sort and filter pills, and the chips of the active filters with Clear all.
+    fn bar(&self, cx: &Context<Self>) -> (Vec<AnyElement>, Vec<AnyElement>) {
+        let b = &self.browse;
+        let (mut pills, mut chips) = (Vec::new(), Vec::new());
+        for (index, control) in self.controls().into_iter().enumerate() {
+            let (label, on): (SharedString, bool) = match &control {
+                Control::Sort => {
+                    let arrow = if b.descending { "↓" } else { "↑" };
+                    (format!("Sort: {} {arrow}", b.sort.label()).into(), false)
+                }
+                Control::Filter => match b.chips().len() {
+                    0 => ("Filters".into(), false),
+                    count => (format!("Filters · {count}").into(), true),
+                },
+                Control::Chip(chip) => (format!("{} ×", chip.chip_label()).into(), false),
+                Control::ClearAll => ("Clear all".into(), false),
+            };
+            let focused = self.active && self.focus == Focus::Bar(index);
+            let pill = bar_pill(("search-bar", index), label, on, focused, cx.omarchy())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_focus(Focus::Bar(index), cx);
+                    this.activate(index, cx);
+                }))
+                .into_any_element();
+            match control {
+                Control::Sort | Control::Filter => pills.push(pill),
+                Control::Chip(_) | Control::ClearAll => chips.push(pill),
+            }
+        }
+        (pills, chips)
     }
 
     fn people_row(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -386,6 +563,14 @@ impl Render for Search {
                 div().text_size(px(34.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("Search"),
             );
         header = header.child(field);
+        let (pills, chips) = self.bar(cx);
+        header = header.child(div().flex().items_center().gap(px(8.)).children(pills));
+        if !chips.is_empty() {
+            header = header.child(div().flex().flex_wrap().gap(px(8.)).children(chips));
+        }
+        if let Some(menu) = &self.menu {
+            header = header.child(menu.render(&self.browse, self.active, cx, Self::click_menu));
+        }
         if let Some(error) = &self.people_error {
             header =
                 header.child(div().flex().items_center().gap(px(14.)).text_color(t.danger).child(error.clone()).child(
