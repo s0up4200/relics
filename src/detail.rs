@@ -1,6 +1,7 @@
-//! The detail page of an Item: a hero with the backdrop, the poster, the title, the metadata line, the quality
-//! badges, the overview and the buttons. A movie shows its cast. A series shows its seasons and a grid of 16:9
-//! episode cards. Each request asks for the artwork rung that the page needs at the window scale.
+//! The detail page of an Item: a hero with the backdrop, the poster, the type and the studio or network, the title
+//! logo or the title, the tagline, the metadata line, the quality badges, the ratings, the overview, the Directed by
+//! and Written by line, and the buttons. A series shows its seasons and a grid of 16:9 episode cards. Then come the
+//! Cast, Crew and Trailers sections. Each request asks for the artwork rung that the page needs at the window scale.
 
 use std::sync::Arc;
 
@@ -27,6 +28,10 @@ const GAP: f32 = 14.;
 const MARGIN: f32 = 48.;
 const POSTER_WIDTH: f32 = 200.;
 const CAST_WIDTH: f32 = 110.;
+const TRAILER_WIDTH: f32 = 220.;
+const HERO_HEIGHT: f32 = 500.;
+const LOGO_WIDTH: f32 = 400.;
+const LOGO_HEIGHT: f32 = 110.;
 
 pub struct Detail {
     client: Arc<Client>,
@@ -129,6 +134,7 @@ impl Detail {
                         let thumbs = [&item.backdrop_thumbhash, &item.poster_thumbhash]
                             .into_iter()
                             .chain(item.cast.iter().map(|c| &c.photo_thumbhash))
+                            .chain(item.crew.iter().map(|c| &c.photo_thumbhash))
                             .map(|hash| hash.as_deref().and_then(artwork::thumbhash))
                             .collect();
                         for old in std::mem::replace(&mut this.thumbs, thumbs).into_iter().flatten() {
@@ -188,8 +194,10 @@ impl Detail {
             version: self.version,
             seasons: self.seasons.len(),
             season: self.season,
-            cast: self.item.as_ref().filter(|item| item.type_ != "series").map_or(0, |item| item.cast.len()),
             episodes: self.episodes.len(),
+            cast: self.item.as_ref().map_or(0, |item| item.cast.len()),
+            crew: self.item.as_ref().map_or(0, |item| item.crew.len()),
+            trailers: self.item.as_ref().map_or(0, |item| trailers(item).len()),
             columns: self.columns,
         }
     }
@@ -218,19 +226,15 @@ impl Detail {
             (Focus::Version(i), Key::Other("enter")) => self.choose_version(i, cx),
             (Focus::Season(i), Key::Other("enter")) => self.choose_season(i, cx),
             (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
-            (Focus::Cast(i), Key::Other("enter")) => self.open_person(i, cx),
+            (Focus::Cast(_) | Focus::Crew(_), Key::Other("enter")) => self.open_person(self.focus, cx),
+            (Focus::Trailer(i), Key::Other("enter")) => self.open_trailer(i, cx),
             (_, Key::Other("p")) => cx.emit(Play(self.play_item(item))),
             (focus, key) => match self.rows().step(focus, key) {
                 Step::To(focus) => {
                     self.focus = focus;
                     // ponytail: scrolls to the row, not the card; a season with many rows of episodes can hide
                     // the focused card below the window.
-                    self.scroll.scroll_to_item(match focus {
-                        Focus::Action(_) => 0,
-                        Focus::Season(_) | Focus::Version(_) => 1,
-                        Focus::Cast(_) => 1 + usize::from(self.picker_len() > 0),
-                        Focus::Episode(_) => 2,
-                    });
+                    self.scroll.scroll_to_item(self.rows().child(focus));
                 }
                 Step::OutLeft | Step::Stay => return false,
             },
@@ -299,12 +303,25 @@ impl Detail {
         cx.notify();
     }
 
-    /// Opens the Person grid of a cast member that the server knows.
-    fn open_person(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.focus = Focus::Cast(index);
-        let credit = self.item.as_ref().and_then(|item| item.cast.get(index));
-        if let Some((id, name)) = credit.and_then(|c| Some((c.person_id.clone()?, c.name.clone()))) {
-            cx.emit(OpenPerson { id, name });
+    /// Opens the Person grid of the cast or crew member at `focus`, when the server knows the person.
+    fn open_person(&mut self, focus: Focus, cx: &mut Context<Self>) {
+        self.focus = focus;
+        let person = self.item.as_ref().and_then(|item| match focus {
+            Focus::Cast(i) => item.cast.get(i).map(|c| (&c.person_id, &c.name)),
+            Focus::Crew(i) => item.crew.get(i).map(|c| (&c.person_id, &c.name)),
+            _ => None,
+        });
+        if let Some((Some(id), name)) = person {
+            cx.emit(OpenPerson { id: id.clone(), name: name.clone() });
+        }
+        cx.notify();
+    }
+
+    /// Opens a trailer in the default browser.
+    fn open_trailer(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.focus = Focus::Trailer(index);
+        if let Some((_, url)) = self.item.as_ref().and_then(|item| trailers(item).into_iter().nth(index)) {
+            cx.open_url(&url);
         }
         cx.notify();
     }
@@ -362,13 +379,34 @@ impl Detail {
             ))
         });
         let labels = self.versions.get(self.version).map_or_else(|| quality_badges(item), version_labels);
+        let title_text = {
+            let (text, color) = (item.title.clone(), t.bright);
+            move || {
+                div()
+                    .text_size(px(46.))
+                    .font_weight(FontWeight::EXTRA_BOLD)
+                    .text_color(color)
+                    .child(text.clone())
+                    .into_any_element()
+            }
+        };
+        // The logo shows in place of the title. The title shows while the logo loads, and when it fails.
+        let title = match self.url(&item.logo_url) {
+            Some(url) => {
+                div().w(px(LOGO_WIDTH)).h(px(LOGO_HEIGHT)).child(artwork::logo(url, title_text)).into_any_element()
+            }
+            None => title_text(),
+        };
+        let secondary = t.secondary;
+        let line =
+            |text: String| (!text.is_empty()).then(|| div().text_size(px(14.)).text_color(secondary).child(text));
         let badges = labels.into_iter().map(|badge| {
             div().px(px(8.)).py(px(2.)).rounded_full().bg(gpui::hsla(0., 0., 1., 0.1)).text_size(px(10.)).child(badge)
         });
         div()
             .relative()
             .w_full()
-            .h(px(420.))
+            .h(px(HERO_HEIGHT))
             .flex_none()
             .child(div().absolute().inset_0().child(artwork::image(self.url(&item.backdrop_url), self.thumb(0), width)))
             .child(div().absolute().inset_0().bg(linear_gradient(
@@ -401,17 +439,19 @@ impl Detail {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            .child(div().text_size(px(11.)).text_color(t.secondary).child(item.type_.to_uppercase()))
-                            .child(
-                                div()
-                                    .text_size(px(46.))
-                                    .font_weight(FontWeight::EXTRA_BOLD)
-                                    .text_color(t.bright)
-                                    .child(item.title.clone()),
+                            .child(div().text_size(px(11.)).text_color(t.secondary).child(kind_line(item)))
+                            .child(title)
+                            .children(
+                                item.tagline
+                                    .clone()
+                                    .filter(|text| !text.is_empty())
+                                    .map(|text| div().italic().child(text)),
                             )
                             .child(div().text_color(t.secondary).child(meta_line(item)))
                             .child(div().flex().gap(px(6.)).children(badges))
+                            .children(line(ratings_line(item)))
                             .children(item.overview.clone().map(|text| div().line_clamp(3).child(text)))
+                            .children(line(credits_line(item)))
                             .child(div().pt(px(6.)).flex().gap(px(10.)).children(buttons)),
                     ),
             )
@@ -483,47 +523,105 @@ impl Detail {
         div().px(px(MARGIN)).flex().flex_wrap().gap(px(GAP)).children(cards).into_any_element()
     }
 
-    fn cast(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
+    /// A cast or crew card: the photo, the name, and the character or the job. `thumb` is the index of its
+    /// Thumbhash in `thumbs`.
+    fn person_card(
+        &self,
+        focus: Focus,
+        (name, line, photo): (&str, &str, &Option<String>),
+        thumb: usize,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let t = cx.omarchy();
-        let cards = item.cast.iter().enumerate().map(|(i, credit)| {
-            let focused = self.active && self.focus == Focus::Cast(i);
+        let focused = self.active && self.focus == focus;
+        let id = if matches!(focus, Focus::Crew(_)) { "detail-crew" } else { "detail-cast" };
+        div()
+            .id((id, focus.place().1))
+            .clickable()
+            .w(px(CAST_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .on_click(cx.listener(move |this, _, _, cx| this.open_person(focus, cx)))
+            .child(
+                div()
+                    .w(px(CAST_WIDTH))
+                    .h(px(150.))
+                    .rounded(px(10.))
+                    .overflow_hidden()
+                    .bg(t.surface)
+                    .border_2()
+                    .border_color(if focused { t.accent } else { gpui::transparent_black() })
+                    .child(artwork::image(self.url(photo), self.thumb(thumb), CAST_WIDTH)),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(if focused { t.bright } else { t.foreground })
+                    .truncate()
+                    .child(name.to_string()),
+            )
+            .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(line.to_string()))
+    }
+
+    /// The Cast, Crew and Trailers sections that have cards. Each has a row of cards that scrolls sideways.
+    fn sections(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> Vec<AnyElement> {
+        let t = cx.omarchy();
+        let section = |title: &'static str, id: &'static str, cards: Vec<gpui::Stateful<gpui::Div>>| {
+            (!cards.is_empty()).then(|| {
+                div()
+                    .px(px(MARGIN))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child(title))
+                    .child(div().id(id).flex().gap(px(GAP)).overflow_x_scroll().children(cards))
+                    .into_any_element()
+            })
+        };
+        let cast = item.cast.iter().enumerate().map(|(i, credit)| {
+            let card = (credit.name.as_str(), credit.character.as_str(), &credit.photo_url);
+            self.person_card(Focus::Cast(i), card, 2 + i, cx)
+        });
+        let crew = item.crew.iter().enumerate().map(|(i, credit)| {
+            let card = (credit.name.as_str(), credit.job.as_str(), &credit.photo_url);
+            self.person_card(Focus::Crew(i), card, 2 + item.cast.len() + i, cx)
+        });
+        let videos = trailers(item).into_iter().enumerate().map(|(i, (video, _))| {
+            let focused = self.active && self.focus == Focus::Trailer(i);
+            let official = if video.is_official { " · Official" } else { "" };
             div()
-                .id(("detail-cast", i))
+                .id(("detail-trailer", i))
                 .clickable()
-                .w(px(CAST_WIDTH))
+                .w(px(TRAILER_WIDTH))
                 .flex_none()
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_person(i, cx)))
-                .child(
-                    div()
-                        .w(px(CAST_WIDTH))
-                        .h(px(150.))
-                        .rounded(px(10.))
-                        .overflow_hidden()
-                        .bg(t.surface)
-                        .border_2()
-                        .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                        .child(artwork::image(self.url(&credit.photo_url), self.thumb(i + 2), CAST_WIDTH)),
-                )
+                .p(px(12.))
+                .rounded(px(10.))
+                .bg(t.surface)
+                .border_2()
+                .border_color(if focused { t.accent } else { gpui::transparent_black() })
+                .on_click(cx.listener(move |this, _, _, cx| this.open_trailer(i, cx)))
                 .child(
                     div()
                         .text_size(px(13.))
                         .text_color(if focused { t.bright } else { t.foreground })
-                        .truncate()
-                        .child(credit.name.clone()),
+                        .line_clamp(2)
+                        .child(format!("▶ {}", video.name.as_deref().unwrap_or(&video.kind))),
                 )
-                .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(credit.character.clone()))
+                .child(div().text_size(px(12.)).text_color(t.secondary).child(format!("{}{official}", video.kind)))
         });
-        div()
-            .px(px(MARGIN))
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child("Cast"))
-            .child(div().id("detail-cast").flex().gap(px(GAP)).overflow_x_scroll().children(cards))
-            .into_any_element()
+        [
+            section("Cast", "detail-cast", cast.collect()),
+            section("Crew", "detail-crew", crew.collect()),
+            section("Trailers", "detail-trailers", videos.collect()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -550,8 +648,8 @@ impl Render for Detail {
             (None, None) => Some(div().px(px(MARGIN)).text_color(t.secondary).child("Loading…")),
             _ => None,
         };
-        // The children keep the order hero, versions, seasons, episodes, cast, so that `key` can scroll to them by
-        // index. A series has no versions and a movie has no seasons.
+        // The children are the hero and one child for each row that is not empty, in the order of `Rows`, so that
+        // `key` can scroll to them by index. A series has no versions and a movie has no seasons.
         let mut page = div()
             .id("detail-page")
             .size_full()
@@ -566,11 +664,13 @@ impl Render for Detail {
             if self.picker_len() > 0 {
                 page = page.child(self.version_pills(cx));
             }
-            if item.type_ == "series" {
-                page = page.child(self.season_pills(cx)).child(self.episode_grid(cx));
-            } else if !item.cast.is_empty() {
-                page = page.child(self.cast(item, cx));
+            if !self.seasons.is_empty() {
+                page = page.child(self.season_pills(cx));
             }
+            if !self.episodes.is_empty() {
+                page = page.child(self.episode_grid(cx));
+            }
+            page = page.children(self.sections(item, cx));
         }
         page.children(status)
     }
@@ -606,7 +706,8 @@ pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
     actions
 }
 
-/// The focused control: a hero button, a version pill, a season pill, an episode card or a cast card, by index.
+/// The focused control, by index: a hero button, a version pill, a season pill, an episode card, a cast card, a
+/// crew card or a trailer card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Action(usize),
@@ -614,7 +715,34 @@ pub enum Focus {
     Season(usize),
     Episode(usize),
     Cast(usize),
+    Crew(usize),
+    Trailer(usize),
 }
+
+impl Focus {
+    /// The control at `index` in row `row` of the page, from the top.
+    fn at(row: usize, index: usize) -> Self {
+        [Focus::Action, Focus::Version, Focus::Season, Focus::Episode, Focus::Cast, Focus::Crew, Focus::Trailer][row](
+            index,
+        )
+    }
+
+    /// The row of the control, from the top, and its index in the row.
+    fn place(self) -> (usize, usize) {
+        match self {
+            Focus::Action(i) => (0, i),
+            Focus::Version(i) => (1, i),
+            Focus::Season(i) => (2, i),
+            Focus::Episode(i) => (3, i),
+            Focus::Cast(i) => (4, i),
+            Focus::Crew(i) => (5, i),
+            Focus::Trailer(i) => (6, i),
+        }
+    }
+}
+
+/// The row of the episode grid. The other rows go left and right only.
+const EPISODE_ROW: usize = 3;
 
 /// Where a key takes the focus.
 #[derive(Debug, PartialEq, Eq)]
@@ -626,7 +754,7 @@ pub enum Step {
     Stay,
 }
 
-/// The number of controls in each row of the page.
+/// The number of controls in each row of the page. The page shows a row only when it has a control.
 #[derive(Debug, Clone, Copy)]
 pub struct Rows {
     pub actions: usize,
@@ -638,43 +766,58 @@ pub struct Rows {
     /// The index of the chosen season.
     pub season: usize,
     pub episodes: usize,
-    /// The cast cards of a movie.
     pub cast: usize,
+    pub crew: usize,
+    pub trailers: usize,
     /// The columns of the episode grid.
     pub columns: usize,
 }
 
 impl Rows {
+    fn len(&self, row: usize) -> usize {
+        [self.actions, self.versions, self.seasons, self.episodes, self.cast, self.crew, self.trailers][row]
+    }
+
+    /// The control that the focus goes to in `row`: the chosen version or season, the first card of the last
+    /// episode row when the focus comes from below, else the first control.
+    fn enter(&self, row: usize, from_below: bool) -> Focus {
+        match row {
+            1 => Focus::Version(self.version),
+            2 => Focus::Season(self.season),
+            EPISODE_ROW if from_below => Focus::Episode((self.episodes - 1) / self.columns * self.columns),
+            row => Focus::at(row, 0),
+        }
+    }
+
+    /// The index of the page child that holds the control: the hero, then one child for each row that is not empty.
+    pub fn child(&self, focus: Focus) -> usize {
+        let (row, _) = focus.place();
+        (0..row).filter(|&r| r == 0 || self.len(r) > 0).count()
+    }
+
     pub fn step(&self, focus: Focus, key: Key) -> Step {
-        let along = |i: usize, len: usize, make: fn(usize) -> Focus| match key {
-            Key::Left if i == 0 => Step::OutLeft,
-            Key::Left => Step::To(make(i - 1)),
-            Key::Right if i + 1 < len => Step::To(make(i + 1)),
-            _ => Step::Stay,
+        let (row, i) = focus.place();
+        let leave = |down: bool| {
+            let next =
+                if down { (row + 1..7).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
+            next.map_or(Step::Stay, |next| Step::To(self.enter(next, !down)))
         };
-        let (down, up) = (key == Key::Down, key == Key::Up);
-        match focus {
-            Focus::Action(_) if down && self.versions > 0 => Step::To(Focus::Version(self.version)),
-            Focus::Action(_) if down && self.seasons > 0 => Step::To(Focus::Season(self.season)),
-            Focus::Action(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
-            Focus::Action(_) if down && self.cast > 0 => Step::To(Focus::Cast(0)),
-            Focus::Action(i) => along(i, self.actions, Focus::Action),
-            Focus::Version(_) if up => Step::To(Focus::Action(0)),
-            Focus::Version(_) if down && self.cast > 0 => Step::To(Focus::Cast(0)),
-            Focus::Version(i) => along(i, self.versions, Focus::Version),
-            Focus::Season(_) if up => Step::To(Focus::Action(0)),
-            Focus::Season(_) if down && self.episodes > 0 => Step::To(Focus::Episode(0)),
-            Focus::Season(i) => along(i, self.seasons, Focus::Season),
-            Focus::Cast(_) if up && self.versions > 0 => Step::To(Focus::Version(self.version)),
-            Focus::Cast(_) if up => Step::To(Focus::Action(0)),
-            Focus::Cast(i) => along(i, self.cast, Focus::Cast),
-            Focus::Episode(i) => match crate::grid::move_focus(i, key, self.episodes, self.columns) {
+        if row == EPISODE_ROW {
+            return match crate::grid::move_focus(i, key, self.episodes, self.columns) {
                 Move::To(i) => Step::To(Focus::Episode(i)),
-                Move::OutTop if self.seasons > 0 => Step::To(Focus::Season(self.season)),
-                Move::OutTop => Step::To(Focus::Action(0)),
+                Move::OutTop => leave(false),
                 Move::OutLeft => Step::OutLeft,
+                Move::Stay if key == Key::Down => leave(true),
                 Move::Stay => Step::Stay,
-            },
+            };
+        }
+        match key {
+            Key::Down => leave(true),
+            Key::Up => leave(false),
+            Key::Left if i == 0 => Step::OutLeft,
+            Key::Left => Step::To(Focus::at(row, i - 1)),
+            Key::Right if i + 1 < self.len(row) => Step::To(Focus::at(row, i + 1)),
+            _ => Step::Stay,
         }
     }
 }
@@ -694,6 +837,59 @@ pub fn meta_line(item: &wire::CatalogItemDetail) -> String {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// The line above the title: the type, and the network of a series or the first studio, for example
+/// "SERIES · APPLE TV".
+pub fn kind_line(item: &wire::CatalogItemDetail) -> String {
+    let company = if item.type_ == "series" { item.networks.first() } else { None }.or(item.studios.first());
+    [Some(&item.type_), company].into_iter().flatten().map(|part| part.to_uppercase()).collect::<Vec<_>>().join(" · ")
+}
+
+/// The ratings from each source that the server sends, in its order, for example "IMDb 8.3 · TMDB 7.9".
+pub fn ratings_line(item: &wire::CatalogItemDetail) -> String {
+    item.ratings.iter().map(|r| format!("{} {}", r.name, r.display)).collect::<Vec<_>>().join(" · ")
+}
+
+/// The crew jobs that the Written by part names.
+const WRITER_JOBS: [&str; 4] = ["Writer", "Screenplay", "Story", "Teleplay"];
+
+/// "Directed by … · Written by …", with each name once, or "" when the crew has no director and no writer.
+pub fn credits_line(item: &wire::CatalogItemDetail) -> String {
+    let names = |jobs: &[&str]| {
+        let mut names: Vec<&str> = Vec::new();
+        for credit in item.crew.iter().filter(|c| jobs.contains(&c.job.as_str())) {
+            if !names.contains(&credit.name.as_str()) {
+                names.push(&credit.name);
+            }
+        }
+        names.join(", ")
+    };
+    [("Directed by", names(&["Director"])), ("Written by", names(&WRITER_JOBS))]
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(label, names)| format!("{label} {names}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The trailers and other videos that open in the browser, with their page. A video on another site, or with a key
+/// that is not a plain id, is left out.
+pub fn trailers(item: &wire::CatalogItemDetail) -> Vec<(&wire::ItemVideoInfo, String)> {
+    item.videos
+        .iter()
+        .filter(|v| {
+            !v.site_key.is_empty() && v.site_key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .filter_map(|video| {
+            let url = match video.site.to_lowercase().as_str() {
+                "youtube" => format!("https://www.youtube.com/watch?v={}", video.site_key),
+                "vimeo" => format!("https://vimeo.com/{}", video.site_key),
+                _ => return None,
+            };
+            Some((video, url))
+        })
+        .collect()
 }
 
 fn resolution(resolution: &str) -> String {
@@ -821,7 +1017,18 @@ mod tests {
     #[test]
     fn hjkl_moves_between_the_buttons_the_seasons_and_the_episode_grid() {
         // 3 buttons, 2 seasons with season 1 chosen, 5 episodes in 2 columns.
-        let rows = Rows { actions: 3, versions: 0, version: 0, seasons: 2, season: 1, episodes: 5, cast: 0, columns: 2 };
+        let rows = Rows {
+            actions: 3,
+            versions: 0,
+            version: 0,
+            seasons: 2,
+            season: 1,
+            episodes: 5,
+            cast: 0,
+            crew: 0,
+            trailers: 0,
+            columns: 2,
+        };
         let to = |focus| Step::To(focus);
         assert_eq!(rows.step(Focus::Action(0), Key::Right), to(Focus::Action(1)));
         assert_eq!(rows.step(Focus::Action(2), Key::Right), Step::Stay);
@@ -834,7 +1041,18 @@ mod tests {
         assert_eq!(rows.step(Focus::Episode(1), Key::Up), to(Focus::Season(1)));
         assert_eq!(rows.step(Focus::Episode(2), Key::Left), Step::OutLeft);
         assert_eq!(rows.step(Focus::Action(0), Key::Up), Step::Stay);
-        let movie = Rows { actions: 2, versions: 0, version: 0, seasons: 0, season: 0, episodes: 0, cast: 0, columns: 4 };
+        let movie = Rows {
+            actions: 2,
+            versions: 0,
+            version: 0,
+            seasons: 0,
+            season: 0,
+            episodes: 0,
+            cast: 0,
+            crew: 0,
+            trailers: 0,
+            columns: 4,
+        };
         assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
         let loading = Rows { episodes: 0, ..rows };
         assert_eq!(loading.step(Focus::Season(0), Key::Down), Step::Stay);
@@ -842,7 +1060,18 @@ mod tests {
 
     #[test]
     fn hjkl_moves_between_the_buttons_and_the_cast_of_a_movie() {
-        let movie = Rows { actions: 2, versions: 0, version: 0, seasons: 0, season: 0, episodes: 0, cast: 3, columns: 4 };
+        let movie = Rows {
+            actions: 2,
+            versions: 0,
+            version: 0,
+            seasons: 0,
+            season: 0,
+            episodes: 0,
+            cast: 3,
+            crew: 0,
+            trailers: 0,
+            columns: 4,
+        };
         let to = |focus| Step::To(focus);
         assert_eq!(movie.step(Focus::Action(1), Key::Down), to(Focus::Cast(0)));
         assert_eq!(movie.step(Focus::Cast(0), Key::Right), to(Focus::Cast(1)));
@@ -861,7 +1090,8 @@ mod tests {
     }
 
     fn range(hdr: bool, track: serde_json::Value) -> String {
-        let mut track_fields = json!({"interlaced": false, "dv_bl_compat_id_present": false, "dv_config_present": false});
+        let mut track_fields =
+            json!({"interlaced": false, "dv_bl_compat_id_present": false, "dv_config_present": false});
         track_fields.as_object_mut().unwrap().extend(track.as_object().unwrap().clone());
         video_range(&version(json!({"hdr": hdr, "video_tracks": [track_fields]})))
     }
@@ -897,7 +1127,18 @@ mod tests {
 
     #[test]
     fn hjkl_moves_through_the_version_picker_of_a_movie() {
-        let movie = Rows { actions: 2, versions: 3, version: 1, seasons: 0, season: 0, episodes: 0, cast: 2, columns: 4 };
+        let movie = Rows {
+            actions: 2,
+            versions: 3,
+            version: 1,
+            seasons: 0,
+            season: 0,
+            episodes: 0,
+            cast: 2,
+            crew: 0,
+            trailers: 0,
+            columns: 4,
+        };
         let to = |focus| Step::To(focus);
         assert_eq!(movie.step(Focus::Action(0), Key::Down), to(Focus::Version(1)), "down goes to the chosen version");
         assert_eq!(movie.step(Focus::Version(1), Key::Right), to(Focus::Version(2)));
@@ -916,5 +1157,87 @@ mod tests {
         assert_eq!(quality_badges(&uhd), ["4K", "HDR", "HEVC"]);
         let hd = detail(json!({"effective_version_resolution": "1080p", "effective_version_hdr": false}));
         assert_eq!(quality_badges(&hd), ["1080p"]);
+    }
+
+    #[test]
+    fn the_kind_line_names_the_network_of_a_series_and_the_studio_of_a_movie() {
+        assert_eq!(kind_line(&detail(json!({}))), "MOVIE");
+        let movie = detail(json!({"studios": ["Crossbow Productions", "Gruskoff"], "networks": []}));
+        assert_eq!(kind_line(&movie), "MOVIE · CROSSBOW PRODUCTIONS");
+        let series = detail(json!({"type": "series", "studios": ["AMC Studios"], "networks": ["Apple TV"]}));
+        assert_eq!(kind_line(&series), "SERIES · APPLE TV");
+    }
+
+    #[test]
+    fn the_ratings_line_has_each_source_in_the_server_order() {
+        assert_eq!(ratings_line(&detail(json!({"ratings": []}))), "");
+        let rated = detail(json!({"ratings": [
+            {"source": "imdb", "name": "IMDb", "score": 83, "display": "8.3"},
+            {"source": "rt_critic", "name": "Rotten Tomatoes", "score": 87, "display": "87%"},
+        ]}));
+        assert_eq!(ratings_line(&rated), "IMDb 8.3 · Rotten Tomatoes 87%");
+    }
+
+    #[test]
+    fn the_credits_line_names_the_directors_and_the_writers_once() {
+        assert_eq!(credits_line(&detail(json!({"crew": []}))), "");
+        let crew = |job: &str, name: &str| json!({"job": job, "name": name});
+        let movie = detail(json!({"crew": [
+            crew("Director", "Mel Brooks"), crew("Screenplay", "Mel Brooks"), crew("Screenplay", "Gene Wilder"),
+            crew("Writer", "Gene Wilder"), crew("Producer", "Michael Gruskoff"),
+        ]}));
+        assert_eq!(credits_line(&movie), "Directed by Mel Brooks · Written by Mel Brooks, Gene Wilder");
+        let produced = detail(json!({"crew": [crew("Producer", "Michael Gruskoff")]}));
+        assert_eq!(credits_line(&produced), "");
+    }
+
+    #[test]
+    fn a_trailer_on_youtube_or_vimeo_opens_its_page() {
+        let video =
+            |site: &str, key: &str| json!({"is_official": true, "kind": "Trailer", "site": site, "site_key": key});
+        let item = detail(json!({"videos": [
+            video("YouTube", "dQw4w9WgXcQ"), video("Vimeo", "76979871"), video("Dailymotion", "x7"),
+            video("YouTube", "a&b=c"), video("YouTube", ""),
+        ]}));
+        let urls: Vec<_> = trailers(&item).into_iter().map(|(_, url)| url).collect();
+        assert_eq!(urls, ["https://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://vimeo.com/76979871"]);
+    }
+
+    #[test]
+    fn hjkl_moves_down_through_the_episodes_cast_crew_and_trailers_of_a_series() {
+        // 2 seasons, 5 episodes in 2 columns, then 2 cast, 3 crew and 1 trailer.
+        let series = Rows {
+            actions: 2,
+            versions: 0,
+            version: 0,
+            seasons: 2,
+            season: 0,
+            episodes: 5,
+            cast: 2,
+            crew: 3,
+            trailers: 1,
+            columns: 2,
+        };
+        let to = |focus| Step::To(focus);
+        assert_eq!(series.step(Focus::Episode(3), Key::Down), to(Focus::Episode(4)));
+        assert_eq!(
+            series.step(Focus::Episode(4), Key::Down),
+            to(Focus::Cast(0)),
+            "down from the last row leaves the grid"
+        );
+        assert_eq!(series.step(Focus::Cast(1), Key::Up), to(Focus::Episode(4)), "up goes to the last row of the grid");
+        assert_eq!(series.step(Focus::Cast(1), Key::Down), to(Focus::Crew(0)));
+        assert_eq!(series.step(Focus::Crew(1), Key::Right), to(Focus::Crew(2)));
+        assert_eq!(series.step(Focus::Crew(0), Key::Left), Step::OutLeft);
+        assert_eq!(series.step(Focus::Crew(2), Key::Down), to(Focus::Trailer(0)));
+        assert_eq!(series.step(Focus::Trailer(0), Key::Down), Step::Stay);
+        assert_eq!(series.step(Focus::Trailer(0), Key::Up), to(Focus::Crew(0)));
+        let no_crew = Rows { crew: 0, ..series };
+        assert_eq!(no_crew.step(Focus::Trailer(0), Key::Up), to(Focus::Cast(0)), "an empty row is skipped");
+        // The page children are the hero and one for each row that is not empty.
+        assert_eq!(series.child(Focus::Action(1)), 0);
+        assert_eq!(series.child(Focus::Season(1)), 1);
+        assert_eq!(series.child(Focus::Trailer(0)), 5, "hero, seasons, episodes, cast, crew; a series has no versions");
+        assert_eq!(no_crew.child(Focus::Trailer(0)), 4);
     }
 }

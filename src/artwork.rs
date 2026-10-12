@@ -478,6 +478,21 @@ pub fn image(url: Option<String>, thumb: Option<Arc<RenderImage>>, width: f32) -
         .into_any_element()
 }
 
+/// The title logo at `url`, scaled to fit its box. It loads at full size, because the cache shrinks an image to a
+/// JPEG and the logo needs its transparency. `fallback` shows while the logo loads and after it fails.
+pub fn logo(url: String, fallback: impl Fn() -> AnyElement + Clone + 'static) -> AnyElement {
+    let id = SharedString::from(url.clone());
+    let source =
+        move |window: &mut Window, cx: &mut App| global(cx).update(cx, |cache, cx| cache.load(&url, 0, window, cx));
+    img(ImageSource::Custom(Arc::new(source)))
+        .id(id)
+        .size_full()
+        .object_fit(ObjectFit::Contain)
+        .with_loading(fallback.clone())
+        .with_fallback(fallback)
+        .into_any_element()
+}
+
 /// Decodes a base64 Thumbhash to a small blurred image.
 pub fn thumbhash(hash: &str) -> Option<Arc<RenderImage>> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(hash).ok()?;
