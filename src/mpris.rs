@@ -1,4 +1,4 @@
-//! The MPRIS service. While the Player window is open, the app owns the bus name
+//! The MPRIS service. While mpv plays, the app owns the bus name
 //! `org.mpris.MediaPlayer2.silo_omarchy`, so the media keys and the desktop media
 //! controls reach the Playback session as inputs.
 

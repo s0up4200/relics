@@ -110,7 +110,7 @@ fn the_position_in_a_report_is_the_source_position() {
 }
 
 #[test]
-fn a_closed_window_sends_the_stop_report_and_closes_the_player() {
+fn an_mpv_shutdown_sends_the_stop_report_and_closes_the_player() {
     let mut session = playing(None);
     session.step(Input::Position(300.0), at(1));
     assert_eq!(session.step(Input::Shutdown, at(2)), vec![stop(300.0, 1), Command::ClosePlayer]);
@@ -177,12 +177,6 @@ fn an_unplayable_item_shows_the_server_message() {
     let commands =
         session.step(Input::Started { decision: Decision::Unknown("queued".into()), access: access() }, at(0));
     assert!(matches!(&commands[..], [Command::ShowError(text), Command::ClosePlayer] if text.contains("queued")));
-}
-
-#[test]
-fn the_controller_gets_the_theme_when_it_is_ready() {
-    let mut session = playing(None);
-    assert_eq!(session.step(Input::ControlsReady, at(1)), vec![Command::SendTheme, Command::ShowMarkers(vec![])]);
 }
 
 /// Starts a session with `settings` on the fixture plan (direct play), whose audio is in `audio_language`, and

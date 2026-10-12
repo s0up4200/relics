@@ -107,14 +107,12 @@ pub enum Input {
     EndOfFile,
     /// mpv could not open or read the file.
     LoadFailed,
-    /// The user closed the Player window, pressed q, or sent the MPRIS Stop.
+    /// mpv quit, or the user sent the MPRIS Stop.
     Shutdown,
     /// The app ends the session: Back in the Player view, a new Item replaces it, or the Library window closes.
     End,
     /// The periodic tick of the caller.
     Tick,
-    /// The Lua controller loaded and waits for the theme.
-    ControlsReady,
     /// The user took the Skip prompt, with a click or Enter.
     Action,
     /// The Item has a next episode.
@@ -196,12 +194,10 @@ pub enum Command {
     Progress { session_id: String, sample: Sample },
     /// Send `stopPlayback`, with the final sample when the session has one.
     Stop { session_id: String, sample: Option<Sample> },
-    /// Destroy the mpv handle, which closes the Player window.
+    /// Destroy the mpv handle, which closes the Player view.
     ClosePlayer,
     /// Show this text to the user.
     ShowError(String),
-    /// Send the theme colors to the Lua controller.
-    SendTheme,
     /// Add the subtitle file at `url` to mpv and show it.
     AddSubtitle { url: String, title: String, language: String },
     /// Show the subtitle track with this mpv track id. `None` hides the subtitles.
@@ -214,9 +210,9 @@ pub enum Command {
     ShowPrompt(String),
     /// Seek to this player position.
     Seek(f64),
-    /// Play the next episode in the same Player view or Player window. The session has already ended.
+    /// Play the next episode in the same Player view. The session has already ended.
     PlayNext,
-    /// Play the previous episode in the same Player view or Player window. The session has already ended.
+    /// Play the previous episode in the same Player view. The session has already ended.
     PlayPrevious,
     /// Set the mpv `pause` property.
     SetPause(bool),
@@ -532,7 +528,6 @@ impl Session {
                 commands.extend(self.renew(now));
                 commands
             }
-            Input::ControlsReady => vec![Command::SendTheme, self.show_markers()],
             Input::Action if self.chain == Chain::Lost => {
                 self.chain = Chain::Healthy;
                 let mut commands = vec![Command::ShowPrompt(String::new())];
@@ -976,7 +971,7 @@ impl Session {
         self.still_watching.unwrap_or_else(|| self.source_position())
     }
 
-    /// Ends the session at `position` and plays the next episode in the same Player view or Player window.
+    /// Ends the session at `position` and plays the next episode in the same Player view.
     fn play_next(&mut self, position: Option<f64>) -> Vec<Command> {
         let mut commands = self.finish(position, false);
         commands.push(Command::PlayNext);

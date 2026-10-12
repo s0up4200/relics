@@ -111,10 +111,10 @@ fn text(err: impl Display) -> String {
 
 impl Surface {
     /// Makes the child surface under the GPUI surface of `window`. `None` when the window is not on Wayland or
-    /// the compositor refuses. Then the video plays in the Player window.
+    /// the compositor refuses. Then no Item can play.
     pub fn new(window: &Window) -> Option<Rc<Self>> {
         Self::make(window)
-            .inspect_err(|err| eprintln!("silo-omarchy: no Player view, the video plays in its own window: {err}"))
+            .inspect_err(|err| eprintln!("silo-omarchy: no video surface, so no Item can play: {err}"))
             .ok()
             .map(Rc::new)
     }
@@ -271,7 +271,8 @@ struct Gl {
 }
 
 impl Gl {
-    // ponytail: a failure halfway leaks the EGL objects made before it. The app then uses the Player window.
+    // ponytail: a failure halfway leaks the EGL objects made before it, once per try to play. Free them if users
+    // retry a failing start often.
     fn new(wl_display: *mut c_void, surface: &WlSurface, size: Size) -> Result<Self, String> {
         // SAFETY: loads the system libEGL.
         let egl = Arc::new(unsafe { Egl::load_required() }.map_err(text)?);

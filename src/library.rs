@@ -20,7 +20,7 @@ use crate::accounts::{AccountChoice, AccountPicker};
 use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
 use crate::home;
 use crate::pages::{MenuChoice, Pages};
-use crate::player::{PlaybackError, PlayerClosed, PlayerWindow, ViewClosed};
+use crate::player::{Controller, PlaybackError, PlayerClosed, ViewClosed};
 use crate::player_view::PlayerView;
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
@@ -55,7 +55,7 @@ pub struct LibraryWindow {
     _enter: Subscription,
     /// The subscription to the events of the screen view.
     _screen: Option<Subscription>,
-    player: Entity<PlayerWindow>,
+    player: Entity<Controller>,
     /// The last playback error, shown at the bottom of the window.
     player_error: Option<String>,
     _player: Subscription,
@@ -135,7 +135,7 @@ impl LibraryWindow {
         let device =
             Device { id: state.device_id.clone(), name: gethostname::gethostname().to_string_lossy().into_owned() };
         let video = video::Surface::new(window);
-        let player = cx.new(|cx| PlayerWindow::new(video.clone(), cx));
+        let player = cx.new(|cx| Controller::new(video.clone(), cx));
         let player_view = video.map(|video| cx.new(|cx| PlayerView::new(player.clone(), video, cx)));
         let view_closed = cx.subscribe_in(&player, window, |this, _, _: &ViewClosed, window, cx| {
             if let Some(view) = &this.player_view {
@@ -580,7 +580,7 @@ impl LibraryWindow {
         self.restore(window, cx);
     }
 
-    /// Stops playback and closes the Player window. The task ends when the server has the stop report.
+    /// Stops playback and closes the Player view. The task ends when the server has the stop report.
     fn stop_playback(&mut self, cx: &mut Context<Self>) -> Task<()> {
         self.sign_in_waits = false;
         self.player_error = None;

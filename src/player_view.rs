@@ -22,7 +22,7 @@ use crate::filter_panel::bar_pill;
 use crate::keys::Key;
 use crate::playback::Input;
 use crate::playback::tracks::{Kind, Track};
-use crate::player::PlayerWindow;
+use crate::player::Controller;
 use crate::video::Surface;
 use crate::{artwork, detail};
 
@@ -45,7 +45,7 @@ const PIXELS_PER_NOTCH: f32 = 50.0;
 const THUMB_WIDTH: f32 = 192.0;
 
 pub struct PlayerView {
-    player: Entity<PlayerWindow>,
+    player: Entity<Controller>,
     video: Rc<Surface>,
     focus_handle: FocusHandle,
     /// The controls show.
@@ -126,7 +126,7 @@ pub struct Row {
 }
 
 impl PlayerView {
-    pub fn new(player: Entity<PlayerWindow>, video: Rc<Surface>, cx: &mut Context<Self>) -> Self {
+    pub fn new(player: Entity<Controller>, video: Rc<Surface>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&player, |_, _, cx| cx.notify());
         Self {
             player,

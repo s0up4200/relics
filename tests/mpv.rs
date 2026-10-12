@@ -8,8 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use silo_omarchy::api::types::{Marker, MarkerKind};
-use silo_omarchy::mpv::{Player, find_controls};
+use silo_omarchy::mpv::Player;
 use silo_omarchy::playback::Input;
 use silo_omarchy::playback::tracks::Kind;
 
@@ -189,7 +188,7 @@ fn a_401_in_the_middle_of_an_hls_stream_ends_it_before_the_duration() {
         matches!(input, Input::EndOfFile | Input::LoadFailed)
     });
     assert!(position < 5.0, "{end:?} at {position} of 6 s, so the end rule sees an Early end");
-    // The window stays, so the controller can show "Lost connection to the server".
+    // mpv stays open, so the Player view can show "Lost connection to the server".
     assert_eq!(player.property("idle-active").unwrap_or_default(), "no");
 }
 
@@ -229,63 +228,6 @@ fn the_player_view_changes_and_resets_the_subtitle_delay() {
     assert_eq!(player.sub_delay().unwrap(), 0.0);
 }
 
-fn open_with_controls() -> (Player, Receiver<Input>) {
-    let (tx, rx) = mpsc::channel();
-    let script = format!("{}/data/silo-controls.lua", env!("CARGO_MANIFEST_DIR"));
-    let player = Player::open("no", &[("vo", "null"), ("ao", "null"), ("scripts", &script)], move |input| {
-        tx.send(input).ok();
-    })
-    .unwrap();
-    (player, rx)
-}
-
-#[test]
-fn the_controller_says_that_it_is_ready() {
-    let (_player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-}
-
-#[test]
-fn the_controller_is_found_in_the_data_dirs_in_order() {
-    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("controls-search");
-    std::fs::remove_dir_all(&root).ok();
-    let script = |dir: &str| {
-        let path = root.join(dir).join("silo-controls.lua");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "").unwrap();
-        path
-    };
-    let own = script("own");
-    let user = script("home/.local/share/silo-omarchy");
-    let system = script("usr/share/silo-omarchy");
-    std::fs::create_dir_all(root.join("empty")).unwrap();
-    let dir = |d: &str| Some(root.join(d).into_os_string());
-    let data_dirs = Some(format!("{0}/empty:{0}/usr/share", root.display()).into());
-
-    let found = find_controls(|name| match name {
-        "SILO_OMARCHY_DATA" => dir("own"),
-        "HOME" => dir("home"),
-        "XDG_DATA_DIRS" => data_dirs.clone(),
-        _ => None,
-    });
-    assert_eq!(found, Some(own));
-    // XDG_DATA_HOME is $HOME/.local/share when it is not set.
-    let found = find_controls(|name| match name {
-        "SILO_OMARCHY_DATA" => dir("empty"),
-        "HOME" => dir("home"),
-        "XDG_DATA_DIRS" => data_dirs.clone(),
-        _ => None,
-    });
-    assert_eq!(found, Some(user));
-    let found = find_controls(|name| match name {
-        "XDG_DATA_HOME" => dir("empty"),
-        "XDG_DATA_DIRS" => data_dirs.clone(),
-        _ => None,
-    });
-    assert_eq!(found, Some(system));
-    assert_eq!(find_controls(|name| (name == "XDG_DATA_HOME").then(|| dir("empty")).flatten()), None);
-}
-
 /// Waits up to 15 s until the mpv property `name` has the value `want`.
 fn wait_for_property(player: &Player, name: &str, want: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -293,28 +235,6 @@ fn wait_for_property(player: &Player, name: &str, want: &str) {
         assert!(Instant::now() < deadline, "{name} is {:?}, not {want}", player.property(name).ok());
         std::thread::sleep(Duration::from_millis(20));
     }
-}
-
-#[test]
-fn a_and_s_open_the_track_lists_and_enter_picks_a_track() {
-    let stub = stub(usize::MAX);
-    let (player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    // The built-in track lists of mpv show in its console.
-    player.command(&["keypress", "a"]).unwrap();
-    wait_for_property(&player, "user-data/mpv/console/open", "true");
-    player.command(&["keypress", "ESC"]).unwrap();
-    wait_for_property(&player, "user-data/mpv/console/open", "false");
-    player.add_subtitle(&format!("{}/sample.vtt", stub.url), "English", "eng").unwrap();
-    wait_for_property(&player, "sid", "1");
-    player.command(&["set", "sid", "no"]).unwrap();
-    wait_for_property(&player, "sid", "no");
-    player.command(&["keypress", "s"]).unwrap();
-    wait_for_property(&player, "user-data/mpv/console/open", "true");
-    player.command(&["keypress", "ENTER"]).unwrap();
-    wait_for_property(&player, "sid", "1");
 }
 
 #[test]
@@ -329,35 +249,6 @@ fn an_added_subtitle_shows_and_its_request_has_the_header() {
     assert_eq!(player.property("current-tracks/sub/lang").unwrap(), "eng");
     assert!(stub.requests.lock().unwrap().iter().any(|r| r.path == "/sample.vtt"));
     assert_each_request_has_the_header(&stub);
-}
-
-#[test]
-fn enter_takes_the_skip_prompt() {
-    let (player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    player.show_prompt("Skip intro").unwrap();
-    // The script message and the key reach the controller on different paths, so the key can come first.
-    // Press Enter again until the controller sends the action.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        player.command(&["keypress", "ENTER"]).unwrap();
-        if let Ok(Input::Action) = rx.recv_timeout(Duration::from_millis(200)) {
-            return;
-        }
-        assert!(Instant::now() < deadline, "the controller sent no action");
-    }
-}
-
-#[test]
-fn seek_moves_the_position_after_the_controller_gets_the_markers() {
-    let stub = stub(usize::MAX);
-    let (player, rx) = open_with_controls();
-    wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    player.show_markers(&[Marker { kind: MarkerKind::Intro, start: -1.5, end: 2.0 }]).unwrap();
-    player.seek(3.0).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::Position(position) if *position >= 3.0));
 }
 
 #[test]
