@@ -381,7 +381,7 @@ impl Pages {
     fn page_key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.page.clone() {
             Page::Home(home) => home.update(cx, |home, cx| home.key(key, cx)),
-            Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
+            Page::Library(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Person(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Search(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),

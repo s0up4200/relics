@@ -932,10 +932,12 @@ impl Client {
         self.call(Method::POST, &format!("catalog/query?image_size={image_size}"), Some(body)).await
     }
 
-    /// The genres of the Items in a Library, for the filter menu.
-    pub async fn genres(&self, library_id: &str) -> Result<Vec<String>, Error> {
-        let path = format!("catalog/filters?library_id={library_id}&skip_technical=true");
-        Ok(self.call::<wire::CatalogFilters>(Method::GET, &path, None).await?.genres)
+    /// The filter values (genres, languages, studios, networks, countries) of the Items in a Library, or in the
+    /// whole catalog when `library_id` is `None`, for the filter panel.
+    pub async fn filters(&self, library_id: Option<&str>) -> Result<wire::CatalogFilters, Error> {
+        let pairs: Vec<_> =
+            library_id.map(|id| ("library_id", id)).into_iter().chain([("skip_technical", "true")]).collect();
+        self.call(Method::GET, &with_query("catalog/filters", &pairs), None).await
     }
 
     // Detail page (#30).

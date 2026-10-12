@@ -31,19 +31,34 @@ pub enum SortField {
     Title,
     DateAdded,
     ReleaseDate,
-    ImdbRating,
+    Year,
+    ContentRating,
     Duration,
+    ImdbRating,
+    TmdbRating,
+    Resolution,
+    Bitrate,
+    Progress,
     DateViewed,
+    Plays,
 }
 
 impl SortField {
-    pub const ALL: [SortField; 6] = [
+    /// The sort fields in the order of the web client.
+    pub const ALL: [SortField; 13] = [
         SortField::Title,
         SortField::DateAdded,
         SortField::ReleaseDate,
-        SortField::ImdbRating,
+        SortField::Year,
+        SortField::ContentRating,
         SortField::Duration,
+        SortField::ImdbRating,
+        SortField::TmdbRating,
+        SortField::Resolution,
+        SortField::Bitrate,
+        SortField::Progress,
         SortField::DateViewed,
+        SortField::Plays,
     ];
 
     /// The name of the field in the catalog query.
@@ -52,9 +67,16 @@ impl SortField {
             SortField::Title => "title",
             SortField::DateAdded => "added_at",
             SortField::ReleaseDate => "release_date",
-            SortField::ImdbRating => "rating_imdb",
+            SortField::Year => "year",
+            SortField::ContentRating => "content_rating",
             SortField::Duration => "runtime",
+            SortField::ImdbRating => "rating_imdb",
+            SortField::TmdbRating => "rating_tmdb",
+            SortField::Resolution => "resolution",
+            SortField::Bitrate => "bitrate",
+            SortField::Progress => "progress",
             SortField::DateViewed => "date_viewed",
+            SortField::Plays => "plays",
         }
     }
 
@@ -63,11 +85,90 @@ impl SortField {
             SortField::Title => "Title",
             SortField::DateAdded => "Date added",
             SortField::ReleaseDate => "Release date",
-            SortField::ImdbRating => "IMDb rating",
+            SortField::Year => "Year",
+            SortField::ContentRating => "Content rating",
             SortField::Duration => "Duration",
+            SortField::ImdbRating => "IMDb rating",
+            SortField::TmdbRating => "TMDB rating",
+            SortField::Resolution => "Resolution",
+            SortField::Bitrate => "Bitrate",
+            SortField::Progress => "Progress",
             SortField::DateViewed => "Date viewed",
+            SortField::Plays => "Plays",
         }
     }
+}
+
+/// A filter that takes one text value: a language, a Person in one role, a studio, a network or a country.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Facet {
+    Language,
+    Actor,
+    Director,
+    Writer,
+    Producer,
+    Studio,
+    Network,
+    Country,
+}
+
+impl Facet {
+    /// The facets in the order of the rules of the web client.
+    pub const ALL: [Facet; 8] = [
+        Facet::Language,
+        Facet::Actor,
+        Facet::Director,
+        Facet::Writer,
+        Facet::Producer,
+        Facet::Studio,
+        Facet::Network,
+        Facet::Country,
+    ];
+
+    /// The rule field in the catalog query.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Facet::Language => "original_language",
+            Facet::Actor => "actor",
+            Facet::Director => "director",
+            Facet::Writer => "writer",
+            Facet::Producer => "producer",
+            Facet::Studio => "studio",
+            Facet::Network => "network",
+            Facet::Country => "country",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Facet::Language => "Language",
+            Facet::Actor => "Actor",
+            Facet::Director => "Director",
+            Facet::Writer => "Writer",
+            Facet::Producer => "Producer",
+            Facet::Studio => "Studio",
+            Facet::Network => "Network",
+            Facet::Country => "Country",
+        }
+    }
+}
+
+/// The spans of "Added in the last".
+pub const ADDED_SPANS: [&str; 5] = ["7d", "30d", "90d", "6m", "1y"];
+/// The spans of "Released in the last".
+pub const RELEASED_SPANS: [&str; 5] = ["30d", "90d", "6m", "1y", "5y"];
+
+/// A span such as `30d` in words: "30 days".
+pub fn span_label(span: &str) -> String {
+    let (count, unit) = span.split_at(span.len().saturating_sub(1));
+    let unit = match unit {
+        "h" => "hour",
+        "d" => "day",
+        "w" => "week",
+        "m" => "month",
+        _ => "year",
+    };
+    format!("{count} {unit}{}", if count == "1" { "" } else { "s" })
 }
 
 /// The watch status filter.
@@ -96,9 +197,75 @@ pub struct Filters {
     pub genres: Vec<String>,
     /// The first year of the decade, for example 1990.
     pub decade: Option<i64>,
+    pub year_from: Option<i64>,
+    pub year_to: Option<i64>,
+    /// The minimum IMDb rating.
+    pub min_rating: Option<u8>,
+    /// At most one value for each facet.
+    pub facets: Vec<(Facet, String)>,
     pub watch: Option<Watch>,
+    /// A span such as `30d`.
+    pub added_in: Option<&'static str>,
+    pub released_in: Option<&'static str>,
     pub four_k: bool,
     pub hdr: bool,
+    pub dolby_vision: bool,
+}
+
+impl Filters {
+    /// The value of a facet, if it has one.
+    pub fn facet(&self, facet: Facet) -> Option<&str> {
+        self.facets.iter().find(|(f, _)| *f == facet).map(|(_, value)| value.as_str())
+    }
+
+    /// The rule groups and the match of the catalog query. Search can use them with its own text.
+    pub fn groups(&self) -> (Vec<wire::CatalogQueryGroup>, Option<String>) {
+        let rules = self.rules();
+        if rules.is_empty() {
+            return (Vec::new(), None);
+        }
+        (vec![wire::CatalogQueryGroup { match_: "all".into(), rules }], Some("all".into()))
+    }
+
+    fn rules(&self) -> Vec<wire::CatalogQueryRule> {
+        let rule = |field: &str, op: &str, value: serde_json::Value| wire::CatalogQueryRule {
+            field: field.into(),
+            op: op.into(),
+            value,
+        };
+        let mut rules: Vec<_> = self.genres.iter().map(|genre| rule("genre", "is", genre.as_str().into())).collect();
+        if let Some(decade) = self.decade {
+            rules.push(rule("year", "gte", decade.into()));
+            rules.push(rule("year", "lte", (decade + 9).into()));
+        }
+        rules.extend(self.year_from.map(|year| rule("year", "gte", year.into())));
+        rules.extend(self.year_to.map(|year| rule("year", "lte", year.into())));
+        rules.extend(self.min_rating.map(|rating| rule("rating_imdb", "gte", rating.into())));
+        for facet in Facet::ALL {
+            rules.extend(self.facet(facet).map(|value| rule(facet.wire(), "is", value.into())));
+        }
+        match self.watch {
+            Some(Watch::Watched) => rules.push(rule("watched", "is", true.into())),
+            Some(Watch::InProgress) => rules.push(rule("in_progress", "is", true.into())),
+            Some(Watch::Unwatched) => {
+                rules.push(rule("watched", "is", false.into()));
+                rules.push(rule("in_progress", "is", false.into()));
+            }
+            None => {}
+        }
+        rules.extend(self.added_in.map(|span| rule("added_at", "in_last", span.into())));
+        rules.extend(self.released_in.map(|span| rule("release_date", "in_last", span.into())));
+        if self.four_k {
+            rules.push(rule("resolution", "is", "2160p".into()));
+        }
+        if self.hdr {
+            rules.push(rule("hdr", "is", true.into()));
+        }
+        if self.dolby_vision {
+            rules.push(rule("dolby_vision", "is", true.into()));
+        }
+        rules
+    }
 }
 
 /// The sort, the filters, the letter and the Series/Episodes mode of one Library grid.
@@ -116,9 +283,7 @@ pub struct Browse {
 impl Browse {
     /// The catalog query of the first page of the grid of `library_id`. `shows` is true for a Shows library.
     pub fn query(&self, library_id: &str, shows: bool) -> wire::CatalogQuery {
-        let rules = self.rules();
-        let groups =
-            if rules.is_empty() { Vec::new() } else { vec![wire::CatalogQueryGroup { match_: "all".into(), rules }] };
+        let (groups, match_) = self.filters.groups();
         wire::CatalogQuery {
             source: Some("query".into()),
             library_id: library_id.try_into().ok(),
@@ -127,50 +292,29 @@ impl Browse {
             order: Some(if self.descending { "desc" } else { "asc" }.into()),
             limit: std::num::NonZeroU64::new(PAGE_SIZE),
             name_prefix: self.letter.map(String::from),
-            match_: (!groups.is_empty()).then(|| "all".into()),
+            match_,
             groups,
             ..Default::default()
         }
     }
 
-    fn rules(&self) -> Vec<wire::CatalogQueryRule> {
-        let rule = |field: &str, op: &str, value: serde_json::Value| wire::CatalogQueryRule {
-            field: field.into(),
-            op: op.into(),
-            value,
-        };
-        let f = &self.filters;
-        let mut rules: Vec<_> = f.genres.iter().map(|genre| rule("genre", "is", genre.as_str().into())).collect();
-        if let Some(decade) = f.decade {
-            rules.push(rule("year", "gte", decade.into()));
-            rules.push(rule("year", "lte", (decade + 9).into()));
-        }
-        match f.watch {
-            Some(Watch::Watched) => rules.push(rule("watched", "is", true.into())),
-            Some(Watch::InProgress) => rules.push(rule("in_progress", "is", true.into())),
-            Some(Watch::Unwatched) => {
-                rules.push(rule("watched", "is", false.into()));
-                rules.push(rule("in_progress", "is", false.into()));
-            }
-            None => {}
-        }
-        if f.four_k {
-            rules.push(rule("resolution", "is", "2160p".into()));
-        }
-        if f.hdr {
-            rules.push(rule("hdr", "is", true.into()));
-        }
-        rules
-    }
-
-    /// The active filters, in the order of the filter menu, then the letter. The chip row shows them.
+    /// The active filters, in the order of their rules, then the letter. The chip row shows them.
     pub fn chips(&self) -> Vec<Choice> {
         let f = &self.filters;
         let mut chips: Vec<_> = f.genres.iter().cloned().map(Choice::Genre).collect();
         chips.extend(f.decade.map(Choice::Decade));
+        chips.extend(f.year_from.map(Choice::YearFrom));
+        chips.extend(f.year_to.map(Choice::YearTo));
+        chips.extend(f.min_rating.map(Choice::MinRating));
+        for facet in Facet::ALL {
+            chips.extend(f.facet(facet).map(|value| Choice::Facet(facet, value.into())));
+        }
         chips.extend(f.watch.map(Choice::Watch));
+        chips.extend(f.added_in.map(Choice::AddedIn));
+        chips.extend(f.released_in.map(Choice::ReleasedIn));
         chips.extend(f.four_k.then_some(Choice::FourK));
         chips.extend(f.hdr.then_some(Choice::Hdr));
+        chips.extend(f.dolby_vision.then_some(Choice::DolbyVision));
         chips.extend(self.letter.map(|letter| Choice::Letter(Some(letter))));
         chips
     }
@@ -199,32 +343,26 @@ pub enum Choice {
     Watch(Watch),
     FourK,
     Hdr,
+    DolbyVision,
     Decade(i64),
+    YearFrom(i64),
+    YearTo(i64),
+    MinRating(u8),
+    Facet(Facet, String),
+    /// A span such as `30d`.
+    AddedIn(&'static str),
+    ReleasedIn(&'static str),
     Genre(String),
     /// `None` is "All".
     Letter(Option<char>),
 }
 
 impl Choice {
-    pub fn sort_menu() -> Vec<Choice> {
-        let fields = SortField::ALL.into_iter().map(Choice::Sort);
-        fields.chain([Choice::Descending(false), Choice::Descending(true)]).collect()
-    }
-
-    /// The filter menu: the watch status, 4K and HDR, the decades from the one of `this_year` back to the
-    /// 1900s, and the `genres` of the Library.
-    pub fn filter_menu(genres: &[String], this_year: i64) -> Vec<Choice> {
-        let mut menu: Vec<_> = Watch::ALL.into_iter().map(Choice::Watch).collect();
-        menu.extend([Choice::FourK, Choice::Hdr]);
-        menu.extend((1900..=this_year / 10 * 10).rev().step_by(10).map(Choice::Decade));
-        menu.extend(genres.iter().cloned().map(Choice::Genre));
-        menu
-    }
-
     pub fn letter_menu() -> Vec<Choice> {
         std::iter::once(Choice::Letter(None)).chain(('A'..='Z').map(|c| Choice::Letter(Some(c)))).collect()
     }
 
+    /// The label of the entry in its menu section.
     pub fn label(&self) -> String {
         match self {
             Choice::Sort(field) => field.label().into(),
@@ -233,16 +371,34 @@ impl Choice {
             Choice::Watch(watch) => watch.label().into(),
             Choice::FourK => "4K".into(),
             Choice::Hdr => "HDR".into(),
+            Choice::DolbyVision => "Dolby Vision".into(),
             Choice::Decade(decade) => format!("{decade}s"),
+            Choice::YearFrom(year) => format!("From {year}"),
+            Choice::YearTo(year) => format!("To {year}"),
+            Choice::MinRating(rating) => format!("IMDb {rating}+"),
+            Choice::Facet(_, value) => value.clone(),
+            Choice::AddedIn(span) | Choice::ReleasedIn(span) => span_label(span),
             Choice::Genre(genre) => genre.clone(),
             Choice::Letter(None) => "All".into(),
             Choice::Letter(Some(letter)) => letter.to_string(),
         }
     }
+
+    /// The label of the chip of an active filter, which also names the filter.
+    pub fn chip_label(&self) -> String {
+        match self {
+            Choice::Facet(facet, value) => format!("{}: {value}", facet.label()),
+            Choice::AddedIn(span) => format!("Added in the last {}", span_label(span)),
+            Choice::ReleasedIn(span) => format!("Released in the last {}", span_label(span)),
+            Choice::Letter(Some(letter)) => format!("Starts with {letter}"),
+            choice => choice.label(),
+        }
+    }
 }
 
 impl Browse {
-    /// Applies a menu entry. A filter that is on goes off. A decade or a watch status replaces the old one.
+    /// Applies a menu entry. A filter that is on goes off. A decade, a year, a rating, a span, a watch status
+    /// or the value of a facet replaces the old one.
     pub fn choose(&mut self, choice: &Choice) {
         let on = self.is_chosen(choice);
         let f = &mut self.filters;
@@ -252,7 +408,19 @@ impl Browse {
             Choice::Watch(watch) => f.watch = (!on).then_some(*watch),
             Choice::FourK => f.four_k = !on,
             Choice::Hdr => f.hdr = !on,
+            Choice::DolbyVision => f.dolby_vision = !on,
             Choice::Decade(decade) => f.decade = (!on).then_some(*decade),
+            Choice::YearFrom(year) => f.year_from = (!on).then_some(*year),
+            Choice::YearTo(year) => f.year_to = (!on).then_some(*year),
+            Choice::MinRating(rating) => f.min_rating = (!on).then_some(*rating),
+            Choice::Facet(facet, value) => {
+                f.facets.retain(|(f, _)| f != facet);
+                if !on {
+                    f.facets.push((*facet, value.clone()));
+                }
+            }
+            Choice::AddedIn(span) => f.added_in = (!on).then_some(*span),
+            Choice::ReleasedIn(span) => f.released_in = (!on).then_some(*span),
             Choice::Genre(genre) if on => f.genres.retain(|g| g != genre),
             Choice::Genre(genre) => f.genres.push(genre.clone()),
             Choice::Letter(letter) => self.letter = *letter,
@@ -267,7 +435,14 @@ impl Browse {
             Choice::Watch(watch) => f.watch == Some(*watch),
             Choice::FourK => f.four_k,
             Choice::Hdr => f.hdr,
+            Choice::DolbyVision => f.dolby_vision,
             Choice::Decade(decade) => f.decade == Some(*decade),
+            Choice::YearFrom(year) => f.year_from == Some(*year),
+            Choice::YearTo(year) => f.year_to == Some(*year),
+            Choice::MinRating(rating) => f.min_rating == Some(*rating),
+            Choice::Facet(facet, value) => f.facet(*facet) == Some(value.as_str()),
+            Choice::AddedIn(span) => f.added_in == Some(*span),
+            Choice::ReleasedIn(span) => f.released_in == Some(*span),
             Choice::Genre(genre) => f.genres.contains(genre),
             Choice::Letter(letter) => self.letter == *letter,
         }

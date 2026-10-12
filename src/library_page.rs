@@ -15,6 +15,7 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use crate::api::{Client, wire};
 use crate::browse::{Browse, Choice};
 use crate::click::Clickable as _;
+use crate::filter_panel::{Facets, MenuKind, Outcome, Panel};
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
@@ -42,20 +43,6 @@ enum Control {
     ClearAll,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuKind {
-    Sort,
-    Filter,
-    Letter,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Menu {
-    kind: MenuKind,
-    /// The focused entry.
-    row: usize,
-}
-
 pub struct LibraryPage {
     client: Arc<Client>,
     pub library: wire::UserLibrary,
@@ -65,15 +52,17 @@ pub struct LibraryPage {
     recommended: Option<Entity<Home>>,
     grid: Entity<Grid>,
     browse: Browse,
-    genres: Vec<String>,
+    /// The filter values of the Library, for the filter panel.
+    facets: Facets,
     /// The bar has the keyboard focus.
     in_bar: bool,
     /// The focused control of the bar.
     bar: usize,
-    menu: Option<Menu>,
+    /// The open sort, filter or A to Z panel.
+    menu: Option<Panel>,
     /// The page has the keyboard focus.
     active: bool,
-    _genres: Task<()>,
+    _facets: Task<()>,
     _events: Vec<Subscription>,
 }
 
@@ -91,19 +80,23 @@ impl LibraryPage {
             cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
             cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),
         ];
-        let genres = cx.spawn({
+        let facets = cx.spawn({
             let (client, id) = (client.clone(), library.id.to_string());
-            async move |this, cx| match client.genres(&id).await {
-                Ok(genres) => {
+            async move |this, cx| match client.filters(Some(&id)).await {
+                Ok(filters) => {
                     this.update(cx, |this, cx| {
-                        this.genres = genres;
+                        this.facets = filters.into();
+                        if let Some(menu) = &mut this.menu {
+                            menu.facets = this.facets.clone();
+                        }
                         cx.notify();
                     })
                     .ok();
                 }
-                // The filter menu works without genres.
+                // The filter panel works without the values: it has no genre, language, studio, network or
+                // country section then.
                 Err(err) => {
-                    eprintln!("silo-omarchy: cannot read the genres of library {id}: {err}")
+                    eprintln!("silo-omarchy: cannot read the filter values of library {id}: {err}")
                 }
             }
         });
@@ -115,12 +108,12 @@ impl LibraryPage {
             recommended: None,
             grid,
             browse,
-            genres: Vec::new(),
+            facets: Facets::default(),
             in_bar: false,
             bar: 2,
             menu: None,
             active: false,
-            _genres: genres,
+            _facets: facets,
             _events: events,
         }
     }
@@ -165,14 +158,6 @@ impl LibraryPage {
         controls
     }
 
-    fn choices(&self, kind: MenuKind) -> Vec<Choice> {
-        match kind {
-            MenuKind::Sort => Choice::sort_menu(),
-            MenuKind::Filter => Choice::filter_menu(&self.genres, chrono::Local::now().year().into()),
-            MenuKind::Letter => Choice::letter_menu(),
-        }
-    }
-
     /// Loads the grid again with the sort and filters.
     fn apply(&mut self, cx: &mut Context<Self>) {
         let query = self.browse.query(&self.library.id, self.shows);
@@ -194,7 +179,7 @@ impl LibraryPage {
     }
 
     fn activate(&mut self, control: Control, window: &mut Window, cx: &mut Context<Self>) {
-        let menu = |kind| Some(Menu { kind, row: 0 });
+        let menu = |kind| Some(Panel::new(kind, self.facets.clone(), chrono::Local::now().year().into()));
         match control {
             Control::Tab(tab) => self.open_tab(tab, window, cx),
             Control::Sort => self.menu = menu(MenuKind::Sort),
@@ -216,35 +201,34 @@ impl LibraryPage {
         cx.notify();
     }
 
-    /// Picks the focused entry of the open menu. The filter menu stays open, so that the user can pick more.
-    fn choose(&mut self, row: usize, cx: &mut Context<Self>) {
-        let Some(menu) = &self.menu else {
-            return;
-        };
-        let kind = menu.kind;
-        let Some(choice) = self.choices(kind).get(row).cloned() else {
-            return;
-        };
-        self.browse.choose(&choice);
-        if kind != MenuKind::Filter {
+    /// Closes the panel after a pick in the sort or A to Z menu or after Esc, and loads the grid again when the
+    /// sort or a filter changed.
+    fn after_menu(&mut self, outcome: Outcome, before: Browse, cx: &mut Context<Self>) {
+        if outcome == Outcome::Closed {
             self.menu = None;
         }
-        self.apply(cx);
+        if self.browse != before {
+            self.apply(cx);
+        }
+        cx.notify();
     }
 
-    /// Handles a key. Returns false when the page does not use it, for example h or Left at the left edge.
-    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(Menu { kind, row }) = self.menu {
-            let last = self.choices(kind).len().saturating_sub(1);
-            match key {
-                Key::Down | Key::Right => self.menu = Some(Menu { kind, row: (row + 1).min(last) }),
-                Key::Up | Key::Left => self.menu = Some(Menu { kind, row: row.saturating_sub(1) }),
-                Key::Other("enter") => self.choose(row, cx),
-                Key::Other("escape" | "backspace") => self.menu = None,
-                _ => return false,
-            }
-            cx.notify();
-            return true;
+    fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
+        let before = self.browse.clone();
+        if let Some(menu) = &mut self.menu {
+            let outcome = menu.click(row, &mut self.browse);
+            self.after_menu(outcome, before, cx);
+        }
+    }
+
+    /// Handles a key. `typed` is the text that the key types, for a text field of the filter panel. Returns
+    /// false when the page does not use the key, for example h or Left at the left edge.
+    pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let before = self.browse.clone();
+        if let Some(menu) = &mut self.menu {
+            let outcome = menu.key(key, typed, &mut self.browse);
+            self.after_menu(outcome, before, cx);
+            return outcome != Outcome::Unused;
         }
         if self.in_bar {
             let controls = self.controls();
@@ -370,58 +354,10 @@ impl LibraryPage {
                 None => ("A–Z".into(), false),
             },
             Control::Mode => ((if b.episodes { "Episodes" } else { "Series" }).into(), false),
-            Control::Chip(Choice::Letter(Some(letter))) => (format!("Starts with {letter} ×").into(), false),
-            Control::Chip(chip) => (format!("{} ×", chip.label()).into(), false),
+            Control::Chip(chip) => (format!("{} ×", chip.chip_label()).into(), false),
             Control::ClearAll => ("Clear all".into(), false),
         };
         self.pill(index, label, on, cx)
-    }
-
-    fn menu(&self, menu: &Menu, cx: &Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy();
-        let title = match menu.kind {
-            MenuKind::Sort => "Sort",
-            MenuKind::Filter => "Filters",
-            MenuKind::Letter => "A to Z",
-        };
-        let entries = self.choices(menu.kind).into_iter().enumerate().map(|(row, choice)| {
-            let on = self.browse.is_chosen(&choice);
-            let focused = self.active && row == menu.row;
-            div()
-                .id(("library-menu", row))
-                .clickable()
-                .px(px(14.))
-                .py(px(6.))
-                .rounded_full()
-                .text_size(px(13.))
-                .bg(if on { t.foreground } else { gpui::hsla(0., 0., 1., 0.08) })
-                .text_color(if on { t.background } else { t.foreground })
-                .border_2()
-                .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(menu) = &mut this.menu {
-                        menu.row = row;
-                    }
-                    this.choose(row, cx);
-                }))
-                .child(choice.label())
-        });
-        div()
-            .p(px(16.))
-            .rounded(px(12.))
-            .bg(t.surface)
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(12.))
-                    .items_baseline()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child(title))
-                    .child(div().text_size(px(12.)).text_color(t.secondary).child("Enter picks · Esc closes")),
-            )
-            .child(div().flex().flex_wrap().gap(px(8.)).children(entries))
     }
 }
 
@@ -469,7 +405,7 @@ impl Render for LibraryPage {
                 header = header.child(div().flex().flex_wrap().gap(px(8.)).children(chips));
             }
             if let Some(menu) = &self.menu {
-                header = header.child(self.menu(menu, cx));
+                header = header.child(menu.render(&self.browse, self.active, cx, Self::click_menu));
             }
         }
         let content = match (self.tab, &self.recommended) {

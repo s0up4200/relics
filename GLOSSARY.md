@@ -47,6 +47,14 @@ _Avoid_: Banner
 A cast or crew member that the Silo server knows, with the titles that they took part in.
 _Avoid_: Actor, as the general name. Actor is one role that a Person can have.
 
+**Filter panel**:
+The panel below the bar of a Library grid where the user picks the filters, in sections: watch status, video quality, rating, year, "added or released in the last", genres, and the facets. The app does not have the Advanced rule mode of the web client.
+_Avoid_: Filter menu, Guided mode
+
+**Facet**:
+A filter that takes one text value: a language, a studio, a network, a country, or a Person in one role (actor, director, writer, producer). The server lists the values of each facet except the Person facets, where the user types the name.
+_Avoid_: Facet filter, people filter
+
 **Artwork ladder**:
 The fixed set of widths at which the Silo server caches each artwork type. `image_size` picks one rung for a whole response.
 _Avoid_: Variants, resolutions

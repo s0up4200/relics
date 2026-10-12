@@ -4,6 +4,7 @@ pub mod artwork;
 pub mod browse;
 pub mod click;
 pub mod detail;
+pub mod filter_panel;
 pub mod grid;
 pub mod home;
 pub mod keys;
