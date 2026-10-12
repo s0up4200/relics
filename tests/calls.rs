@@ -193,3 +193,10 @@ fn trickplay_gives_absolute_sheet_urls_below_the_server_path() {
     assert_eq!(trickplay.tile_columns, 10);
     assert!(trickplay.sheets[0].url.starts_with("https://silo.test/media/api/v2/artwork/trickplay/42/"));
 }
+
+#[test]
+fn trickplay_fails_when_the_server_has_no_thumbnails_for_the_file() {
+    let (http, _) = common::http(|_| not_found());
+    let client = common::client(http, "https://silo.test/media/");
+    assert!(block_on(client.trickplay("movie:heat-1995", "42")).is_err());
+}

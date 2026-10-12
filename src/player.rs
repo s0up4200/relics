@@ -158,6 +158,10 @@ pub struct PlayerWindow {
     item: Option<PlayItem>,
     /// The file versions of the Item that plays, for the Quality list of the Player view.
     versions: Vec<wire::FileVersion>,
+    /// The seek thumbnails of the file that plays. `None` when the server has none.
+    trickplay: Option<wire::WatchTrickplay>,
+    /// Reads the seek thumbnails again before their URLs expire.
+    _trickplay: Option<Task<()>>,
 }
 
 impl EventEmitter<PlaybackError> for PlayerWindow {}
@@ -201,6 +205,8 @@ impl PlayerWindow {
             series: None,
             item: None,
             versions: Vec::new(),
+            trickplay: None,
+            _trickplay: None,
         }
     }
 
@@ -227,7 +233,7 @@ impl PlayerWindow {
         };
         self.series = series;
         self.item = Some(item.clone());
-        self.versions = Vec::new();
+        (self.versions, self.trickplay, self._trickplay) = (Vec::new(), None, None);
         self.session = Some(Session::new(item.runtime, client.server_settings()).with_carry(carry));
         self.client = Some(client.clone());
         // A new Item drops these tasks, so an older answer never reaches the new session.
@@ -244,7 +250,11 @@ impl PlayerWindow {
                 Ok(decision) => Input::Started { decision, access: client.media_access() },
                 Err(err) => Input::StartFailed(err.to_string()),
             };
-            this.update(cx, |this, cx| this.step(input, cx)).ok();
+            this.update(cx, |this, cx| {
+                this.step(input, cx);
+                this.load_trickplay(cx);
+            })
+            .ok();
             match client.versions(&content_id).await {
                 Ok(versions) => this.update(cx, |this, cx| {
                     this.versions = versions;
@@ -253,6 +263,37 @@ impl PlayerWindow {
                 Err(err) => return eprintln!("silo-omarchy: cannot read the versions of {content_id}: {err}"),
             }
             .ok();
+        }));
+    }
+
+    /// Reads the seek thumbnails of the file that plays, and reads them again a minute before their URLs expire.
+    /// A file with no thumbnails (an error, for example a 404) keeps `trickplay` at `None`.
+    fn load_trickplay(&mut self, cx: &mut Context<Self>) {
+        let (Some(client), Some(item), Some(plan)) = (self.client.clone(), &self.item, self.plan()) else {
+            return;
+        };
+        let (content_id, file_id) = (item.content_id.clone(), plan.effective_media_file_id.to_string());
+        self._trickplay = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let trickplay = match client.trickplay(&content_id, &file_id).await {
+                    Ok(trickplay) => trickplay,
+                    Err(err) => return eprintln!("silo-omarchy: no seek thumbnails for {content_id}: {err}"),
+                };
+                let wait = (trickplay.expires_at - chrono::Utc::now() - chrono::TimeDelta::minutes(1))
+                    .to_std()
+                    .unwrap_or_default()
+                    .max(Duration::from_secs(60));
+                let set = this.update(cx, |this, cx| {
+                    this.trickplay = Some(trickplay);
+                    // A sheet that failed with an expired URL loads again with the new one.
+                    artwork::global(cx).update(cx, |cache, _| cache.retry_failed());
+                    cx.notify();
+                });
+                if set.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(wait).await;
+            }
         }));
     }
 
@@ -397,7 +438,7 @@ impl PlayerWindow {
     /// Ends the Playback session and closes the Player window. The task ends when the
     /// server has the stop report. The Library window waits for it before the app quits.
     pub fn quit(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        self.starting = None;
+        (self.starting, self._trickplay) = (None, None);
         self.step(Input::End, cx);
         self.close_mpv(cx);
         self.stopping.take().unwrap_or_else(|| Task::ready(()))
@@ -629,6 +670,11 @@ impl PlayerWindow {
     /// The file versions of the Item that plays.
     pub fn versions(&self) -> &[wire::FileVersion] {
         &self.versions
+    }
+
+    /// The seek thumbnails of the file that plays.
+    pub fn trickplay(&self) -> Option<&wire::WatchTrickplay> {
+        self.trickplay.as_ref()
     }
 
     /// The file version that plays, once the plan and the version list are known.

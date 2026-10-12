@@ -18,12 +18,12 @@ use gpui_omarchy::{ActiveTheme as _, IconName, icon};
 use crate::api::types::{Delivery, StreamProtocol};
 use crate::api::wire;
 use crate::click::Clickable as _;
-use crate::detail;
 use crate::keys::Key;
 use crate::playback::Input;
 use crate::playback::tracks::{Kind, Track};
 use crate::player::PlayerWindow;
 use crate::video::Surface;
+use crate::{artwork, detail};
 
 /// The controls hide after this time with no input.
 const CONTROLS_TIME: Duration = Duration::from_secs(3);
@@ -40,6 +40,8 @@ const VOLUME_STEP: f64 = 5.0;
 const LINES_PER_NOTCH: f32 = 3.0;
 /// The touchpad distance of one wheel notch.
 const PIXELS_PER_NOTCH: f32 = 50.0;
+/// The width of the seek thumbnail over the seek bar.
+const THUMB_WIDTH: f32 = 192.0;
 
 pub struct PlayerView {
     player: Entity<PlayerWindow>,
@@ -56,6 +58,8 @@ pub struct PlayerView {
     scrolled: f32,
     /// The bounds of the seek bar in the last frame, for a click on it.
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The mouse is over the seek bar, this many pixels from its left edge.
+    hover: Option<f32>,
     /// The view made the window fullscreen, so it leaves fullscreen when it closes.
     fullscreen: bool,
     /// The picker that shows over the video.
@@ -133,6 +137,7 @@ impl PlayerView {
             mouse: None,
             scrolled: 0.0,
             bar: Rc::default(),
+            hover: None,
             fullscreen: false,
             picker: None,
             info: false,
@@ -163,7 +168,7 @@ impl PlayerView {
         self._hide = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CONTROLS_TIME).await;
             this.update(cx, |this, cx| {
-                this.controls = false;
+                (this.controls, this.hover) = (false, None);
                 cx.notify();
             })
             .ok();
@@ -365,6 +370,45 @@ impl PlayerView {
         self.step(Input::SetPosition(seek_target(x, f32::from(bounds.size.width), duration)), cx);
     }
 
+    fn hover_bar(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bounds) = self.bar.get() {
+            self.hover = Some(f32::from(event.position.x - bounds.origin.x));
+            cx.notify();
+        }
+    }
+
+    /// The time over the hovered point of the seek bar, with its seek thumbnail when the server has them.
+    fn preview(&self, x: f32, width: f32, duration: f64, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let player = self.player.read(cx);
+        let position = seek_target(x, width, duration);
+        let thumb = player.trickplay().zip(player.plan()).and_then(|(trickplay, plan)| {
+            let (url, column, row) = thumb_tile(trickplay, position + plan.timeline.timeline_offset_seconds)?;
+            let height = THUMB_WIDTH * trickplay.thumbnail_height as f32 / trickplay.thumbnail_width.max(1) as f32;
+            // The whole sheet, moved so that only the tile of the thumbnail shows.
+            let sheet = div()
+                .absolute()
+                .left(px(-(column as f32) * THUMB_WIDTH))
+                .top(px(-(row as f32) * height))
+                .w(px(trickplay.tile_columns as f32 * THUMB_WIDTH))
+                .h(px(trickplay.tile_rows as f32 * height))
+                .child(artwork::logo(url.to_string(), || div().into_any_element()));
+            Some(div().relative().w(px(THUMB_WIDTH)).h(px(height)).overflow_hidden().rounded(px(6.)).child(sheet))
+        });
+        let left = (x - THUMB_WIDTH / 2.0).clamp(0.0, (width - THUMB_WIDTH).max(0.0));
+        div()
+            .absolute()
+            .bottom(px(20.))
+            .left(px(left))
+            .w(px(THUMB_WIDTH))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(4.))
+            .children(thumb)
+            .child(div().px(px(6.)).rounded(px(4.)).bg(t.surface).text_color(t.bright).child(clock(position)))
+    }
+
     /// A round button of the controls. A click does what its key does.
     fn button(
         &self,
@@ -436,6 +480,11 @@ impl PlayerView {
         });
         let played = div().absolute().top_0().left_0().h_full().w(relative(fraction)).rounded_full().bg(t.accent);
         let track = div().relative().h(px(4.)).w_full().rounded_full().bg(t.inset).child(played).children(markers);
+        let preview = self
+            .hover
+            .zip(self.bar.get())
+            .zip(duration)
+            .map(|((x, bounds), duration)| self.preview(x, f32::from(bounds.size.width), duration, cx));
         let bar = self.bar.clone();
         let seek = div()
             .id("seek-bar")
@@ -445,8 +494,17 @@ impl PlayerView {
             .flex()
             .items_center()
             .on_click(cx.listener(Self::click_bar))
+            .on_mouse_move(cx.listener(Self::hover_bar))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !hovered {
+                    this.hover = None;
+                    cx.notify();
+                }
+            }))
             .child(canvas(move |bounds, _, _| bar.set(Some(bounds)), |_, _, _, _| ()).absolute().size_full())
             .child(track);
+        // The preview is outside the seek bar, so that the hover look of the bar does not dim it.
+        let seek = div().relative().child(seek).children(preview);
         let row = div()
             .flex()
             .items_center()
@@ -815,6 +873,19 @@ pub fn marker_span(start: f64, end: f64, duration: f64) -> Option<(f32, f32)> {
     (duration > 0.0 && end > start).then(|| ((start / duration) as f32, ((end - start) / duration) as f32))
 }
 
+/// The trickplay thumbnail of the source time `source`, in seconds: the URL of its sheet, and its column and row
+/// on that sheet. A time outside the file shows the first or the last thumbnail.
+pub fn thumb_tile(trickplay: &wire::WatchTrickplay, source: f64) -> Option<(&str, usize, usize)> {
+    let (columns, per_sheet) = (trickplay.tile_columns, trickplay.tile_columns * trickplay.tile_rows);
+    if trickplay.thumbnail_count <= 0 || trickplay.interval_ms <= 0 || per_sheet <= 0 {
+        return None;
+    }
+    let thumbnail = ((source * 1000.0) as i64 / trickplay.interval_ms).clamp(0, trickplay.thumbnail_count - 1);
+    let (sheet, tile) = (thumbnail / per_sheet, thumbnail % per_sheet);
+    let url = &trickplay.sheets.iter().find(|s| s.index == sheet)?.url;
+    Some((url, (tile % columns) as usize, (tile / columns) as usize))
+}
+
 /// The position that a click `x` pixels into a seek bar of `width` pixels seeks to.
 pub fn seek_target(x: f32, width: f32, duration: f64) -> f64 {
     if width <= 0.0 {
@@ -828,7 +899,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Pick, chapter_rows, clock, delay_label, info_rows, marker_span, quality_rows, seek_target, track_rows,
+        Pick, chapter_rows, clock, delay_label, info_rows, marker_span, quality_rows, seek_target, thumb_tile,
+        track_rows,
     };
     use crate::api::wire;
     use crate::playback::tracks::{Kind, parse};
@@ -983,5 +1055,28 @@ mod tests {
         assert_eq!(seek_target(-5.0, 1000.0, 7200.0), 0.0, "left of the bar");
         assert_eq!(seek_target(1200.0, 1000.0, 7200.0), 7200.0, "right of the bar");
         assert_eq!(seek_target(10.0, 0.0, 7200.0), 0.0, "no bar yet");
+    }
+
+    #[test]
+    fn a_hovered_time_shows_the_tile_of_its_thumbnail_on_its_sheet() {
+        let trickplay: wire::WatchTrickplay =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/get_watch_trickplay_ok.json")).unwrap();
+        let tile = |source| thumb_tile(&trickplay, source);
+        // 10 s for each thumbnail, 10 x 10 thumbnails on each sheet, 1020 thumbnails.
+        assert_eq!(tile(0.0), Some(("/api/v2/artwork/trickplay/42/9913/0.9913.jpg?exp=1767409445&sig=a", 0, 0)));
+        assert_eq!(tile(125.0).map(|t| (t.1, t.2)), Some((2, 1)), "thumbnail 12");
+        assert_eq!(tile(1234.5), Some(("/api/v2/artwork/trickplay/42/9913/1.9913.jpg?exp=1767409445&sig=b", 3, 2)));
+        assert_eq!(tile(-5.0).map(|t| (t.1, t.2)), Some((0, 0)), "before the start");
+        assert_eq!(
+            tile(99_999.0),
+            Some(("/api/v2/artwork/trickplay/42/9913/10.9913.jpg?exp=1767409445&sig=k", 9, 1)),
+            "after the end shows the last thumbnail"
+        );
+        let mut empty = trickplay.clone();
+        empty.thumbnail_count = 0;
+        assert_eq!(thumb_tile(&empty, 10.0), None, "no thumbnails");
+        let mut missing = trickplay.clone();
+        missing.sheets.truncate(1);
+        assert_eq!(thumb_tile(&missing, 1234.5), None, "no sheet for the thumbnail");
     }
 }

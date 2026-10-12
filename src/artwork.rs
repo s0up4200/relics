@@ -479,7 +479,8 @@ pub fn image(url: Option<String>, thumb: Option<Arc<RenderImage>>, width: f32) -
 }
 
 /// The title logo at `url`, scaled to fit its box. It loads at full size, because the cache shrinks an image to a
-/// JPEG and the logo needs its transparency. `fallback` shows while the logo loads and after it fails.
+/// JPEG and the logo needs its transparency. A sheet of seek thumbnails uses it too, so that each tile keeps its
+/// pixels. `fallback` shows while the logo loads and after it fails.
 pub fn logo(url: String, fallback: impl Fn() -> AnyElement + Clone + 'static) -> AnyElement {
     let id = SharedString::from(url.clone());
     let source =
