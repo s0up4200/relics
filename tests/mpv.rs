@@ -270,20 +270,25 @@ fn wait_for_property(player: &Player, name: &str, want: &str) {
 }
 
 #[test]
-fn a_cycles_the_audio_track_only_for_the_file_that_plays() {
+fn a_and_s_open_the_track_lists_and_enter_picks_a_track() {
     let stub = stub(usize::MAX);
     let (player, rx) = open_with_controls();
     wait_for(&rx, |input| matches!(input, Input::ControlsReady));
-    let url = format!("{}/sample.mp4", stub.url);
-    player.load(&url, &headers(), 0.0, None).unwrap();
+    player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    wait_for_property(&player, "aid", "1");
-    // The test video has one audio track, so the next track is none.
+    // The built-in track lists of mpv show in its console.
     player.command(&["keypress", "a"]).unwrap();
-    wait_for_property(&player, "aid", "no");
-    player.load(&url, &headers(), 0.0, None).unwrap();
-    wait_for(&rx, |input| matches!(input, Input::FileLoaded));
-    wait_for_property(&player, "aid", "1");
+    wait_for_property(&player, "user-data/mpv/console/open", "true");
+    player.command(&["keypress", "ESC"]).unwrap();
+    wait_for_property(&player, "user-data/mpv/console/open", "false");
+    player.add_subtitle(&format!("{}/sample.vtt", stub.url), "English", "eng").unwrap();
+    wait_for_property(&player, "sid", "1");
+    player.command(&["set", "sid", "no"]).unwrap();
+    wait_for_property(&player, "sid", "no");
+    player.command(&["keypress", "s"]).unwrap();
+    wait_for_property(&player, "user-data/mpv/console/open", "true");
+    player.command(&["keypress", "ENTER"]).unwrap();
+    wait_for_property(&player, "sid", "1");
 }
 
 #[test]

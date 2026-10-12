@@ -123,8 +123,9 @@ end
 mp.add_forced_key_binding("ENTER", "silo-enter", function()
   if prompt ~= "" then mp.commandv("script-message", "silo-action") end
 end)
-mp.add_forced_key_binding("a", "silo-audio", function() mp.command("cycle aid"); poke() end)
-mp.add_forced_key_binding("s", "silo-subtitles", function() mp.command("cycle sid"); poke() end)
+-- The track lists come from the built-in select.lua of mpv.
+mp.add_forced_key_binding("a", "silo-audio", function() mp.command("script-binding select/select-aid") end)
+mp.add_forced_key_binding("s", "silo-subtitles", function() mp.command("script-binding select/select-sid") end)
 mp.add_forced_key_binding("MBTN_LEFT", "silo-click", function()
   local x, y = mp.get_mouse_pos()
   local b = seek_box
