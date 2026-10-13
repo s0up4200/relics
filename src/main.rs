@@ -18,6 +18,7 @@ gpui_kit::assets::icon_assets!(
         Layers,
         Bookmark,
         RotateCcwClock,
+        LibraryBig,
         Minimize,
         Volume2,
         VolumeX,
