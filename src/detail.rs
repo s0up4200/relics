@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, MouseButton, ParentElement, Render, RenderImage, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, Task, Window, canvas, div, linear_color_stop, linear_gradient, list, px,
-    relative,
+    ListState, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, RenderImage, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled, Task, Window, anchored, canvas, deferred, div,
+    linear_color_stop, linear_gradient, list, px, relative,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -62,8 +62,8 @@ pub struct Detail {
     notice: Option<String>,
     /// The season or episode card whose menu is open.
     menu: Option<Mark>,
-    /// The chosen entry of the open menu: 0 is Mark watched, 1 is Shuffle season.
-    menu_entry: usize,
+    /// Where a right-click opened the menu, in window coordinates. The `o` key opens it below the card.
+    menu_at: Option<Point<Pixels>>,
     /// The Thumbhash of the backdrop, the poster and each cast photo.
     thumbs: Vec<Option<Arc<RenderImage>>>,
     episode_thumbs: Vec<Option<Arc<RenderImage>>>,
@@ -77,7 +77,7 @@ pub struct Detail {
     /// The items of the page list when it last drew, from `Rows::items`.
     items: Vec<(usize, usize)>,
     /// The sideways scroll of each row of cards, by the row number of `Focus::place`.
-    row_scrolls: [ScrollHandle; 8],
+    row_scrolls: [ScrollHandle; 9],
     /// The width of the window when the page last drew.
     viewport: f32,
     /// The height of the hero content when the page last drew.
@@ -131,7 +131,7 @@ impl Detail {
             error: None,
             notice: None,
             menu: None,
-            menu_entry: 0,
+            menu_at: None,
             thumbs: Vec::new(),
             episode_thumbs: Vec::new(),
             season_thumbs: Vec::new(),
@@ -271,6 +271,7 @@ impl Detail {
             version: self.version,
             seasons: self.seasons.len(),
             season: self.season,
+            shuffle: usize::from(self.shufflable_season().is_some()),
             episodes: self.episodes.len(),
             cast: self.item.as_ref().map_or(0, |item| item.cast.len()),
             crew: self.item.as_ref().map_or(0, |item| item.crew.len()),
@@ -303,12 +304,7 @@ impl Detail {
         self.menu = self.open_menu();
         if let Some(mark) = self.menu {
             match key {
-                Key::Down if self.shufflable_season(mark).is_some() => self.menu_entry = 1,
-                Key::Up => self.menu_entry = 0,
-                Key::Other("enter") => match self.shufflable_season(mark).filter(|_| self.menu_entry == 1) {
-                    Some(id) => self.shuffle_season(id, cx),
-                    None => self.mark(mark, cx),
-                },
+                Key::Other("enter") => self.mark(mark, cx),
                 Key::Other("escape" | "backspace" | "o") => self.menu = None,
                 _ => {}
             }
@@ -321,8 +317,9 @@ impl Detail {
                     self.act(action, cx);
                 }
             }
-            (Focus::Season(i), Key::Other("o")) => self.show_menu(Mark::Season(i)),
-            (Focus::Episode(i), Key::Other("o")) => self.show_menu(Mark::Episode(i)),
+            (Focus::Season(i), Key::Other("o")) => self.show_menu(Mark::Season(i), None),
+            (Focus::Episode(i), Key::Other("o")) => self.show_menu(Mark::Episode(i), None),
+            (Focus::ShuffleSeason(_), Key::Other("enter")) => self.shuffle_season(cx),
             (Focus::Version(i), Key::Other("enter")) => self.choose_version(i, cx),
             (Focus::Season(i), Key::Other("enter")) => self.choose_season(i, cx),
             (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
@@ -430,24 +427,36 @@ impl Detail {
         );
     }
 
-    /// Opens the menu of a season or episode card, with the first entry chosen.
-    fn show_menu(&mut self, mark: Mark) {
+    /// Opens the menu of a season or episode card, at the pointer `at` or below the card.
+    fn show_menu(&mut self, mark: Mark, at: Option<Point<Pixels>>) {
         self.menu = Some(mark);
-        self.menu_entry = 0;
+        self.menu_at = at;
     }
 
-    /// The id of the season that the menu of `mark` can shuffle: a season card of 2 episodes or more.
-    fn shufflable_season(&self, mark: Mark) -> Option<String> {
-        match mark {
-            Mark::Season(i) => self.seasons.get(i).filter(|s| s.episode_count >= 2).map(|s| s.content_id.clone()),
-            _ => None,
+    /// The id of the chosen season, when it has 2 episodes or more to shuffle.
+    fn shufflable_season(&self) -> Option<String> {
+        self.seasons.get(self.season).filter(|s| s.episode_count >= 2).map(|s| s.content_id.clone())
+    }
+
+    /// Starts a shuffle of the chosen season.
+    fn shuffle_season(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.shufflable_season() {
+            self.shuffle("season", id, cx);
         }
     }
 
-    /// Closes the menu and starts a shuffle of the season `id`.
-    fn shuffle_season(&mut self, id: String, cx: &mut Context<Self>) {
-        self.menu = None;
-        self.shuffle("season", id, cx);
+    /// The Shuffle season button, above the episodes of the chosen season.
+    fn shuffle_season_button(&self, cx: &Context<Self>) -> AnyElement {
+        let focus = Focus::ShuffleSeason(0);
+        let pill = self.pill(("detail-shuffle-season", 0), "Shuffle season".into(), false, self.focus == focus, cx);
+        div()
+            .px(px(MARGIN))
+            .flex()
+            .child(pill.on_click(cx.listener(move |this, _, _, cx| {
+                this.focus = focus;
+                this.shuffle_season(cx);
+            })))
+            .into_any_element()
     }
 
     /// Starts a server shuffle of a series or a season. A failure shows in the notice.
@@ -465,7 +474,8 @@ impl Detail {
         })
     }
 
-    /// A season or episode card with the right-click that opens its menu, and the menu below it when it is open.
+    /// A season or episode card with the right-click that opens its menu. The menu is a short list that floats over
+    /// the page, so that the other cards do not move. A click outside the menu closes it.
     fn with_menu(
         &self,
         card: gpui::Stateful<gpui::Div>,
@@ -475,32 +485,48 @@ impl Detail {
     ) -> gpui::Div {
         let card = card.on_mouse_down(
             MouseButton::Right,
-            cx.listener(move |this, _, _, cx| {
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 this.focus = focus;
-                this.show_menu(mark);
+                this.show_menu(mark, Some(event.position));
                 cx.notify();
             }),
         );
-        let open = self.open_menu() == Some(mark);
-        let entry = |i: usize| open && self.menu_entry == i;
-        let label = if watched { "Mark unwatched" } else { "Mark watched" };
-        let mark_pill = open.then(|| {
-            self.pill(("detail-mark", 0), label.into(), false, entry(0), cx)
-                .on_click(cx.listener(move |this, _, _, cx| this.mark(mark, cx)))
+        let menu = (self.open_menu() == Some(mark)).then(|| {
+            let t = cx.omarchy();
+            let label = if watched { "Mark unwatched" } else { "Mark watched" };
+            let entry = div()
+                .id("detail-mark")
+                .cursor_pointer()
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .text_size(px(14.))
+                .bg(if self.active { t.accent.alpha(0.25) } else { gpui::transparent_black() })
+                .hover(|entry| entry.bg(t.accent.alpha(0.25)))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.mark(mark, cx)));
+            let panel = div()
+                .min_w(px(160.))
+                .p(px(4.))
+                .flex()
+                .flex_col()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(gpui::hsla(0., 0., 1., 0.1))
+                .bg(t.surface)
+                .shadow_lg()
+                .child(entry)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    cx.notify();
+                }));
+            let menu = match self.menu_at {
+                Some(at) => anchored().position(at),
+                None => anchored(),
+            };
+            div().h_0().child(deferred(menu.snap_to_window().child(panel.mt(px(6.)))))
         });
-        let shuffle_pill = self.shufflable_season(mark).filter(|_| open).map(|id| {
-            self.pill(("detail-shuffle", 0), "Shuffle season".into(), false, entry(1), cx)
-                .on_click(cx.listener(move |this, _, _, cx| this.shuffle_season(id.clone(), cx)))
-        });
-        div()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap(px(6.))
-            .child(card)
-            .children(mark_pill)
-            .children(shuffle_pill)
+        div().flex_none().flex().flex_col().items_start().child(card).children(menu)
     }
 
     /// Sends a write action. The page shows the new state only when the server saved it. A failure, for example
@@ -1085,6 +1111,7 @@ impl Render for Detail {
                     0 => this.hero(item, window_size, cx),
                     1 => this.version_pills(cx),
                     2 => this.season_cards(cx),
+                    3 => this.shuffle_season_button(cx),
                     EPISODE_ROW => this.episode_line(item, line, cx),
                     row => this.section(row, item, cx),
                 };
@@ -1399,6 +1426,8 @@ pub enum Focus {
     Action(usize),
     Version(usize),
     Season(usize),
+    /// The Shuffle season button. The row has one control.
+    ShuffleSeason(usize),
     Episode(usize),
     Cast(usize),
     Crew(usize),
@@ -1413,6 +1442,7 @@ impl Focus {
             Focus::Action,
             Focus::Version,
             Focus::Season,
+            Focus::ShuffleSeason,
             Focus::Episode,
             Focus::Cast,
             Focus::Crew,
@@ -1427,17 +1457,18 @@ impl Focus {
             Focus::Action(i) => (0, i),
             Focus::Version(i) => (1, i),
             Focus::Season(i) => (2, i),
-            Focus::Episode(i) => (3, i),
-            Focus::Cast(i) => (4, i),
-            Focus::Crew(i) => (5, i),
-            Focus::Trailer(i) => (6, i),
-            Focus::Similar(i) => (7, i),
+            Focus::ShuffleSeason(i) => (3, i),
+            Focus::Episode(i) => (4, i),
+            Focus::Cast(i) => (5, i),
+            Focus::Crew(i) => (6, i),
+            Focus::Trailer(i) => (7, i),
+            Focus::Similar(i) => (8, i),
         }
     }
 }
 
 /// The row of the episode grid. The other rows go left and right only.
-const EPISODE_ROW: usize = 3;
+const EPISODE_ROW: usize = 4;
 
 const SEASONS: Row = Row { width: SEASON_WIDTH, gap: GAP, pad: MARGIN };
 
@@ -1448,7 +1479,7 @@ fn sideways(row: usize) -> Option<Row> {
         Focus::Cast(_) | Focus::Crew(_) => CAST_WIDTH,
         Focus::Trailer(_) => TRAILER_WIDTH,
         Focus::Similar(_) => crate::grid::POSTER_WIDTH,
-        Focus::Action(_) | Focus::Version(_) | Focus::Episode(_) => return None,
+        Focus::Action(_) | Focus::Version(_) | Focus::ShuffleSeason(_) | Focus::Episode(_) => return None,
     };
     Some(Row { width, gap: GAP, pad: 0. })
 }
@@ -1474,6 +1505,8 @@ pub struct Rows {
     pub seasons: usize,
     /// The index of the chosen season.
     pub season: usize,
+    /// The Shuffle season button: 1 when the chosen season has 2 episodes or more, else 0.
+    pub shuffle: usize,
     pub episodes: usize,
     pub cast: usize,
     pub crew: usize,
@@ -1486,8 +1519,8 @@ pub struct Rows {
 
 impl Rows {
     fn len(&self, row: usize) -> usize {
-        let Rows { actions, versions, seasons, episodes, cast, crew, trailers, similar, .. } = *self;
-        [actions, versions, seasons, episodes, cast, crew, trailers, similar][row]
+        let Rows { actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar, .. } = *self;
+        [actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar][row]
     }
 
     /// The control that the focus goes to in `row`: the chosen version or season, the first card of the last
@@ -1504,7 +1537,7 @@ impl Rows {
     /// The items of the page list, as the row and the line of the episode grid: the hero, one item for each other
     /// row that is not empty, and one for each line of the episode grid.
     pub fn items(&self) -> Vec<(usize, usize)> {
-        (0..8)
+        (0..9)
             .flat_map(|row| {
                 let lines = match row {
                     0 => 1,
@@ -1527,7 +1560,7 @@ impl Rows {
         let (row, i) = focus.place();
         let leave = |down: bool| {
             let next =
-                if down { (row + 1..8).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
+                if down { (row + 1..9).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
             next.map_or(Step::Stay, |next| Step::To(self.enter(next, !down)))
         };
         if row == EPISODE_ROW {
@@ -1770,6 +1803,7 @@ mod tests {
             version: 0,
             seasons: 2,
             season: 1,
+            shuffle: 0,
             episodes: 5,
             cast: 0,
             crew: 0,
@@ -1795,6 +1829,7 @@ mod tests {
             version: 0,
             seasons: 0,
             season: 0,
+            shuffle: 0,
             episodes: 0,
             cast: 0,
             crew: 0,
@@ -1805,6 +1840,11 @@ mod tests {
         assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
         let loading = Rows { episodes: 0, ..rows };
         assert_eq!(loading.step(Focus::Season(0), Key::Down), Step::Stay);
+        let shuffle = Rows { shuffle: 1, ..rows };
+        assert_eq!(shuffle.step(Focus::Season(1), Key::Down), to(Focus::ShuffleSeason(0)));
+        assert_eq!(shuffle.step(Focus::ShuffleSeason(0), Key::Down), to(Focus::Episode(0)));
+        assert_eq!(shuffle.step(Focus::Episode(1), Key::Up), to(Focus::ShuffleSeason(0)));
+        assert_eq!(shuffle.step(Focus::ShuffleSeason(0), Key::Up), to(Focus::Season(1)));
     }
 
     #[test]
@@ -1815,6 +1855,7 @@ mod tests {
             version: 0,
             seasons: 0,
             season: 0,
+            shuffle: 0,
             episodes: 0,
             cast: 3,
             crew: 0,
@@ -1883,6 +1924,7 @@ mod tests {
             version: 1,
             seasons: 0,
             season: 0,
+            shuffle: 0,
             episodes: 0,
             cast: 2,
             crew: 0,
@@ -1963,6 +2005,7 @@ mod tests {
             version: 0,
             seasons: 2,
             season: 0,
+            shuffle: 0,
             episodes: 5,
             cast: 2,
             crew: 3,
@@ -2007,6 +2050,7 @@ mod tests {
             version: 0,
             seasons: 0,
             season: 0,
+            shuffle: 0,
             episodes: 0,
             cast: 2,
             crew: 0,
