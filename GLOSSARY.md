@@ -121,6 +121,10 @@ The button that the Player view shows over the video while playback is inside a 
 The card that the Player view shows near the end of an Item when the next episode or the next shuffle pick plays by itself. It starts at the end credits, or 10 seconds before the end of the file when the Item has no end credits. It shows the next title and a countdown of 10 seconds. Play now (Enter) plays the next Item at once. Cancel (Esc) hides the card, and the Player view then closes at the end of the file.
 _Avoid_: autoplay prompt, next episode overlay
 
+**Shuffle**:
+A random play order that the Server keeps for one scope: a Library, a collection, a series or a season. Each pick plays from the beginning. The next pick plays by itself, with the Up Next card.
+_Avoid_: random play, shuffle play
+
 **Still watching prompt**:
 The prompt that pauses playback in place of the next Item after 3 Items in a row played by themselves with no input of the user. Continue (Enter) plays the next Item. Back stops playback. Any key, click or mouse move in the Player view, and any media key, starts the count again.
 _Avoid_: passout prompt, idle check

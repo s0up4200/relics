@@ -124,8 +124,8 @@ pub fn next_label(season: Option<i64>, episode: Option<i64>, title: &str) -> Str
     }
 }
 
-/// Starts a server shuffle of the scope `kind` and `id` (a Library, or a collection of a Library) and emits
-/// `Play` with its first pick. A failure gives the text for the user to `failed`.
+/// Starts a server shuffle of the scope `kind` and `id` (a Library, a collection of a Library, a series or a
+/// season) and emits `Play` with its first pick. A failure gives the text for the user to `failed`.
 pub fn start_shuffle<T: EventEmitter<Play>>(
     client: Arc<Client>,
     kind: &'static str,
