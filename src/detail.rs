@@ -585,6 +585,7 @@ impl Detail {
         let width = window.0 - crate::pages::sidebar_width(window.0, true);
         let height = hero_height(window, self.content_height);
         let crop = backdrop_box((width, height));
+        let (poster, column) = hero_columns(width);
         let glow = artwork_color(item.backdrop_thumbhash.as_deref(), t.accent);
         let background = t.background;
         let buttons = actions(item).into_iter().enumerate().map(|(i, action)| {
@@ -613,7 +614,7 @@ impl Detail {
         };
         // The logo shows in place of the title. The title shows while the logo loads, and when it fails.
         let title = match self.url(&item.logo_url) {
-            Some(url) => artwork::logo(url, (LOGO_WIDTH, LOGO_HEIGHT), title_text),
+            Some(url) => artwork::logo(url, (LOGO_WIDTH.min(column), LOGO_HEIGHT), title_text),
             None => title_text(),
         };
         let secondary = t.secondary;
@@ -667,7 +668,7 @@ impl Detail {
                     .pt(px(28.))
                     .pb(px(28.))
                     .child(self.measure(cx))
-                    .child(
+                    .children(poster.then(|| {
                         div()
                             .w(px(POSTER_WIDTH))
                             .h(px(300.))
@@ -675,10 +676,11 @@ impl Detail {
                             .rounded(px(12.))
                             .overflow_hidden()
                             .bg(t.surface)
-                            .child(artwork::image(self.url(&item.poster_url), self.thumb(1), POSTER_WIDTH)),
-                    )
+                            .child(artwork::image(self.url(&item.poster_url), self.thumb(1), POSTER_WIDTH))
+                    }))
                     .child(
                         div()
+                            .min_w(px(0.))
                             .max_w(px(640.))
                             .flex()
                             .flex_col()
@@ -692,7 +694,7 @@ impl Detail {
                                     .map(|text| div().italic().child(text)),
                             )
                             .child(div().text_color(t.secondary).child(meta_line(item)))
-                            .child(div().flex().gap(px(6.)).children(badges))
+                            .child(div().flex().flex_wrap().gap(px(6.)).children(badges))
                             .children(line(ratings_line(item)))
                             .children(item.overview.clone().map(|text| div().line_clamp(3).child(text)))
                             .children(line(credits_line(item)))
@@ -1104,6 +1106,14 @@ fn fade(angle: f32, color: gpui::Hsla, stops: &[(f32, f32)]) -> Vec<gpui::Div> {
 pub fn hero_height((width, height): (f32, f32), content: f32) -> f32 {
     let share = if width < 1024. { 0.6 } else { 0.72 };
     (height * share).max(content)
+}
+
+/// Whether the hero of `width` logical pixels shows the poster, and the width of the text column. The poster shows
+/// only when the full logo fits next to it, so that a narrow window does not cut off the text.
+pub fn hero_columns(width: f32) -> (bool, f32) {
+    let column = width - 2. * MARGIN;
+    let beside = column - POSTER_WIDTH - 32.;
+    if beside >= LOGO_WIDTH { (true, beside) } else { (false, column) }
 }
 
 /// The box of the 16:9 backdrop in a hero of `hero` (width, height), relative to the hero. The box covers the hero.
@@ -2091,6 +2101,14 @@ mod tests {
         assert_eq!(hero_height((1600., 1000.), 400.), 720.);
         assert_eq!(hero_height((900., 1000.), 400.), 600., "narrower than 1024 px");
         assert_eq!(hero_height((1600., 500.), 450.), 450., "the content is taller than 72%");
+    }
+
+    #[test]
+    fn a_narrow_hero_hides_the_poster_so_that_the_text_fits() {
+        assert_eq!(hero_columns(1336.), (true, 1008.));
+        assert_eq!(hero_columns(728.), (true, 400.), "the logo just fits next to the poster");
+        assert_eq!(hero_columns(700.), (false, 604.));
+        assert_eq!(hero_columns(400.), (false, 304.), "narrower than the logo");
     }
 
     #[test]

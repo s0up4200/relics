@@ -218,7 +218,9 @@ The Android code uses the Apple values. Its comments name the Apple files.
 - Both hide the clip line. The web fades a scrim to the opaque theme background at the bottom. The Mac masks the
   image to transparent from 55% to 100% of its height.
 - Both add a dark fade or a fade in the background color on the leading side, where the text is.
-- In every client, the rows under the hero (seasons, episodes, cast) are on the plain page background.
+- In the web UI and the Mac app, the rows under the hero (seasons, episodes, cast) are on the page surface,
+  with no artwork behind them. The phone apps show a blurred backdrop behind the rows. On tvOS and Android TV,
+  the fade of a series continues behind the season row.
 - Only the phone apps have a fixed full-window backdrop, and it is a strongly blurred field of color.
 
 ## Not verified
