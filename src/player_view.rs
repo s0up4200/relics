@@ -414,13 +414,12 @@ impl PlayerView {
             let (url, column, row) = thumb_tile(trickplay, position + plan.timeline.timeline_offset_seconds)?;
             let height = THUMB_WIDTH * trickplay.thumbnail_height as f32 / trickplay.thumbnail_width.max(1) as f32;
             // The whole sheet, moved so that only the tile of the thumbnail shows.
+            let size = (trickplay.tile_columns as f32 * THUMB_WIDTH, trickplay.tile_rows as f32 * height);
             let sheet = div()
                 .absolute()
                 .left(px(-(column as f32) * THUMB_WIDTH))
                 .top(px(-(row as f32) * height))
-                .w(px(trickplay.tile_columns as f32 * THUMB_WIDTH))
-                .h(px(trickplay.tile_rows as f32 * height))
-                .child(artwork::logo(url.to_string(), || div().into_any_element()));
+                .child(artwork::logo(url.to_string(), size, || div().into_any_element()));
             Some(div().relative().w(px(THUMB_WIDTH)).h(px(height)).overflow_hidden().rounded(px(6.)).child(sheet))
         });
         let left = (x - THUMB_WIDTH / 2.0).clamp(0.0, (width - THUMB_WIDTH).max(0.0));

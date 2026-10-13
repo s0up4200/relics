@@ -478,16 +478,22 @@ pub fn image(url: Option<String>, thumb: Option<Arc<RenderImage>>, width: f32) -
         .into_any_element()
 }
 
-/// The title logo at `url`, scaled to fit its box. It loads at full size, because the cache shrinks an image to a
-/// JPEG and the logo needs its transparency. A sheet of seek thumbnails uses it too, so that each tile keeps its
-/// pixels. `fallback` shows while the logo loads and after it fails.
-pub fn logo(url: String, fallback: impl Fn() -> AnyElement + Clone + 'static) -> AnyElement {
+/// The title logo at `url`, scaled to fit a box of `(width, height)` logical pixels. It loads at full size, because
+/// the cache shrinks an image to a JPEG and the logo needs its transparency. A sheet of seek thumbnails uses it too,
+/// so that each tile keeps its pixels. `fallback` shows while the logo loads and after it fails. The box has a size in
+/// pixels, because with `size_full` a tall logo drew outside its box on the detail page.
+pub fn logo(
+    url: String,
+    (width, height): (f32, f32),
+    fallback: impl Fn() -> AnyElement + Clone + 'static,
+) -> AnyElement {
     let id = SharedString::from(url.clone());
     let source =
         move |window: &mut Window, cx: &mut App| global(cx).update(cx, |cache, cx| cache.load(&url, 0, window, cx));
     img(ImageSource::Custom(Arc::new(source)))
         .id(id)
-        .size_full()
+        .w(gpui::px(width))
+        .h(gpui::px(height))
         .object_fit(ObjectFit::Contain)
         .with_loading(fallback.clone())
         .with_fallback(fallback)

@@ -27,8 +27,6 @@ use crate::sideways::Row;
 const EPISODE_WIDTH: f32 = 250.;
 const EPISODE_HEIGHT: f32 = 140.;
 const GAP: f32 = 14.;
-/// The gap between two rows of the page.
-const ROW_GAP: f32 = 24.;
 /// The left and right margin of the page.
 const MARGIN: f32 = 48.;
 const POSTER_WIDTH: f32 = 200.;
@@ -82,8 +80,6 @@ pub struct Detail {
     viewport: f32,
     /// The height of the hero content when the page last drew.
     content_height: f32,
-    /// The height of the first row under the hero when the page last drew.
-    below_height: f32,
     artwork: Entity<ArtworkCache>,
     /// The artwork rung of the Item and of the episodes, at the window scale when the page opened.
     // ponytail: read once; a move to a larger scale keeps it until the page opens again.
@@ -142,7 +138,6 @@ impl Detail {
             row_scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             viewport,
             content_height: 0.,
-            below_height: 0.,
             artwork: artwork::global(cx),
             image_size: Rung::fit(Kind::Backdrop, width, scale)
                 .max(Rung::fit(Kind::Poster, POSTER_WIDTH, scale))
@@ -588,8 +583,7 @@ impl Detail {
     fn hero(&self, item: &wire::CatalogItemDetail, window: (f32, f32), cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
         let width = window.0 - crate::pages::sidebar_width(window.0, true);
-        // The gap under the hero is part of the row under it.
-        let height = hero_height(&item.type_, window, self.below_height + ROW_GAP, self.content_height);
+        let height = hero_height(window, self.content_height);
         let crop = backdrop_box((width, height));
         let glow = artwork_color(item.backdrop_thumbhash.as_deref(), t.accent);
         let background = t.background;
@@ -619,9 +613,7 @@ impl Detail {
         };
         // The logo shows in place of the title. The title shows while the logo loads, and when it fails.
         let title = match self.url(&item.logo_url) {
-            Some(url) => {
-                div().w(px(LOGO_WIDTH)).h(px(LOGO_HEIGHT)).child(artwork::logo(url, title_text)).into_any_element()
-            }
+            Some(url) => artwork::logo(url, (LOGO_WIDTH, LOGO_HEIGHT), title_text),
             None => title_text(),
         };
         let secondary = t.secondary;
@@ -651,8 +643,9 @@ impl Detail {
                     .h(px(crop.size.height))
                     .child(artwork::image(self.url(&item.backdrop_url), self.thumb(0), crop.size.width)),
             )
-            // The scrims of the web `detail-hero-scrim-under`, `detail-hero-ambient` and `detail-hero-scrim-over`.
-            .children(fade(90., background, &[(0., 0.92), (0.18, 0.62), (0.36, 0.24), (0.52, 0.)]))
+            // The scrims of the web UI. The left fade reaches 68% of the width, not 52%, so that it covers the text.
+            // The other scrims are the web `detail-hero-scrim-under`, `detail-hero-ambient` and `detail-hero-scrim-over`.
+            .children(fade(90., background, &[(0., 0.92), (0.24, 0.62), (0.47, 0.24), (0.68, 0.)]))
             .child(div().absolute().inset_0().bg(background.alpha(0.1)))
             .children(fade(0., glow, &[(0., 0.08), (0.3, 0.)]))
             .children(fade(0., background, &[(0., 1.), (0.14, 0.86), (0.34, 0.46), (0.54, 0.12), (0.7, 0.)]))
@@ -673,7 +666,7 @@ impl Detail {
                     .px(px(MARGIN))
                     .pt(px(28.))
                     .pb(px(28.))
-                    .child(self.measure(cx, |this| &mut this.content_height))
+                    .child(self.measure(cx))
                     .child(
                         div()
                             .w(px(POSTER_WIDTH))
@@ -709,17 +702,16 @@ impl Detail {
             .into_any_element()
     }
 
-    /// An element that fills its positioned parent and stores the height of the parent in `store` after layout.
-    /// When the height changes, the page draws again.
-    fn measure(&self, cx: &Context<Self>, store: fn(&mut Self) -> &mut f32) -> AnyElement {
+    /// An element that fills the hero content and stores its height in `content_height` after layout. When the height
+    /// changes, the page draws again.
+    fn measure(&self, cx: &Context<Self>) -> AnyElement {
         let page = cx.entity().downgrade();
         canvas(
             move |bounds, _, cx| {
                 let height = bounds.size.height.to_f64() as f32;
                 page.update(cx, |this, cx| {
-                    let stored = store(this);
-                    if *stored != height {
-                        *stored = height;
+                    if this.content_height != height {
+                        this.content_height = height;
                         cx.notify();
                     }
                 })
@@ -1038,21 +1030,11 @@ impl Render for Detail {
                     EPISODE_ROW => this.episode_line(item, line, cx),
                     row => this.section(row, item, cx),
                 };
-                // The hero height needs the height of the row under it.
-                let child = if index == 1 {
-                    div()
-                        .relative()
-                        .child(child)
-                        .child(this.measure(cx, |this| &mut this.below_height))
-                        .into_any_element()
-                } else {
-                    child
-                };
                 // The lines of the episode grid have the gap of the cards. The last item has the bottom margin.
                 let gap = match this.items.get(index + 1) {
                     None => 80.,
                     Some(&(next, _)) if next == row => GAP,
-                    Some(_) => ROW_GAP,
+                    Some(_) => 24.,
                 };
                 div().pb(px(gap)).child(child).into_any_element()
             }),
@@ -1117,16 +1099,11 @@ fn fade(angle: f32, color: gpui::Hsla, stops: &[(f32, f32)]) -> Vec<gpui::Div> {
         .collect()
 }
 
-/// The height of the hero on a window of `window` (width, height) logical pixels. A movie hero fills 72% of the
-/// window height, or 60% when the window is narrower than 1024 px. A series or episode hero and the first row under
-/// it, `below` pixels high, fill the window. The hero is never shorter than its `content`.
-pub fn hero_height(kind: &str, (width, height): (f32, f32), below: f32, content: f32) -> f32 {
-    let min = match kind {
-        "series" | "episode" => height - below,
-        _ if width < 1024. => height * 0.6,
-        _ => height * 0.72,
-    };
-    min.max(content)
+/// The height of the hero on a window of `window` (width, height) logical pixels. The hero fills 72% of the window
+/// height, or 60% when the window is narrower than 1024 px. The hero is never shorter than its `content`.
+pub fn hero_height((width, height): (f32, f32), content: f32) -> f32 {
+    let share = if width < 1024. { 0.6 } else { 0.72 };
+    (height * share).max(content)
 }
 
 /// The box of the 16:9 backdrop in a hero of `hero` (width, height), relative to the hero. The box covers the hero.
@@ -2110,17 +2087,10 @@ mod tests {
     }
 
     #[test]
-    fn a_movie_hero_fills_72_percent_of_a_wide_window_and_60_percent_of_a_narrow_one() {
-        assert_eq!(hero_height("movie", (1600., 1000.), 0., 400.), 720.);
-        assert_eq!(hero_height("movie", (900., 1000.), 0., 400.), 600., "narrower than 1024 px");
-        assert_eq!(hero_height("movie", (1600., 500.), 0., 450.), 450., "the content is taller than 72%");
-    }
-
-    #[test]
-    fn a_series_hero_and_the_row_under_it_fill_the_window() {
-        assert_eq!(hero_height("series", (1600., 1000.), 300., 400.), 700.);
-        assert_eq!(hero_height("episode", (1600., 1000.), 250., 400.), 750.);
-        assert_eq!(hero_height("series", (1600., 600.), 300., 400.), 400., "a short window: the content wins");
+    fn the_hero_fills_72_percent_of_a_wide_window_and_60_percent_of_a_narrow_one() {
+        assert_eq!(hero_height((1600., 1000.), 400.), 720.);
+        assert_eq!(hero_height((900., 1000.), 400.), 600., "narrower than 1024 px");
+        assert_eq!(hero_height((1600., 500.), 450.), 450., "the content is taller than 72%");
     }
 
     #[test]
