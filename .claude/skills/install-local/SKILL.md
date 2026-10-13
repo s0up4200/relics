@@ -21,9 +21,4 @@ This skill installs the app from source for one user, until the AUR package exis
    install -Dm0644 data/silo-omarchy.desktop "$HOME/.local/share/applications/silo-omarchy.desktop"
    ```
 
-3. Make the window opaque. Omarchy makes each window a little transparent, and the video plays inside the Library window. The rule is in `data/silo-omarchy.lua`.
-   - If `~/.config/hypr/hyprland.lua` already contains `^silo-omarchy$`, the rule is in place. Go to step 4.
-   - Otherwise, copy the file to `~/.config/hypr/hyprland.lua.bak.<unix time>`. Then add the `o.window` call from `data/silo-omarchy.lua` on the line after `require("default.hypr.omarchy")`.
-   - Run `hyprctl reload`, then `hyprctl configerrors`. The step is done when `configerrors` prints no error. If it prints an error, put the backup back and report the error.
-
-4. Report to the user: the version from `Cargo.toml`, whether each file was new or replaced, and whether the rule was added or already in place. Tell the user that Silo shows in the launcher (Super + Space), and that a running copy of the app keeps the old version until it restarts.
+3. Report to the user: the version from `Cargo.toml`, and whether each file was new or replaced. Tell the user that Silo shows in the launcher (Super + Space), and that a running copy of the app keeps the old version until it restarts.
