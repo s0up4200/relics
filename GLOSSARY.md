@@ -47,6 +47,14 @@ _Avoid_: Shelf, carousel, rail
 A Home section that the server marks as featured. The Library window shows it as a hero above the other rows.
 _Avoid_: Banner
 
+**Hero**:
+The top block of a page, with the Backdrop, the title and the actions. On the detail page, the Hero clips the Backdrop and scrolls away with the page.
+_Avoid_: Banner, header
+
+**Backdrop**:
+The wide artwork of an Item that fills the Hero. On an episode, it can be the episode still or the artwork of the series.
+_Avoid_: Background, fanart
+
 **Person**:
 A cast or crew member that the Silo server knows, with the titles that they took part in.
 _Avoid_: Actor, as the general name. Actor is one role that a Person can have.

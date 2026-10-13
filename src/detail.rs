@@ -9,7 +9,8 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
     ListState, MouseButton, ParentElement, Render, RenderImage, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, Task, Window, div, linear_color_stop, linear_gradient, list, px,
+    StatefulInteractiveElement as _, Styled, Task, Window, canvas, div, linear_color_stop, linear_gradient, list, px,
+    relative,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -26,13 +27,14 @@ use crate::sideways::Row;
 const EPISODE_WIDTH: f32 = 250.;
 const EPISODE_HEIGHT: f32 = 140.;
 const GAP: f32 = 14.;
+/// The gap between two rows of the page.
+const ROW_GAP: f32 = 24.;
 /// The left and right margin of the page.
 const MARGIN: f32 = 48.;
 const POSTER_WIDTH: f32 = 200.;
 const SEASON_WIDTH: f32 = 130.;
 const CAST_WIDTH: f32 = 110.;
 const TRAILER_WIDTH: f32 = 220.;
-const HERO_HEIGHT: f32 = 500.;
 const LOGO_WIDTH: f32 = 400.;
 const LOGO_HEIGHT: f32 = 110.;
 
@@ -78,6 +80,10 @@ pub struct Detail {
     row_scrolls: [ScrollHandle; 8],
     /// The width of the window when the page last drew.
     viewport: f32,
+    /// The height of the hero content when the page last drew.
+    content_height: f32,
+    /// The height of the first row under the hero when the page last drew.
+    below_height: f32,
     artwork: Entity<ArtworkCache>,
     /// The artwork rung of the Item and of the episodes, at the window scale when the page opened.
     // ponytail: read once; a move to a larger scale keeps it until the page opens again.
@@ -135,6 +141,8 @@ impl Detail {
             items: Vec::new(),
             row_scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             viewport,
+            content_height: 0.,
+            below_height: 0.,
             artwork: artwork::global(cx),
             image_size: Rung::fit(Kind::Backdrop, width, scale)
                 .max(Rung::fit(Kind::Poster, POSTER_WIDTH, scale))
@@ -575,9 +583,16 @@ impl Detail {
             .child(label)
     }
 
-    /// The hero. The backdrop is `width` logical pixels wide.
-    fn hero(&self, item: &wire::CatalogItemDetail, width: f32, cx: &Context<Self>) -> AnyElement {
+    /// The hero, in a window of `window` (width, height) logical pixels. The hero clips the backdrop. Scrims in the
+    /// theme background color fade its bottom edge into the page, as in the web UI.
+    fn hero(&self, item: &wire::CatalogItemDetail, window: (f32, f32), cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
+        let width = window.0 - crate::pages::sidebar_width(window.0, true);
+        // The gap under the hero is part of the row under it.
+        let height = hero_height(&item.type_, window, self.below_height + ROW_GAP, self.content_height);
+        let crop = backdrop_box((width, height));
+        let glow = artwork_color(item.backdrop_thumbhash.as_deref(), t.accent);
+        let background = t.background;
         let buttons = actions(item).into_iter().enumerate().map(|(i, action)| {
             let mut pill =
                 self.pill(("detail-action", i), action_label(item, action).into(), i == 0, Focus::Action(i), cx);
@@ -618,23 +633,47 @@ impl Detail {
         div()
             .relative()
             .w_full()
-            .h(px(HERO_HEIGHT))
+            .h(px(height))
             .flex_none()
-            .child(div().absolute().inset_0().child(artwork::image(self.url(&item.backdrop_url), self.thumb(0), width)))
-            .child(div().absolute().inset_0().bg(linear_gradient(
+            .overflow_hidden()
+            // The page tint, from the web `body` background. It shows only where the hero has no backdrop.
+            .child(div().absolute().top_0().left_0().right_0().h(px(window.1 / 3.)).bg(linear_gradient(
                 180.,
-                linear_color_stop(gpui::hsla(0., 0., 0., 0.), 0.),
-                linear_color_stop(t.background, 1.),
+                linear_color_stop(glow.alpha(0.1), 0.),
+                linear_color_stop(glow.alpha(0.), 1.),
             )))
             .child(
                 div()
                     .absolute()
-                    .inset_0()
+                    .left(px(crop.origin.x))
+                    .top(px(crop.origin.y))
+                    .w(px(crop.size.width))
+                    .h(px(crop.size.height))
+                    .child(artwork::image(self.url(&item.backdrop_url), self.thumb(0), crop.size.width)),
+            )
+            // The scrims of the web `detail-hero-scrim-under`, `detail-hero-ambient` and `detail-hero-scrim-over`.
+            .children(fade(90., background, &[(0., 0.92), (0.18, 0.62), (0.36, 0.24), (0.52, 0.)]))
+            .child(div().absolute().inset_0().bg(background.alpha(0.1)))
+            .children(fade(0., glow, &[(0., 0.08), (0.3, 0.)]))
+            .children(fade(0., background, &[(0., 1.), (0.14, 0.86), (0.34, 0.46), (0.54, 0.12), (0.7, 0.)]))
+            .children(
+                [0., 90., 180., 270.]
+                    .into_iter()
+                    .flat_map(|angle| fade(angle, gpui::black(), &[(0., 0.18), (0.15, 0.)])),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
                     .flex()
                     .items_end()
                     .gap(px(32.))
                     .px(px(MARGIN))
+                    .pt(px(28.))
                     .pb(px(28.))
+                    .child(self.measure(cx, |this| &mut this.content_height))
                     .child(
                         div()
                             .w(px(POSTER_WIDTH))
@@ -668,6 +707,29 @@ impl Detail {
                     ),
             )
             .into_any_element()
+    }
+
+    /// An element that fills its positioned parent and stores the height of the parent in `store` after layout.
+    /// When the height changes, the page draws again.
+    fn measure(&self, cx: &Context<Self>, store: fn(&mut Self) -> &mut f32) -> AnyElement {
+        let page = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                let height = bounds.size.height.to_f64() as f32;
+                page.update(cx, |this, cx| {
+                    let stored = store(this);
+                    if *stored != height {
+                        *stored = height;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
     }
 
     /// The Version picker: a pill for each file version, with its quality labels and size. A check marks the
@@ -962,7 +1024,7 @@ impl Render for Detail {
             self.items = items;
         }
         self.viewport = viewport;
-        let hero_width = viewport - crate::pages::sidebar_width(viewport, true);
+        let window_size = (viewport, window.viewport_size().height.to_f64() as f32);
         let page = list(
             self.page.clone(),
             cx.processor(move |this, index: usize, _, cx| {
@@ -970,17 +1032,27 @@ impl Render for Detail {
                     return div().into_any_element();
                 };
                 let child = match row {
-                    0 => this.hero(item, hero_width, cx),
+                    0 => this.hero(item, window_size, cx),
                     1 => this.version_pills(cx),
                     2 => this.season_cards(cx),
                     EPISODE_ROW => this.episode_line(item, line, cx),
                     row => this.section(row, item, cx),
                 };
+                // The hero height needs the height of the row under it.
+                let child = if index == 1 {
+                    div()
+                        .relative()
+                        .child(child)
+                        .child(this.measure(cx, |this| &mut this.below_height))
+                        .into_any_element()
+                } else {
+                    child
+                };
                 // The lines of the episode grid have the gap of the cards. The last item has the bottom margin.
                 let gap = match this.items.get(index + 1) {
                     None => 80.,
                     Some(&(next, _)) if next == row => GAP,
-                    Some(_) => 24.,
+                    Some(_) => ROW_GAP,
                 };
                 div().pb(px(gap)).child(child).into_any_element()
             }),
@@ -1019,6 +1091,59 @@ pub fn episode_list(item: &wire::CatalogItemDetail, season: Option<i64>) -> Opti
         "episode" => item.series_id.clone().zip(item.season_number),
         _ => None,
     }
+}
+
+/// A fade with more than two stops, as a stack of two-stop strips end to end. The fade starts at the edge that
+/// `angle` points away from. An angle of 0 starts at the bottom edge, 90 at the left, 180 at the top and 270 at the
+/// right. Each stop is a position and the alpha of `color` at that position. The position is a fraction of the
+/// parent, from the start edge.
+fn fade(angle: f32, color: gpui::Hsla, stops: &[(f32, f32)]) -> Vec<gpui::Div> {
+    stops
+        .windows(2)
+        .map(|pair| {
+            let [(from, a), (to, b)] = [pair[0], pair[1]];
+            let strip = div().absolute().bg(linear_gradient(
+                angle,
+                linear_color_stop(color.alpha(a), 0.),
+                linear_color_stop(color.alpha(b), 1.),
+            ));
+            match angle as u32 {
+                0 => strip.left_0().right_0().bottom(relative(from)).h(relative(to - from)),
+                90 => strip.top_0().bottom_0().left(relative(from)).w(relative(to - from)),
+                180 => strip.left_0().right_0().top(relative(from)).h(relative(to - from)),
+                _ => strip.top_0().bottom_0().right(relative(from)).w(relative(to - from)),
+            }
+        })
+        .collect()
+}
+
+/// The height of the hero on a window of `window` (width, height) logical pixels. A movie hero fills 72% of the
+/// window height, or 60% when the window is narrower than 1024 px. A series or episode hero and the first row under
+/// it, `below` pixels high, fill the window. The hero is never shorter than its `content`.
+pub fn hero_height(kind: &str, (width, height): (f32, f32), below: f32, content: f32) -> f32 {
+    let min = match kind {
+        "series" | "episode" => height - below,
+        _ if width < 1024. => height * 0.6,
+        _ => height * 0.72,
+    };
+    min.max(content)
+}
+
+/// The box of the 16:9 backdrop in a hero of `hero` (width, height), relative to the hero. The box covers the hero.
+/// It is centered from side to side. It keeps the upper part of the art: 20% of the vertical overflow is above the
+/// hero, as with the web `object-position: center 20%`.
+pub fn backdrop_box((width, height): (f32, f32)) -> gpui::Bounds<f32> {
+    let box_width = width.max(height * 16. / 9.);
+    let box_height = box_width * 9. / 16.;
+    gpui::Bounds::new(
+        gpui::point((width - box_width) / 2., (height - box_height) * 0.2),
+        gpui::size(box_width, box_height),
+    )
+}
+
+/// The artwork color: the average color of the backdrop Thumbhash `hash`, else `fallback`.
+pub fn artwork_color(hash: Option<&str>, fallback: gpui::Hsla) -> gpui::Hsla {
+    hash.and_then(artwork::thumbhash_average).map_or(fallback, Into::into)
 }
 
 /// The line below the title of an episode card: the runtime and the air date, for example "57m · Feb 18, 2022".
@@ -1982,5 +2107,45 @@ mod tests {
         assert_eq!(action_label(&item, Action::Watched), "✓ Watched");
         apply_mark(&mut item, &mut [], 0, &mut episodes, Mark::Item, false);
         assert!(!episode_watched(&episodes[1]));
+    }
+
+    #[test]
+    fn a_movie_hero_fills_72_percent_of_a_wide_window_and_60_percent_of_a_narrow_one() {
+        assert_eq!(hero_height("movie", (1600., 1000.), 0., 400.), 720.);
+        assert_eq!(hero_height("movie", (900., 1000.), 0., 400.), 600., "narrower than 1024 px");
+        assert_eq!(hero_height("movie", (1600., 500.), 0., 450.), 450., "the content is taller than 72%");
+    }
+
+    #[test]
+    fn a_series_hero_and_the_row_under_it_fill_the_window() {
+        assert_eq!(hero_height("series", (1600., 1000.), 300., 400.), 700.);
+        assert_eq!(hero_height("episode", (1600., 1000.), 250., 400.), 750.);
+        assert_eq!(hero_height("series", (1600., 600.), 300., 400.), 400., "a short window: the content wins");
+    }
+
+    #[test]
+    fn the_backdrop_covers_the_hero_and_keeps_the_upper_part_of_the_art() {
+        // Wider than 16:9: the full width, 20% of the overflow above the hero.
+        let wide = backdrop_box((1600., 450.));
+        assert_eq!((wide.origin.x, wide.size.width, wide.size.height), (0., 1600., 900.));
+        assert_eq!(wide.origin.y, -90.);
+        // Taller than 16:9: the full height, centered from side to side.
+        let tall = backdrop_box((800., 900.));
+        assert_eq!((tall.origin.x, tall.origin.y, tall.size.width, tall.size.height), (-400., 0., 1600., 900.));
+        let exact = backdrop_box((1600., 900.));
+        assert_eq!((exact.origin.x, exact.origin.y, exact.size.width, exact.size.height), (0., 0., 1600., 900.));
+    }
+
+    #[test]
+    fn the_artwork_color_is_the_average_of_the_thumbhash_or_the_accent() {
+        use base64::Engine as _;
+        let blue: Vec<u8> = [30u8, 60, 200, 255].repeat(16 * 16);
+        let hash = base64::engine::general_purpose::STANDARD.encode(thumbhash::rgba_to_thumb_hash(16, 16, &blue));
+        let accent = gpui::hsla(0.5, 0.5, 0.5, 1.);
+        let color = gpui::Rgba::from(artwork_color(Some(&hash), accent));
+        let near = |a: f32, b: u8| (a - b as f32 / 255.).abs() < 0.03;
+        assert!(near(color.r, 30) && near(color.g, 60) && near(color.b, 200), "{color:?}");
+        assert_eq!(artwork_color(None, accent), accent);
+        assert_eq!(artwork_color(Some("not base64!"), accent), accent);
     }
 }

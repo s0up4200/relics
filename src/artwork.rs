@@ -505,6 +505,13 @@ pub fn thumbhash(hash: &str) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
+/// The average color of a base64 Thumbhash, opaque.
+pub fn thumbhash_average(hash: &str) -> Option<gpui::Rgba> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(hash).ok()?;
+    let (r, g, b, _) = thumbhash::thumb_hash_to_average_rgba(&bytes).ok()?;
+    Some(gpui::Rgba { r, g, b, a: 1. })
+}
+
 /// When the files in `dir` hold more than `max_bytes`, deletes the least recently used files until they hold 90% of
 /// `max_bytes` or less, so that the next writes do not start a new prune at once. It also deletes the temp files
 /// that a crash left behind. Returns the bytes that the files keep.
