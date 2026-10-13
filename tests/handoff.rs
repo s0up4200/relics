@@ -2,12 +2,12 @@
 
 use futures::StreamExt as _;
 use futures::executor::block_on;
-use silo_omarchy::handoff::{self, Sent};
+use relics::handoff::{self, Sent};
 
 fn socket(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("silo-omarchy-test-handoff-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("relics-test-handoff-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir.join("silo-omarchy.sock")
+    dir.join("relics.sock")
 }
 
 #[test]

@@ -440,7 +440,7 @@ impl Session {
                 }
                 Decision::Unavailable { message, .. } => self.fail(message),
                 Decision::Unknown(outcome) => {
-                    self.fail(format!("The Silo server gave an answer that silo-omarchy does not know: {outcome}"))
+                    self.fail(format!("The Silo server gave an answer that Relics does not know: {outcome}"))
                 }
             },
             Input::StartFailed(message) => self.fail(message),

@@ -8,10 +8,10 @@ use std::time::{Duration, SystemTime};
 use futures::executor::block_on;
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response};
 use image::GenericImageView as _;
-use silo_omarchy::artwork::{self, Rung};
+use relics::artwork::{self, Rung};
 
 fn empty_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("silo-omarchy-test-artwork-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("relics-test-artwork-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }

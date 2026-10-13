@@ -214,7 +214,7 @@ impl Search {
                 }
                 // The filter panel works without the values: it has no genre, language, studio, network or
                 // country section then.
-                Err(err) => eprintln!("silo-omarchy: cannot read the filter values of the catalog: {err}"),
+                Err(err) => eprintln!("relics: cannot read the filter values of the catalog: {err}"),
             }
         });
         let requests = cx.spawn({
@@ -224,7 +224,7 @@ impl Search {
                     this.update(cx, |this, _| this.requests_on = status.allowed && status.requests_enabled).ok();
                 }
                 // Search works without Request to add.
-                Err(err) => eprintln!("silo-omarchy: cannot read the request status: {err}"),
+                Err(err) => eprintln!("relics: cannot read the request status: {err}"),
             }
         });
         Self {
@@ -386,7 +386,7 @@ impl Search {
                     .ok();
                 }
                 // As in the web client, a failed request search hides the row.
-                Err(err) => eprintln!("silo-omarchy: cannot search the titles to request: {err}"),
+                Err(err) => eprintln!("relics: cannot search the titles to request: {err}"),
             });
         }
         self.people_loading = true;

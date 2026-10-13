@@ -1,4 +1,4 @@
-//! The app state in `$XDG_STATE_HOME/silo-omarchy/state.json`: the device id, the
+//! The app state in `$XDG_STATE_HOME/relics/state.json`: the device id, the
 //! Servers, the Accounts and the last Profile of each Account. The tokens are not
 //! here; they go in the Secret Service.
 
@@ -44,13 +44,13 @@ pub struct Pair {
 const FILE: &str = "state.json";
 
 impl State {
-    /// `$XDG_STATE_HOME/silo-omarchy`, or `~/.local/state/silo-omarchy`.
+    /// `$XDG_STATE_HOME/relics`, or `~/.local/state/relics`.
     pub fn dir() -> PathBuf {
         let base = std::env::var_os("XDG_STATE_HOME")
             .filter(|dir| !dir.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state"));
-        base.join("silo-omarchy")
+        base.join("relics")
     }
 
     /// An empty state with a new device id.

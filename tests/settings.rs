@@ -4,9 +4,9 @@ mod common;
 
 use common::{Log, json};
 use futures::executor::block_on;
+use relics::api::Client;
+use relics::settings::{self, IntroSkipMode, LocalSettings, ServerSettings, SubtitleMode};
 use serde_json::json;
-use silo_omarchy::api::Client;
-use silo_omarchy::settings::{self, IntroSkipMode, LocalSettings, ServerSettings, SubtitleMode};
 
 /// A fake server that answers each request with `body`.
 fn fake(body: serde_json::Value) -> (Client, Log) {

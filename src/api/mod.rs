@@ -58,13 +58,13 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::InvalidUrl => f.write_str("Type the address of a Silo server, for example https://silo.example.com"),
-            Error::TooOld => f.write_str("This Silo server is too old for silo-omarchy"),
+            Error::TooOld => f.write_str("This Silo server is too old for Relics"),
             Error::Network(name) => write!(f, "Can't reach {name}"),
             Error::Problem(problem) => {
                 f.write_str(if problem.detail.is_empty() { &problem.title } else { &problem.detail })
             }
             Error::Status(status) => write!(f, "The server answered with HTTP {status}"),
-            Error::Decode(err) => write!(f, "The server sent a reply that silo-omarchy cannot read: {err}"),
+            Error::Decode(err) => write!(f, "The server sent a reply that Relics cannot read: {err}"),
             Error::SignedOut => f.write_str("Your sign-in has expired. Sign in again."),
         }
     }
@@ -644,7 +644,7 @@ impl Client {
                 .map(|marker| Marker { kind: marker.kind.into(), start: marker.start_seconds, end: marker.end_seconds })
                 .collect(),
             Err(err) => {
-                eprintln!("silo-omarchy: cannot read the markers of file {file_id}: {err}");
+                eprintln!("relics: cannot read the markers of file {file_id}: {err}");
                 Vec::new()
             }
         }
@@ -765,7 +765,7 @@ impl Client {
         };
         self.pending.lock().unwrap().insert(key, pending);
         if !err.is_offline() && !matches!(err, Error::SignedOut) {
-            self.sync_progress().await.inspect_err(|err| eprintln!("silo-omarchy: progress sync failed: {err}")).ok();
+            self.sync_progress().await.inspect_err(|err| eprintln!("relics: progress sync failed: {err}")).ok();
         }
         Err(err)
     }
@@ -803,7 +803,7 @@ impl Client {
         for item in result.items {
             if let wire::ProgressSyncBatchResultItemsItem::Failure(failure) = item {
                 eprintln!(
-                    "silo-omarchy: the server refused the progress of {}: {:?}",
+                    "relics: the server refused the progress of {}: {:?}",
                     *failure.media_item_id, failure.failure
                 );
             }
@@ -838,7 +838,7 @@ impl Client {
     /// A failure does not call the `on_trouble` callback: the app signs out locally anyway.
     pub async fn sign_out(&self) -> Result<(), Error> {
         if let Err(err) = self.sync_progress().await {
-            eprintln!("silo-omarchy: progress sync before the sign-out failed: {err}");
+            eprintln!("relics: progress sync before the sign-out failed: {err}");
         }
         self.call_with_retries(Method::POST, "auth/logout", None).await
     }

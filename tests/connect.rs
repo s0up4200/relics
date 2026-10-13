@@ -4,7 +4,7 @@ mod common;
 
 use common::{Log, Reply, Seen, http, problem, reply};
 use futures::executor::block_on;
-use silo_omarchy::api::{self, Error};
+use relics::api::{self, Error};
 
 const SERVER_ID: &str = "3f2a9d5e-6b1c-4c7e-9a0d-2f4b8c1e7a35";
 
@@ -77,7 +77,7 @@ fn a_plain_404_means_the_server_is_too_old_and_is_not_retried() {
     let (http, seen) = http(|_| reply(404, "text/plain", "404 page not found".into()));
     let err = block_on(api::connect(http, "silo.test")).unwrap_err();
     assert!(matches!(err, Error::TooOld), "{err:?}");
-    assert_eq!(err.to_string(), "This Silo server is too old for silo-omarchy");
+    assert_eq!(err.to_string(), "This Silo server is too old for Relics");
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
 

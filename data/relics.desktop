@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=Silo
+Name=Relics
 GenericName=Media Player
-Comment=Watch the library of your Silo server
-Exec=silo-omarchy %u
+Comment=Unofficial Silo client for Linux. Follows your Omarchy theme.
+Exec=relics %u
 Icon=multimedia-video-player
 Terminal=false
 Categories=AudioVideo;Video;Player;
 # Browser sign-in returns to the app through the link scheme of the official Silo apps (ADR 0004).
 MimeType=x-scheme-handler/org.siloserver.silo;
-StartupWMClass=silo-omarchy
+StartupWMClass=relics

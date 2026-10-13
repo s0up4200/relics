@@ -2,13 +2,11 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use relics::api::types::{Decision, Marker, MarkerKind};
+use relics::playback::tracks::{self, Choice, Kind, Track};
+use relics::playback::{Access, Command, Headers, Input, Operation, Replan, STILL_WATCHING_AFTER, Sample, Session};
+use relics::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 use serde_json::Value;
-use silo_omarchy::api::types::{Decision, Marker, MarkerKind};
-use silo_omarchy::playback::tracks::{self, Choice, Kind, Track};
-use silo_omarchy::playback::{
-    Access, Command, Headers, Input, Operation, Replan, STILL_WATCHING_AFTER, Sample, Session,
-};
-use silo_omarchy::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -21,7 +19,7 @@ fn decision(edit: impl FnOnce(&mut Value)) -> Decision {
     let path = format!("{}/tests/fixtures/silo/playback_start_opaque_ids.json", env!("CARGO_MANIFEST_DIR"));
     let mut body: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     edit(&mut body);
-    Decision::from(serde_json::from_value::<silo_omarchy::api::wire::PlaybackDecision>(body).unwrap())
+    Decision::from(serde_json::from_value::<relics::api::wire::PlaybackDecision>(body).unwrap())
 }
 
 fn headers() -> Headers {
@@ -762,7 +760,7 @@ fn a_version_switch_ends_the_session_at_the_position_and_starts_the_other_file_t
 fn replanned() -> Decision {
     let path = format!("{}/tests/fixtures/own/playback_replan_failure_recovery.json", env!("CARGO_MANIFEST_DIR"));
     let body = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    Decision::from(serde_json::from_value::<silo_omarchy::api::wire::PlaybackDecision>(body).unwrap())
+    Decision::from(serde_json::from_value::<relics::api::wire::PlaybackDecision>(body).unwrap())
 }
 
 fn transcode() -> String {

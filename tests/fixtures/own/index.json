@@ -1,5 +1,5 @@
 {
-  "comment": "Fixtures that silo-omarchy adds, in the format of the server fixtures in ../silo. They were written by hand from docs/architecture/playback-protocol-v3.md of the server.",
+  "comment": "Fixtures that Relics adds, in the format of the server fixtures in ../silo. They were written by hand from docs/architecture/playback-protocol-v3.md of the server.",
   "fixtures": [
     {
       "name": "playback_start_transcode",

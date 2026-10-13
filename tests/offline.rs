@@ -9,10 +9,10 @@ mod common;
 
 use common::{Log, Reply, Seen, fixture, json, ok, reply};
 use futures::executor::block_on;
+use relics::api::{Client, Decision, Error, Trouble};
+use relics::library::retry_delay;
+use relics::playback::{Operation, Replan, Sample};
 use serde_json::{Value, json};
-use silo_omarchy::api::{Client, Decision, Error, Trouble};
-use silo_omarchy::library::retry_delay;
-use silo_omarchy::playback::{Operation, Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 

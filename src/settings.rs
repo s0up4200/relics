@@ -1,6 +1,6 @@
 //! The Settings store. It holds the Server settings of the active Profile in memory. The
 //! API client reads them when a Profile opens, and each new Playback session uses them.
-//! The Local settings of this computer live in `$XDG_CONFIG_HOME/silo-omarchy/settings.toml`.
+//! The Local settings of this computer live in `$XDG_CONFIG_HOME/relics/settings.toml`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -242,13 +242,13 @@ impl Default for LocalSettings {
 const LOCAL_FILE: &str = "settings.toml";
 
 impl LocalSettings {
-    /// `$XDG_CONFIG_HOME/silo-omarchy`, or `~/.config/silo-omarchy`.
+    /// `$XDG_CONFIG_HOME/relics`, or `~/.config/relics`.
     pub fn dir() -> PathBuf {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|dir| !dir.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-        base.join("silo-omarchy")
+        base.join("relics")
     }
 
     /// Reads the file in `dir`. A missing or broken file gives the defaults.
@@ -258,7 +258,7 @@ impl LocalSettings {
             return Self::default();
         };
         toml::from_str(&text).unwrap_or_else(|err| {
-            eprintln!("silo-omarchy: cannot read {}: {err}", path.display());
+            eprintln!("relics: cannot read {}: {err}", path.display());
             Self::default()
         })
     }

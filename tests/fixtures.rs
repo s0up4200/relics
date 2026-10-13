@@ -2,8 +2,8 @@
 //! when a newer server adds a field or an enum value. scripts/refresh-fixtures.py
 //! copies the fixtures from the server commit in tests/fixtures/silo/SERVER_COMMIT.
 
+use relics::api::{Problem, types, wire};
 use serde_json::{Value, json};
-use silo_omarchy::api::{Problem, types, wire};
 
 /// `silo` holds the server fixtures, `own` the fixtures that this app adds in the same format.
 fn read_in(dir: &str, file: &str) -> Value {

@@ -5,9 +5,9 @@ mod common;
 
 use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
+use relics::artwork::Rung;
+use relics::requests;
 use serde_json::{Value, json as value};
-use silo_omarchy::artwork::Rung;
-use silo_omarchy::requests;
 
 /// The method and the path of each request.
 fn calls(seen: &common::Log) -> Vec<(String, String)> {

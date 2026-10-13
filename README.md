@@ -1,20 +1,24 @@
-# silo-omarchy
+# Relics
 
-silo-omarchy is a native media player for a Silo server. The Library window follows the live Omarchy theme. mpv plays the video inside the Library window. The app also works on other Wayland desktops.
+Unofficial Silo client for Linux. Follows your Omarchy theme.
+
+Relics is a native media player for a Silo server. The Library window follows the live Omarchy theme. mpv plays the video inside the Library window. The app also works on other Wayland desktops.
+
+Not affiliated with the Silo project.
 
 ## Install
 
-Install the `silo-omarchy` package from the AUR with your AUR helper:
+Install the `relics` package from the AUR with your AUR helper:
 
 ```sh
-yay -S silo-omarchy
+yay -S relics
 ```
 
 The package builds the app from source. The build takes some minutes.
 
 ## Make the window opaque in Omarchy
 
-Omarchy makes each window a little transparent. The video plays inside the Library window, so the package adds a Hyprland rule that makes this window opaque. The rule is in `/usr/share/omarchy/default/hypr/apps/silo-omarchy.lua`.
+Omarchy makes each window a little transparent. The video plays inside the Library window, so the package adds a Hyprland rule that makes this window opaque. The rule is in `/usr/share/omarchy/default/hypr/apps/relics.lua`.
 
 After you install the package, run this command to load the rule:
 
@@ -29,7 +33,7 @@ If the window stays transparent, add the rule to your own Hyprland configuration
 3. Add these lines below it:
 
    ```lua
-   o.window("^silo-omarchy$", {
+   o.window("^relics$", {
      tag = "-default-opacity",
      opacity = "1 1",
    })

@@ -438,7 +438,7 @@ impl Render for SettingsPage {
                     .pt(px(24.))
                     .text_size(px(12.))
                     .text_color(t.secondary)
-                    .child(concat!("silo-omarchy ", env!("CARGO_PKG_VERSION"))),
+                    .child(concat!("Relics ", env!("CARGO_PKG_VERSION"))),
             )
     }
 }

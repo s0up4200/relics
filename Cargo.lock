@@ -5475,6 +5475,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "futures",
+ "gethostname",
+ "gpui-kit",
+ "gpui-omarchy",
+ "gpui-pre",
+ "gpui-pre-http-client",
+ "gpui-pre-reqwest-client",
+ "image",
+ "khronos-egl",
+ "libmpv2",
+ "mpris-server",
+ "oo7",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thumbhash",
+ "toml 0.8.23",
+ "uuid",
+ "wayland-backend",
+ "wayland-client",
+]
+
+[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6042,36 +6072,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "silo-omarchy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "futures",
- "gethostname",
- "gpui-kit",
- "gpui-omarchy",
- "gpui-pre",
- "gpui-pre-http-client",
- "gpui-pre-reqwest-client",
- "image",
- "khronos-egl",
- "libmpv2",
- "mpris-server",
- "oo7",
- "raw-window-handle",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thumbhash",
- "toml 0.8.23",
- "uuid",
- "wayland-backend",
- "wayland-client",
 ]
 
 [[package]]

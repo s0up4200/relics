@@ -8,9 +8,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use silo_omarchy::mpv::Player;
-use silo_omarchy::playback::Input;
-use silo_omarchy::playback::tracks::Kind;
+use relics::mpv::Player;
+use relics::playback::Input;
+use relics::playback::tracks::Kind;
 
 /// One request that the stub got: the path, the `Authorization` header and the device name header.
 #[derive(Debug, Clone)]

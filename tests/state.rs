@@ -1,11 +1,11 @@
-//! The app state file in `$XDG_STATE_HOME/silo-omarchy/`.
+//! The app state file in `$XDG_STATE_HOME/relics/`.
 
 use std::path::PathBuf;
 
-use silo_omarchy::state::{SavedAccount, SavedServer, State};
+use relics::state::{SavedAccount, SavedServer, State};
 
 fn empty_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("silo-omarchy-test-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("relics-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }

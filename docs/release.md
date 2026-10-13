@@ -25,7 +25,7 @@ To test the package build before you tag, start the Release workflow by hand on 
 
 The repository must be public, because the AUR package downloads the tarball of the tag from GitHub.
 
-1. Copy `packaging/aur/PKGBUILD` to your clone of the AUR repository `silo-omarchy`.
+1. Copy `packaging/aur/PKGBUILD` to your clone of the AUR repository `relics`.
 2. Set `pkgver` to the new version and `pkgrel` to `1`.
 3. Run `updpkgsums` to replace `SKIP` with the checksum of the tarball.
 4. Build the package in a clean chroot (`extra-x86_64-build` from `devtools`).

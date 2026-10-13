@@ -5,12 +5,12 @@ mod common;
 
 use common::{Seen, fake, fixture, json, not_found, ok};
 use futures::executor::block_on;
+use relics::api::wire;
+use relics::artwork::Rung;
+use relics::browse::{self, Browse, Choice, Facet, Paging, SortField, Watch};
+use relics::filter_panel::{self, Chip, Entry, Facets, MenuKind, Outcome, Panel, Text};
+use relics::keys::Key;
 use serde_json::json;
-use silo_omarchy::api::wire;
-use silo_omarchy::artwork::Rung;
-use silo_omarchy::browse::{self, Browse, Choice, Facet, Paging, SortField, Watch};
-use silo_omarchy::filter_panel::{self, Chip, Entry, Facets, MenuKind, Outcome, Panel, Text};
-use silo_omarchy::keys::Key;
 
 #[test]
 fn the_sidebar_lists_only_the_video_libraries_in_the_server_order() {
@@ -456,7 +456,7 @@ fn the_sort_menu_has_a_field_section_and_an_order_section() {
     assert!(browse.descending, "Enter in the sort menu applies and closes it");
 }
 
-fn page(titles: &[&str], next: Option<&str>) -> silo_omarchy::api::wire::CatalogBrowseCollection {
+fn page(titles: &[&str], next: Option<&str>) -> relics::api::wire::CatalogBrowseCollection {
     let items: Vec<_> = titles
         .iter()
         .map(|t| json!({"content_id": t, "type": "movie", "title": t, "genres": [], "keywords": [], "status": "matched"}))
@@ -486,7 +486,7 @@ fn the_grid_pages_with_the_cursor_until_the_last_page() {
 
 #[test]
 fn view_all_watchlist_and_history_list_their_catalog_source_in_the_grid() {
-    let query = |q: silo_omarchy::api::wire::CatalogQuery| serde_json::to_value(q).unwrap();
+    let query = |q: relics::api::wire::CatalogQuery| serde_json::to_value(q).unwrap();
     assert_eq!(
         query(browse::section_query("s1", None)),
         json!({"source": "section", "scope": "home", "section_id": "s1", "limit": 60})

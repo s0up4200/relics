@@ -68,7 +68,7 @@ struct DeviceCode {
 impl EventEmitter<SignedIn> for SignIn {}
 
 /// The text that tells the user why the app cannot keep the sign-in.
-const NO_KEYRING: &str = "The Secret Service keyring is not available, so silo-omarchy keeps your sign-in in memory. You must sign in again at each launch.";
+const NO_KEYRING: &str = "The Secret Service keyring is not available, so Relics keeps your sign-in in memory. You must sign in again at each launch.";
 
 const WAITING: &str = "Waiting for approval…";
 
@@ -343,7 +343,7 @@ impl SignIn {
         if let Some(client) = self.password_change.take() {
             cx.background_spawn(async move {
                 if let Err(err) = client.sign_out().await {
-                    eprintln!("silo-omarchy: the server sign-out failed: {err}");
+                    eprintln!("relics: the server sign-out failed: {err}");
                 }
             })
             .detach();
@@ -549,7 +549,11 @@ impl Render for SignIn {
                     .rounded(px(16.))
                     .bg(t.surface)
                     .child(
-                        div().text_size(px(28.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("silo"),
+                        div()
+                            .text_size(px(28.))
+                            .font_weight(FontWeight::EXTRA_BOLD)
+                            .text_color(t.bright)
+                            .child("relics"),
                     )
                     .child(
                         div()
