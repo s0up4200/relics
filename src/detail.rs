@@ -266,7 +266,7 @@ impl Detail {
 
     fn rows(&self) -> Rows {
         Rows {
-            actions: self.item.as_ref().map_or(0, |item| actions(item).len()),
+            actions: self.item.as_ref().map_or(0, |item| actions(item, &self.seasons).len()),
             versions: self.picker_len(),
             version: self.version,
             seasons: self.seasons.len(),
@@ -317,7 +317,7 @@ impl Detail {
         }
         match (self.focus, key) {
             (Focus::Action(i), Key::Other("enter")) => {
-                if let Some(&action) = actions(item).get(i) {
+                if let Some(&action) = actions(item, &self.seasons).get(i) {
                     self.act(action, cx);
                 }
             }
@@ -513,7 +513,7 @@ impl Detail {
     ) {
         self.notice = None;
         let focused = match self.focus {
-            Focus::Action(i) => self.item.as_ref().and_then(|item| actions(item).get(i).copied()),
+            Focus::Action(i) => self.item.as_ref().and_then(|item| actions(item, &self.seasons).get(i).copied()),
             _ => None,
         };
         cx.spawn(async move |this, cx| {
@@ -525,7 +525,7 @@ impl Detail {
                         // A button can move or go, for example Resume after Mark watched. The focus stays on the
                         // button, or goes to the last one.
                         if let (Some(action), Some(item), Focus::Action(_)) = (focused, &this.item, this.focus) {
-                            let actions = actions(item);
+                            let actions = actions(item, &this.seasons);
                             let i = actions.iter().position(|a| *a == action).unwrap_or(actions.len() - 1);
                             this.focus = Focus::Action(i);
                         }
@@ -639,7 +639,7 @@ impl Detail {
         let (poster, column) = hero_columns(width);
         let glow = artwork_color(item.backdrop_thumbhash.as_deref(), t.accent);
         let background = t.background;
-        let buttons = actions(item).into_iter().enumerate().map(|(i, action)| {
+        let buttons = actions(item, &self.seasons).into_iter().enumerate().map(|(i, action)| {
             let mut pill = self.pill(
                 ("detail-action", i),
                 action_label(item, action).into(),
@@ -1257,13 +1257,14 @@ pub enum Action {
 
 /// The buttons of the hero. Start over shows only when Resume does, Shuffle only on a series of 2 episodes or more,
 /// and Clear rating only when the Item has a rating.
-pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
+pub fn actions(item: &wire::CatalogItemDetail, seasons: &[wire::Season]) -> Vec<Action> {
     let resume = item.position_seconds.is_some_and(|position| position > 0.);
     let mut actions = vec![Action::Play { resume }];
     if resume {
         actions.push(Action::StartOver);
     }
-    if item.type_ == "series" && item.episode_count.is_some_and(|count| count >= 2) {
+    // The series detail sends no episode count, so the count comes from the seasons, as in the web client.
+    if item.type_ == "series" && seasons.iter().map(|s| s.episode_count).sum::<i64>() >= 2 {
         actions.push(Action::Shuffle);
     }
     actions.extend([Action::Watchlist, Action::Favorite, Action::Watched]);
@@ -1726,20 +1727,28 @@ mod tests {
     #[test]
     fn a_started_item_offers_resume_and_start_over() {
         let fresh = detail(json!({}));
-        assert!(actions(&fresh).starts_with(&[Action::Play { resume: false }, Action::Watchlist]));
+        assert!(actions(&fresh, &[]).starts_with(&[Action::Play { resume: false }, Action::Watchlist]));
         let started = detail(json!({"position_seconds": 600.0}));
-        assert!(actions(&started).starts_with(&[Action::Play { resume: true }, Action::StartOver, Action::Watchlist]));
+        assert!(actions(&started, &[]).starts_with(&[
+            Action::Play { resume: true },
+            Action::StartOver,
+            Action::Watchlist
+        ]));
     }
 
     #[test]
     fn a_series_of_two_episodes_or_more_offers_shuffle_after_play_and_start_over() {
-        let series = detail(json!({"type": "series", "episode_count": 2, "position_seconds": 600.0}));
-        assert!(actions(&series).starts_with(&[Action::Play { resume: true }, Action::StartOver, Action::Shuffle]));
+        let series = detail(json!({"type": "series", "position_seconds": 600.0}));
+        let two = [season(json!({"episode_count": 1})), season(json!({"episode_count": 1}))];
+        assert!(actions(&series, &two).starts_with(&[
+            Action::Play { resume: true },
+            Action::StartOver,
+            Action::Shuffle
+        ]));
         assert_eq!(action_label(&series, Action::Shuffle), "Shuffle");
-        let single = detail(json!({"type": "series", "episode_count": 1}));
-        assert!(!actions(&single).contains(&Action::Shuffle));
-        let movie = detail(json!({"type": "movie", "episode_count": 5}));
-        assert!(!actions(&movie).contains(&Action::Shuffle));
+        assert!(!actions(&series, &two[..1]).contains(&Action::Shuffle));
+        let movie = detail(json!({"type": "movie"}));
+        assert!(!actions(&movie, &two).contains(&Action::Shuffle));
     }
 
     #[test]
@@ -2081,15 +2090,15 @@ mod tests {
             .into_iter()
             .chain(stars.clone())
             .collect();
-        assert_eq!(actions(&fresh), expected);
-        let labels: Vec<_> = actions(&fresh).into_iter().skip(2).map(|a| action_label(&fresh, a)).collect();
+        assert_eq!(actions(&fresh, &[]), expected);
+        let labels: Vec<_> = actions(&fresh, &[]).into_iter().skip(2).map(|a| action_label(&fresh, a)).collect();
         assert_eq!(labels, ["♡ Favorite", "Mark watched", "☆", "☆", "☆", "☆", "☆"]);
 
         let rated = detail(
             json!({"user_rating": 3, "user_state": {"played": true, "is_favorite": true, "in_watchlist": false}}),
         );
-        assert_eq!(actions(&rated).last(), Some(&Action::ClearRating));
-        let labels: Vec<_> = actions(&rated).into_iter().skip(2).map(|a| action_label(&rated, a)).collect();
+        assert_eq!(actions(&rated, &[]).last(), Some(&Action::ClearRating));
+        let labels: Vec<_> = actions(&rated, &[]).into_iter().skip(2).map(|a| action_label(&rated, a)).collect();
         assert_eq!(labels, ["♥ Favorite", "✓ Watched", "★", "★", "★", "☆", "☆", "Clear rating"]);
     }
 
@@ -2154,7 +2163,7 @@ mod tests {
         let mut item = detail(json!({"position_seconds": 600.0}));
         apply_mark(&mut item, &mut [], 0, &mut [], Mark::Item, false);
         assert_eq!(
-            actions(&item)[0],
+            actions(&item, &[])[0],
             Action::Play { resume: false },
             "no Resume after the server cleared the progress"
         );
