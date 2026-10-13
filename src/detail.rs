@@ -667,7 +667,10 @@ impl Detail {
             let focused = self.focus == Focus::Action(i);
             let label: SharedString = action_label(item, action).into();
             let click = cx.listener(move |this, _, _, cx| {
-                this.focus = Focus::Action(i);
+                // A click on a star does not move the focus, so that the star does not stay in the accent color.
+                if !matches!(action, Action::Rate(_)) {
+                    this.focus = Focus::Action(i);
+                }
                 this.act(action, cx);
             });
             match action {
@@ -719,8 +722,10 @@ impl Detail {
             None => title_text(),
         };
         let secondary = t.secondary;
+        // The text lines stop at 640 px, so that they stay easy to read. The buttons can use the full width.
+        let text = || div().max_w(px(640.));
         let line =
-            |text: String| (!text.is_empty()).then(|| div().text_size(px(14.)).text_color(secondary).child(text));
+            |line: String| (!line.is_empty()).then(|| text().text_size(px(14.)).text_color(secondary).child(line));
         let badges = labels.into_iter().map(|badge| {
             div().px(px(8.)).py(px(2.)).rounded_full().bg(gpui::hsla(0., 0., 1., 0.1)).text_size(px(10.)).child(badge)
         });
@@ -782,7 +787,6 @@ impl Detail {
                     .child(
                         div()
                             .min_w(px(0.))
-                            .max_w(px(640.))
                             .flex()
                             .flex_col()
                             .gap(px(10.))
@@ -792,12 +796,12 @@ impl Detail {
                                 item.tagline
                                     .clone()
                                     .filter(|text| !text.is_empty())
-                                    .map(|text| div().italic().child(text)),
+                                    .map(|tagline| text().italic().child(tagline)),
                             )
                             .child(div().text_color(t.secondary).child(meta_line(item)))
                             .child(div().flex().flex_wrap().gap(px(6.)).children(badges))
                             .children(line(ratings_line(item)))
-                            .children(item.overview.clone().map(|text| div().line_clamp(3).child(text)))
+                            .children(item.overview.clone().map(|overview| text().line_clamp(3).child(overview)))
                             .children(line(credits_line(item)))
                             .child(div().pt(px(6.)).flex().flex_wrap().gap(px(10.)).children(buttons)),
                     ),
