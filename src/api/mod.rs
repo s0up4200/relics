@@ -12,6 +12,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub mod types;
+// scripts/gen-api-types.py generates wire.rs, so rustfmt leaves it as it is.
+#[rustfmt::skip]
 pub mod wire;
 
 pub use gpui::http_client::Url;
@@ -544,7 +546,9 @@ impl Client {
                 let Some(item) = item else {
                     return Err(Error::Problem(problem));
                 };
-                return self.start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0))).await;
+                return self
+                    .start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0)))
+                    .await;
             }
             result => result?,
         };
@@ -1131,18 +1135,18 @@ fn cursor_pair(cursor: Option<&str>) -> Vec<(&str, &str)> {
     cursor.map(|cursor| ("cursor", cursor)).into_iter().collect()
 }
 
-/// The rows of a layout, in layout order, with the items of the matching section. A section that the
-/// server did not send gives an empty row.
+/// The rows of a layout, in layout order, with the items of the matching section. A section that has no
+/// items or that the server did not send gives no row, like the web client.
 fn rows(layout: wire::SectionLayout, mut sections: Vec<wire::Section>) -> Vec<HomeSection> {
     layout
         .sections
         .into_iter()
-        .map(|entry| {
+        .filter_map(|entry| {
             let section = sections.iter().position(|s| s.id == entry.id).map(|i| sections.swap_remove(i));
-            let (items, total) = section.map_or((Vec::new(), 0), |s| (s.items, s.total_count));
-            HomeSection {
+            let section = section.filter(|s| !s.items.is_empty())?;
+            Some(HomeSection {
                 // The server lists the full section only for these types, like the web client.
-                view_all: total > items.len() as i64
+                view_all: section.total_count > section.items.len() as i64
                     && matches!(
                         entry.section_type.as_str(),
                         "collection" | "custom_filter" | "genre" | "random" | "recently_added"
@@ -1151,8 +1155,8 @@ fn rows(layout: wire::SectionLayout, mut sections: Vec<wire::Section>) -> Vec<Ho
                 section_type: entry.section_type,
                 title: entry.title,
                 featured: entry.featured,
-                items,
-            }
+                items: section.items,
+            })
         })
         .collect()
 }
