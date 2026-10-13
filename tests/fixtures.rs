@@ -47,6 +47,8 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
         LibraryCollectionTab,
         MediaRequest,
         MediaRequestCollection,
+        OAuthCompletion,
+        OAuthHandshakeCapabilitiesOutputBody,
         Person,
         PersonCollection,
         PersonalCollectionCollection,

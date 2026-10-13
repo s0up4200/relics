@@ -6,6 +6,7 @@ use gpui::{
     WindowOptions, px, size,
 };
 use reqwest_client::ReqwestClient;
+use silo_omarchy::handoff;
 use silo_omarchy::library::LibraryWindow;
 
 // The sidebar and Player view icons that the default gpui-kit bundle does not have.
@@ -27,15 +28,23 @@ gpui_kit::assets::icon_assets!(
         Gauge,
         Info,
         ListVideo,
-        SkipForward
+        SkipForward,
+        KeyRound,
+        MonitorSmartphone
     ]
 );
 
-/// The default gpui-kit assets and the sidebar icons.
+/// The Tailscale logo of the Network sign-in button. Lucide has no brand logos.
+const TAILSCALE: &str = "icons/tailscale.svg";
+
+/// The default gpui-kit assets, the sidebar icons and the Tailscale logo.
 struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        if path == TAILSCALE {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../data/tailscale.svg"))));
+        }
         match SidebarIcons.load(path)? {
             Some(icon) => Ok(Some(icon)),
             None => gpui_kit::assets::Assets.load(path),
@@ -45,12 +54,27 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
         let mut list = gpui_kit::assets::Assets.list(path)?;
         list.extend(SidebarIcons.list(path)?);
+        list.extend(TAILSCALE.starts_with(path).then(|| TAILSCALE.into()));
         Ok(list)
     }
 }
 
 fn main() {
-    gpui_kit::application().with_assets(Assets).run(|cx| {
+    // The browser starts a second process with the return link of a Browser sign-in. It gives the link to the
+    // running app and quits. When no app waits, the sign-in secret was only in the closed window.
+    let link = std::env::args().nth(1).filter(|arg| arg.starts_with(handoff::SCHEME));
+    let socket = handoff::socket_path();
+    if let (Some(link), Some(socket)) = (&link, &socket)
+        && handoff::send(socket, link) == handoff::Sent::Taken
+    {
+        return;
+    }
+    let links = socket.and_then(|socket| {
+        handoff::listen(&socket)
+            .inspect_err(|err| eprintln!("silo-omarchy: cannot listen on {}: {err}", socket.display()))
+            .ok()
+    });
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_omarchy::init(cx);
         let user_agent = concat!("silo-omarchy/", env!("CARGO_PKG_VERSION"));
         let http = ReqwestClient::proxy_and_user_agent(gpui::http_client::read_proxy_from_env(), user_agent)
@@ -65,7 +89,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1400.), px(900.)), cx))),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| LibraryWindow::new(window, cx)),
+            move |window, cx| cx.new(|cx| LibraryWindow::new(links, link, window, cx)),
         )
         .expect("open the Library window");
         cx.activate(true);

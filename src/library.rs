@@ -89,6 +89,8 @@ pub struct LibraryWindow {
     /// A request that waits for the PIN of its Profile.
     pin_wait: Option<PinWait>,
     _pin_requests: Option<Task<()>>,
+    /// Gives each Browser sign-in link from the hand-off socket to the sign-in screen.
+    _links: Option<Task<()>>,
 }
 
 struct PinWait {
@@ -119,7 +121,14 @@ enum Status {
 }
 
 impl LibraryWindow {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `links` are the Browser sign-in links that other processes hand off. `link` is the return link that
+    /// started this process when no app waited for it.
+    pub fn new(
+        links: Option<mpsc::UnboundedReceiver<String>>,
+        link: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://silo.example.com"));
         url.update(cx, |url, cx| url.focus(window, cx));
         let enter = cx.subscribe_in(&url, window, |this, _, event, window, cx| {
@@ -197,9 +206,39 @@ impl LibraryWindow {
             profiles: Vec::new(),
             pin_wait: None,
             _pin_requests: None,
+            _links: links.map(|mut links| {
+                cx.spawn(async move |this, cx| {
+                    while let Some(link) = links.next().await {
+                        let taken = this.update(cx, |this, cx| {
+                            if let Screen::SignIn(view) = &this.screen {
+                                view.update(cx, |view, cx| view.browser_returned(&link, cx));
+                            }
+                        });
+                        if taken.is_err() {
+                            return;
+                        }
+                    }
+                })
+            }),
         };
-        this.restore(window, cx);
+        match link {
+            Some(link) => this.browser_timed_out(&link, window, cx),
+            None => this.restore(window, cx),
+        }
         this
+    }
+
+    /// The browser returned after the window that waited for it closed. The app shows the sign-in screen of the
+    /// Server that the link names, or the Connect screen when the app does not know that Server.
+    fn browser_timed_out(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let server_id = Url::parse(link)
+            .ok()
+            .and_then(|url| url.query_pairs().find(|(name, _)| name == "server").map(|(_, id)| id.into_owned()));
+        let server = self.state.servers.iter().find(|saved| Some(&saved.id) == server_id.as_ref()).and_then(server_of);
+        match server {
+            Some(server) => self.show_sign_in(server, Some(api::BROWSER_TIMED_OUT.into()), window, cx),
+            None => self.status = Status::Failed(api::BROWSER_TIMED_OUT.into()),
+        }
     }
 
     /// Opens the active Account with the tokens in the Secret Service, or asks the user to sign in.
@@ -248,7 +287,8 @@ impl LibraryWindow {
         let username =
             self.state.active().filter(|(saved, _)| saved.id == server.id).map(|(_, account)| account.username.clone());
         let device = self.device.clone();
-        let view = cx.new(|cx| SignIn::new(server, device, username, message, window, cx));
+        let has_account = self.state.servers.iter().any(|saved| saved.id == server.id && !saved.accounts.is_empty());
+        let view = cx.new(|cx| SignIn::new(server, device, has_account, username, message, window, cx));
         self._screen = Some(cx.subscribe_in(&view, window, |this, _, event: &SignedIn, window, cx| {
             this.signed_in(event, window, cx);
         }));

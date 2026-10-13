@@ -10,6 +10,7 @@ use futures::future::BoxFuture;
 use gpui::http_client::{AsyncBody, HttpClient, Method, Request};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 
 pub mod types;
 // scripts/gen-api-types.py generates wire.rs, so rustfmt leaves it as it is.
@@ -1201,6 +1202,18 @@ async fn send<T: DeserializeOwned>(
     body: Option<serde_json::Value>,
 ) -> Result<T, Error> {
     let url = server.url.join("api/v2/").and_then(|api| api.join(path)).map_err(|_| Error::InvalidUrl)?;
+    send_to(http, server, method, url, headers, body).await
+}
+
+/// Sends one request to `url` and decodes the JSON reply.
+async fn send_to<T: DeserializeOwned>(
+    http: &Arc<dyn HttpClient>,
+    server: &Server,
+    method: Method,
+    url: Url,
+    headers: &[(&'static str, String)],
+    body: Option<serde_json::Value>,
+) -> Result<T, Error> {
     let mut request = Request::builder().method(method).uri(url.as_str()).header("Accept", "application/json");
     for (name, value) in headers {
         request = request.header(*name, value);
@@ -1320,17 +1333,219 @@ fn client_description(features: &[&str]) -> serde_json::Value {
 
 // Sign-in with a provider choice and device sign-in (#34).
 
-/// The providers that take a username and password, in the server order. The
-/// sign-in screen shows a choice only when there is more than one.
-pub async fn password_providers(
+/// The sign-in methods that a Server offers, from its provider list (#84).
+#[derive(Debug, Default)]
+pub struct SignInMethods {
+    /// The provider of Network sign-in, when the Server offers it for this request.
+    pub network: Option<wire::AuthProvider>,
+    /// The OIDC providers, the default provider first.
+    pub oauth: Vec<wire::AuthProvider>,
+    /// The providers that take a username and password, in the server order. The sign-in screen shows a
+    /// choice only when there is more than one, and hides the password form when there is none.
+    pub password: Vec<wire::AuthProvider>,
+}
+
+impl SignInMethods {
+    /// The methods of a provider list. It ignores the modes that it does not know.
+    pub fn of(list: wire::AuthProviderCollection) -> Self {
+        let mut methods = Self::default();
+        for provider in list.items {
+            match provider.mode.as_str() {
+                "network" if provider.network_sign_in_path.is_some() => methods.network = Some(provider),
+                "oauth" => methods.oauth.push(provider),
+                // With password sign-in off, only a directory (LDAP) provider takes a password. The built-in
+                // provider has no plugin installation.
+                "credentials" if list.password_login || provider.installation_id.is_some() => {
+                    methods.password.push(provider)
+                }
+                _ => {}
+            }
+        }
+        methods.oauth.sort_by_key(|provider| !provider.default);
+        methods
+    }
+}
+
+/// Reads the sign-in methods of the Server.
+pub async fn sign_in_methods(
     http: &Arc<dyn HttpClient>,
     server: &Server,
     device: &Device,
-) -> Result<Vec<wire::AuthProvider>, Error> {
+) -> Result<SignInMethods, Error> {
     let list: wire::AuthProviderCollection =
         send(http, server, Method::GET, "auth/providers", &device_headers(device), None).await?;
-    Ok(list.items.into_iter().filter(|p| p.mode == "credentials").collect())
+    Ok(SignInMethods::of(list))
 }
+
+/// The URL of a `path` from the provider list, below the base URL of the Server. A path that leads to another
+/// origin is refused: the app never opens or calls another origin for a sign-in.
+fn below_base(server: &Server, path: &str) -> Result<Url, Error> {
+    let url = server.url.join(path.trim_start_matches('/')).map_err(|_| Error::InvalidUrl)?;
+    if url.origin() != server.url.origin() {
+        return Err(Error::InvalidUrl);
+    }
+    Ok(url)
+}
+
+impl Client {
+    /// Network sign-in with the network `provider`: the Server knows the person from the network that the
+    /// request comes from, so it takes no password.
+    pub async fn network_sign_in(
+        http: Arc<dyn HttpClient>,
+        server: Server,
+        device: Device,
+        provider: &wire::AuthProvider,
+    ) -> Result<(Self, wire::Account), Error> {
+        let url = below_base(&server, provider.network_sign_in_path.as_deref().unwrap_or_default())?;
+        let headers = device_headers(&device);
+        let body = Some(serde_json::json!({}));
+        let pair: wire::TokenPair = send_to(&http, &server, Method::POST, url, &headers, body).await?;
+        let tokens = Tokens { access_token: pair.access_token, refresh_token: pair.refresh_token };
+        Ok((Self::new(http, server, device, tokens), pair.user))
+    }
+}
+
+/// How long a Browser sign-in waits for the browser to return.
+pub const BROWSER_SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// A Browser sign-in that waits for the browser to return to the app. The return link must carry its
+/// `app_state`, and the app redeems the code with its PKCE verifier.
+pub struct BrowserSignIn {
+    server: Server,
+    app_state: String,
+    verifier: String,
+}
+
+/// What the app does with a return link from the browser.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BrowserReturn {
+    /// The link does not belong to this sign-in.
+    NotOurs,
+    /// The sign-in failed. The value tells the user why.
+    Failed(String),
+    /// Redeem this code.
+    Code(String),
+}
+
+impl BrowserSignIn {
+    /// Starts a Browser sign-in with the OIDC `provider`, and returns the page that the browser opens. It is
+    /// `None` when the provider has no native start, because the Server has no public URL: the app then uses
+    /// Sign in with a code. When the app already has an Account on the Server, the provider shows its account
+    /// chooser, if the Server supports it.
+    pub async fn start(
+        http: &Arc<dyn HttpClient>,
+        server: &Server,
+        device: &Device,
+        provider: &wire::AuthProvider,
+        has_account: bool,
+    ) -> Result<Option<(Self, Url)>, Error> {
+        let Some(path) = &provider.native_start_path else { return Ok(None) };
+        let mut url = below_base(server, path)?;
+        let random = || {
+            let mut bytes = [0; 32];
+            bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+            bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+            bytes
+        };
+        let base64 = |bytes: &[u8]| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        };
+        let verifier = base64(&random());
+        let app_state = base64(&random());
+        let challenge = base64(&sha2::Sha256::digest(verifier.as_bytes()));
+        let select_account = has_account && {
+            let path = "auth/oauth/capabilities";
+            let capabilities: Result<wire::OAuthHandshakeCapabilitiesOutputBody, _> =
+                send(http, server, Method::GET, path, &device_headers(device), None).await;
+            capabilities.is_ok_and(|c| c.select_account)
+        };
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("code_challenge", &challenge);
+            query.append_pair("code_challenge_method", "S256");
+            query.append_pair("app_state", &app_state);
+            if select_account {
+                query.append_pair("prompt", "select_account");
+            }
+        }
+        Ok(Some((Self { server: server.clone(), app_state, verifier }, url)))
+    }
+
+    /// Checks the return `link` of the browser, with no request. A link with another `state` is not for this
+    /// sign-in. A link that names another Server or another address fails.
+    pub fn check(&self, link: &str) -> BrowserReturn {
+        let Ok(link) = Url::parse(link) else { return BrowserReturn::NotOurs };
+        let query: HashMap<_, _> = link.query_pairs().collect();
+        let value = |name: &str| query.get(name).map(|value| value.as_ref());
+        if !link.as_str().starts_with(crate::handoff::SCHEME)
+            || link.path() != "/auth/callback"
+            || value("state") != Some(self.app_state.as_str())
+        {
+            return BrowserReturn::NotOurs;
+        }
+        let iss = value("iss").and_then(|iss| Url::parse(iss).ok());
+        let same_origin = iss
+            .is_some_and(|iss| iss.origin() == self.server.url.origin() && iss.path() == "/" && iss.query().is_none());
+        if !same_origin || value("server") != Some(self.server.id.as_str()) {
+            return BrowserReturn::Failed(format!(
+                "The browser returned from another server than {}.",
+                self.server.name
+            ));
+        }
+        match (value("error"), value("code")) {
+            (None, Some(code)) => BrowserReturn::Code(code.to_string()),
+            (reason, _) => BrowserReturn::Failed(browser_error(reason.unwrap_or_default()).into()),
+        }
+    }
+
+    /// Redeems the `code` of the return link with the PKCE verifier. The reply is the same as for a password
+    /// sign-in. An error is the text for the user.
+    pub async fn redeem(
+        &self,
+        http: Arc<dyn HttpClient>,
+        device: Device,
+        code: &str,
+    ) -> Result<(Client, wire::Account), String> {
+        let body = serde_json::json!({ "code": code, "code_verifier": self.verifier });
+        let headers = device_headers(&device);
+        let reply: Result<wire::OAuthCompletion, _> =
+            send(&http, &self.server, Method::POST, "auth/oauth/complete", &headers, Some(body)).await;
+        match reply {
+            Ok(done) => {
+                let tokens = Tokens { access_token: done.access_token, refresh_token: done.refresh_token };
+                Ok((Client::new(http, self.server.clone(), device, tokens), done.user))
+            }
+            Err(Error::Problem(problem)) if problem.code() == "invalid_grant" => {
+                Err("The sign-in code does not fit this request. Try again.".into())
+            }
+            Err(Error::Problem(problem)) if problem.code() == "invalid_token" => {
+                Err("The sign-in code is no longer valid. Try again.".into())
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
+/// The text of an `error` reason on the return link of a Browser sign-in.
+fn browser_error(reason: &str) -> &'static str {
+    match reason {
+        "not_permitted" => "The provider does not let this account sign in to this server.",
+        "account_required" => "No account exists for this sign-in.",
+        "email_in_use" => {
+            "An account with this email address exists. Sign in with it and link the provider in the web client."
+        }
+        "identity_linked_elsewhere" => "This provider account is linked to another Silo account.",
+        "account_disabled" => "This account is disabled.",
+        "provider_unavailable" => "The provider is not available. Try again later.",
+        "state_invalid" => "The sign-in did not finish in the browser where it started. Try again.",
+        "session_expired" => BROWSER_TIMED_OUT,
+        _ => "The sign-in at the provider failed. Try again.",
+    }
+}
+
+/// The text when a Browser sign-in waited too long.
+pub const BROWSER_TIMED_OUT: &str = "Browser sign-in timed out. Try again.";
 
 /// Starts device sign-in. The user approves the code of the reply on another device.
 pub async fn start_device_login(

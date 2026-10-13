@@ -8,6 +8,7 @@ pub mod collections;
 pub mod detail;
 pub mod filter_panel;
 pub mod grid;
+pub mod handoff;
 pub mod home;
 pub mod keys;
 pub mod library;

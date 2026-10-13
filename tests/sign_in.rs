@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 mod common;
 
-use common::{DEVICE_ID, Reply, Seen, fixture, http, json, ok, problem, reply, server};
+use common::{DEVICE_ID, Reply, Seen, fixture, http, json, not_found, ok, problem, reply, server};
 use futures::executor::block_on;
 use http_client::HttpClient;
 use silo_omarchy::api::{self, Client, Device, Error, Tokens, wire};
@@ -260,23 +260,290 @@ fn a_chosen_provider_goes_with_the_password() {
     );
 }
 
+fn providers(extra: serde_json::Value, password_login: bool) -> String {
+    let mut list: serde_json::Value = serde_json::from_str(&fixture("list_auth_providers_ok.json")).unwrap();
+    list["items"].as_array_mut().unwrap().extend(extra.as_array().unwrap().iter().cloned());
+    list["password_login"] = password_login.into();
+    list.to_string()
+}
+
+fn methods(body: String) -> api::SignInMethods {
+    let (http, seen) = http(move |_| json(200, body.clone()));
+    let methods = block_on(api::sign_in_methods(&http, &silo(), &device())).unwrap();
+    assert_eq!(seen.lock().unwrap()[0].path, "auth/providers");
+    methods
+}
+
+fn ids(providers: &[wire::AuthProvider]) -> Vec<&str> {
+    providers.iter().map(|p| p.id.as_str()).collect()
+}
+
+const LDAP: &str =
+    r#"{"id": "ldap", "display_name": "Directory", "mode": "credentials", "default": false, "installation_id": "4"}"#;
+
 #[test]
 fn only_providers_that_take_a_password_are_offered() {
-    let mut list: serde_json::Value = serde_json::from_str(&fixture("list_auth_providers_ok.json")).unwrap();
-    let only_local = list.to_string();
-    list["items"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({"id": "ldap", "display_name": "Directory", "mode": "credentials", "default": false}));
-    let with_ldap = list.to_string();
-    let ids = |body: String| {
-        let (http, seen) = http(move |_| json(200, body.clone()));
-        let providers = block_on(api::password_providers(&http, &silo(), &device())).unwrap();
-        assert_eq!(seen.lock().unwrap()[0].path, "auth/providers");
-        providers.into_iter().map(|p| p.id).collect::<Vec<_>>()
+    let only_local = methods(providers(serde_json::json!([]), true));
+    assert_eq!(ids(&only_local.password), ["local"]);
+    let ldap: serde_json::Value = serde_json::from_str(LDAP).unwrap();
+    assert_eq!(ids(&methods(providers(serde_json::json!([ldap]), true)).password), ["local", "ldap"]);
+}
+
+#[test]
+fn with_password_sign_in_off_only_a_directory_provider_keeps_the_form() {
+    assert!(methods(providers(serde_json::json!([]), false)).password.is_empty());
+    let ldap: serde_json::Value = serde_json::from_str(LDAP).unwrap();
+    assert_eq!(ids(&methods(providers(serde_json::json!([ldap]), false)).password), ["ldap"]);
+}
+
+#[test]
+fn the_screen_offers_network_and_each_oidc_provider_with_the_default_first() {
+    let extra = serde_json::json!([
+        {"id": "plugin-8", "display_name": "Authentik", "mode": "oauth", "default": true, "installation_id": "8"},
+        {"id": "plugin-5", "display_name": "Tailscale", "mode": "network", "default": false, "installation_id": "5",
+         "network_sign_in_path": "/api/v2/auth/network/5/sign-in",
+         "network_identity": {"display_name": "Laura", "username": "laura@example.test"}},
+        {"id": "plugin-9", "display_name": "Passkey", "mode": "webauthn", "default": false},
+    ]);
+    let methods = methods(providers(extra, true));
+    assert_eq!(ids(&methods.oauth), ["plugin-8", "plugin-3"]);
+    assert_eq!(methods.network.as_ref().map(|p| p.id.as_str()), Some("plugin-5"));
+    assert_eq!(ids(&methods.password), ["local"]);
+    // The fixture has no network provider: the request did not come through its network.
+    assert!(self::methods(providers(serde_json::json!([]), true)).network.is_none());
+}
+
+fn provider(mode: &str) -> wire::AuthProvider {
+    let list: wire::AuthProviderCollection = serde_json::from_str(&fixture("list_auth_providers_ok.json")).unwrap();
+    let mut provider = list.items.into_iter().find(|p| p.mode == "oauth").unwrap();
+    if mode == "network" {
+        provider.mode = mode.into();
+        provider.native_start_path = None;
+        provider.network_sign_in_path = Some("/api/v2/auth/network/5/sign-in".into());
+    }
+    provider
+}
+
+/// Starts a Browser sign-in against a Server whose capabilities report `select_account`.
+fn start(
+    server: api::Server,
+    provider: &wire::AuthProvider,
+    has_account: bool,
+    select_account: bool,
+) -> (Option<(api::BrowserSignIn, api::Url)>, Vec<Seen>) {
+    let (http, seen) = http(move |req| match req.path.as_str() {
+        "auth/oauth/capabilities" => {
+            let mut body: serde_json::Value =
+                serde_json::from_str(&fixture("get_oauth_handshake_capabilities_ok.json")).unwrap();
+            body["select_account"] = select_account.into();
+            json(200, body.to_string())
+        }
+        _ => not_found(),
+    });
+    let started = block_on(api::BrowserSignIn::start(&http, &server, &device(), provider, has_account)).unwrap();
+    let seen = seen.lock().unwrap().clone();
+    (started, seen)
+}
+
+fn query(url: &api::Url) -> Vec<(String, String)> {
+    url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect()
+}
+
+fn param<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+}
+
+#[test]
+fn browser_sign_in_opens_the_native_start_with_an_s256_challenge() {
+    let (started, seen) = start(server("https://silo.test/sub/"), &provider("oauth"), false, true);
+    let (sign_in, url) = started.unwrap();
+    assert!(seen.is_empty(), "no Account on the Server: no capabilities request");
+    assert_eq!(url.as_str().split('?').next(), Some("https://silo.test/sub/api/v2/auth/oauth/3/native/start"));
+    let pairs = query(&url);
+    assert_eq!(
+        pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+        ["code_challenge", "code_challenge_method", "app_state"]
+    );
+    assert_eq!(param(&pairs, "code_challenge_method"), Some("S256"));
+    let state = param(&pairs, "app_state").unwrap();
+    assert!(state.len() >= 43 && state.chars().all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c)), "{state}");
+
+    // The verifier that the redemption sends is the one behind the challenge.
+    let (http, seen) = http(|_| ok("complete_oauth_login_native_ok.json"));
+    let link = format!(
+        "org.siloserver.silo:/auth/callback?code=n4tive&state={state}&server=server-1&iss=https%3A%2F%2Fsilo.test"
+    );
+    assert_eq!(sign_in.check(&link), api::BrowserReturn::Code("n4tive".into()));
+    block_on(sign_in.redeem(http, device(), "n4tive")).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()[0].body).unwrap();
+    let verifier = body["code_verifier"].as_str().unwrap();
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    assert_eq!(param(&pairs, "code_challenge"), Some(challenge.as_str()));
+}
+
+#[test]
+fn a_second_account_asks_for_the_account_chooser_when_the_server_supports_it() {
+    let prompt = |has_account, select_account| {
+        let (started, _) = start(silo(), &provider("oauth"), has_account, select_account);
+        param(&query(&started.unwrap().1), "prompt").map(str::to_string)
     };
-    assert_eq!(ids(only_local), ["local"]);
-    assert_eq!(ids(with_ldap), ["local", "ldap"]);
+    assert_eq!(prompt(true, true).as_deref(), Some("select_account"));
+    assert_eq!(prompt(true, false), None);
+    assert_eq!(prompt(false, true), None);
+    let (_, seen) = start(silo(), &provider("oauth"), true, true);
+    assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("GET", "auth/oauth/capabilities"));
+}
+
+#[test]
+fn a_provider_without_a_native_start_falls_back_to_sign_in_with_a_code() {
+    let mut provider = provider("oauth");
+    provider.native_start_path = None;
+    let (started, seen) = start(silo(), &provider, true, true);
+    assert!(started.is_none());
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn a_native_start_path_to_another_origin_is_refused() {
+    let mut provider = provider("oauth");
+    provider.native_start_path = Some("https://evil.test/start".into());
+    let (http, _) = http(|_| not_found());
+    let started = block_on(api::BrowserSignIn::start(&http, &silo(), &device(), &provider, false));
+    assert!(matches!(started, Err(Error::InvalidUrl)));
+}
+
+/// A Browser sign-in on `https://silo.test/` and its `app_state`.
+fn waiting() -> (api::BrowserSignIn, String) {
+    let (started, _) = start(silo(), &provider("oauth"), false, false);
+    let (sign_in, url) = started.unwrap();
+    let state = param(&query(&url), "app_state").unwrap().to_string();
+    (sign_in, state)
+}
+
+fn link(state: &str, server: &str, iss: &str, result: &str) -> String {
+    let mut url = api::Url::parse("org.siloserver.silo:/auth/callback").unwrap();
+    url.query_pairs_mut().append_pair("state", state).append_pair("server", server).append_pair("iss", iss);
+    format!("{url}&{result}")
+}
+
+#[test]
+fn a_return_link_of_another_request_server_or_address_is_refused() {
+    let (sign_in, state) = waiting();
+    let code = api::BrowserReturn::Code("c".into());
+    assert_eq!(sign_in.check(&link(&state, "server-1", "https://silo.test", "code=c")), code);
+    // Another case and the default port written out are the same origin.
+    assert_eq!(sign_in.check(&link(&state, "server-1", "HTTPS://Silo.TEST:443", "code=c")), code);
+
+    assert_eq!(sign_in.check(&link("other", "server-1", "https://silo.test", "code=c")), api::BrowserReturn::NotOurs);
+    assert_eq!(sign_in.check("https://silo.test/auth/callback?code=c"), api::BrowserReturn::NotOurs);
+    for (server, iss) in [
+        ("server-2", "https://silo.test"),
+        ("server-1", "https://evil.test"),
+        ("server-1", "http://silo.test"),
+        ("server-1", "https://silo.test:8443"),
+        ("server-1", ""),
+    ] {
+        let checked = sign_in.check(&link(&state, server, iss, "code=c"));
+        assert!(matches!(checked, api::BrowserReturn::Failed(_)), "{server} {iss}: {checked:?}");
+    }
+}
+
+#[test]
+fn a_good_return_link_redeems_the_code_with_the_device_headers() {
+    let (sign_in, state) = waiting();
+    let api::BrowserReturn::Code(code) = sign_in.check(&link(&state, "server-1", "https://silo.test", "code=n4tive"))
+    else {
+        panic!("no code")
+    };
+    let (http, seen) = http(|_| ok("complete_oauth_login_native_ok.json"));
+    let (client, account) = block_on(sign_in.redeem(http, device(), &code)).unwrap();
+    assert_eq!(account.username, "laura");
+    assert_eq!(client.tokens(), Tokens { access_token: "acc".into(), refresh_token: "ref".into() });
+    assert_eq!(client.server().id, "server-1");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "auth/oauth/complete"));
+    assert_eq!(seen[0].header("X-Silo-Device-Id"), Some(DEVICE_ID));
+    assert_eq!(seen[0].header("X-Silo-Client-Family"), Some("desktop"));
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+    assert_eq!(body["code"], "n4tive");
+}
+
+#[test]
+fn each_error_reason_gives_its_message() {
+    let (sign_in, state) = waiting();
+    let message = |reason: &str| match sign_in.check(&link(
+        &state,
+        "server-1",
+        "https://silo.test",
+        &format!("error={reason}"),
+    )) {
+        api::BrowserReturn::Failed(text) => text,
+        other => panic!("{reason}: {other:?}"),
+    };
+    assert_eq!(message("account_disabled"), "This account is disabled.");
+    assert_eq!(message("account_required"), "No account exists for this sign-in.");
+    assert_eq!(message("provider_unavailable"), "The provider is not available. Try again later.");
+    assert_eq!(message("session_expired"), api::BROWSER_TIMED_OUT);
+    let reasons = ["not_permitted", "email_in_use", "identity_linked_elsewhere", "state_invalid", "login_failed"];
+    let texts: std::collections::HashSet<_> = reasons.iter().map(|r| message(r)).collect();
+    assert_eq!(texts.len(), reasons.len(), "each reason has its own text");
+    assert_eq!(message("something_new"), message("login_failed"));
+}
+
+#[test]
+fn a_refused_code_gives_a_clear_error() {
+    let (sign_in, _) = waiting();
+    let redeem = |reply: Reply| {
+        let reply = Mutex::new(reply);
+        let (http, _) = http(move |_| reply.lock().unwrap().take());
+        block_on(sign_in.redeem(http, device(), "n4tive")).err().unwrap()
+    };
+    assert_eq!(
+        redeem(problem(400, "complete_oauth_login_invalid_grant.json")),
+        "The sign-in code does not fit this request. Try again."
+    );
+    let used_code = serde_json::json!({
+        "type": "https://siloserver.org/docs/api/v2/problems/invalid_token",
+        "title": "Invalid token", "status": 401, "detail": "The code is unknown, used or expired."
+    });
+    assert_eq!(
+        redeem(reply(401, "application/problem+json", used_code.to_string())),
+        "The sign-in code is no longer valid. Try again."
+    );
+    // Another refusal shows the detail of the Server.
+    assert_eq!(
+        redeem(problem(422, "complete_oauth_login_code_required.json")),
+        "The request did not pass validation; see errors."
+    );
+}
+
+#[test]
+fn network_sign_in_posts_an_empty_object_with_the_device_headers() {
+    let (http, seen) = http(|_| ok("sign_in_with_network_identity_ok.json"));
+    let (client, account) =
+        block_on(Client::network_sign_in(http, server("https://silo.test/sub/"), device(), &provider("network")))
+            .unwrap();
+    assert_eq!(account.username, "laura");
+    assert_eq!(client.tokens().access_token, "acc");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].method, "POST");
+    assert_eq!(seen[0].url, "https://silo.test/sub/api/v2/auth/network/5/sign-in");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&seen[0].body).unwrap(), serde_json::json!({}));
+    assert_eq!(seen[0].header("Content-Type"), Some("application/json"));
+    assert_eq!(seen[0].header("X-Silo-Device-Id"), Some(DEVICE_ID));
+    assert_eq!(seen[0].header("X-Silo-Device-Platform"), Some("linux"));
+    assert_eq!(seen[0].header("Authorization"), None);
+}
+
+#[test]
+fn a_refused_network_sign_in_shows_the_server_detail() {
+    let (http, _) = http(|_| problem(403, "sign_in_with_network_identity_off_overlay.json"));
+    let err = block_on(Client::network_sign_in(http, silo(), device(), &provider("network"))).err().unwrap();
+    assert_eq!(err.to_string(), "Open this server through the provider's network address to sign in this way");
 }
 
 #[test]
