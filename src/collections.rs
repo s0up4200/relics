@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
-    ScrollHandle, StatefulInteractiveElement as _, Styled, Task, Window, div, px,
+    AnyElement, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment, ListState,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement as _, Styled, Task, Window, div, list, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -15,6 +15,9 @@ use crate::click::Clickable as _;
 use crate::grid::{POSTER_HEIGHT, POSTER_WIDTH};
 use crate::home::{Focus, art, move_focus};
 use crate::keys::Key;
+use crate::sideways::Row;
+
+const CARDS: Row = Row { width: POSTER_WIDTH, gap: 14., pad: 40. };
 
 /// Open the grid of the Items of a collection.
 #[derive(Clone)]
@@ -73,8 +76,9 @@ pub struct Collections {
     focus: Focus,
     /// The view has the keyboard focus, so the focused card shows the focus ring.
     pub active: bool,
-    /// The page scroll, with one child for each row.
-    scroll: ScrollHandle,
+    /// The page list: the title of the Collections page, one item for each row, and the status. It draws only the
+    /// items near the viewport.
+    page: ListState,
     row_scrolls: Vec<ScrollHandle>,
     _loading: Task<()>,
 }
@@ -91,7 +95,7 @@ impl Collections {
             failed: false,
             focus: Focus::Outside,
             active: false,
-            scroll: ScrollHandle::new(),
+            page: ListState::new(0, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
             _loading: Task::ready(()),
         };
@@ -129,6 +133,11 @@ impl Collections {
         cx.notify();
     }
 
+    /// The Collections page has its title as the first item of the list.
+    fn title_items(&self) -> usize {
+        usize::from(matches!(self.scope, Scope::Server))
+    }
+
     fn row_lengths(&self) -> Vec<usize> {
         self.groups.iter().map(|g| g.cards.len()).collect()
     }
@@ -152,12 +161,31 @@ impl Collections {
         if focus == self.focus {
             return false;
         }
-        // The Collections page has its title as the first child of the scroll.
-        self.scroll.scroll_to_item(row + usize::from(matches!(self.scope, Scope::Server)));
-        self.row_scrolls[row].scroll_to_item(col);
+        self.page.scroll_to_reveal_item(self.title_items() + row);
+        CARDS.reveal(&self.row_scrolls[row], col);
         self.focus = focus;
         cx.notify();
         true
+    }
+
+    /// The last item of the list: the status line with Retry after a failed load, and the bottom margin.
+    fn status(&self, cx: &Context<Self>) -> AnyElement {
+        let t = cx.omarchy();
+        div()
+            .pb(px(80.))
+            .children(self.status.clone().map(|status| {
+                let retry = button("collections-retry", "Retry", ButtonVariant::Secondary, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
+                div()
+                    .px(px(40.))
+                    .flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .text_color(if self.failed { t.danger } else { t.secondary })
+                    .child(status)
+                    .children(self.failed.then_some(retry))
+            }))
+            .into_any_element()
     }
 
     fn card(&self, row: usize, col: usize, card: &wire::LibraryCollectionCard, cx: &Context<Self>) -> AnyElement {
@@ -199,66 +227,56 @@ impl Collections {
 }
 
 impl Render for Collections {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = cx.omarchy().clone();
-        let rows = self.groups.iter().enumerate().map(|(row, group)| {
-            let cards = group.cards.iter().enumerate().map(|(col, card)| self.card(row, col, card, cx));
-            div()
-                .pb(px(28.))
-                .flex()
-                .flex_col()
-                .gap(px(12.))
-                .child(
-                    div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let count = self.title_items() + self.groups.len() + 1;
+        if self.page.item_count() != count {
+            self.page.reset(count);
+        }
+        let viewport = window.viewport_size().width.to_f64() as f32;
+        let page = list(
+            self.page.clone(),
+            cx.processor(move |this, index: usize, _, cx| {
+                let t = cx.omarchy().clone();
+                let Some(row) = index.checked_sub(this.title_items()) else {
+                    return div()
                         .px(px(40.))
-                        .text_size(px(20.))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .pt(px(28.))
+                        .pb(px(18.))
+                        .text_size(px(34.))
+                        .font_weight(FontWeight::EXTRA_BOLD)
                         .text_color(t.bright)
-                        .child(group.title.clone()),
-                )
-                .child(
-                    div()
-                        .id(("collection-row", row))
-                        .px(px(40.))
-                        .flex()
-                        .gap(px(14.))
-                        .overflow_x_scroll()
-                        .restrict_scroll_to_axis()
-                        .track_scroll(&self.row_scrolls[row])
-                        .children(cards),
-                )
-        });
-        let status = self.status.clone().map(|status| {
-            let retry = button("collections-retry", "Retry", ButtonVariant::Secondary, cx)
-                .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
-            div()
-                .px(px(40.))
-                .pb(px(80.))
-                .flex()
-                .items_center()
-                .gap(px(14.))
-                .text_color(if self.failed { t.danger } else { t.secondary })
-                .child(status)
-                .children(self.failed.then_some(retry))
-        });
-        let title = matches!(self.scope, Scope::Server).then(|| {
-            div()
-                .px(px(40.))
-                .pt(px(28.))
-                .pb(px(18.))
-                .text_size(px(34.))
-                .font_weight(FontWeight::EXTRA_BOLD)
-                .text_color(t.bright)
-                .child("Collections")
-        });
-        div()
-            .id("collections")
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .children(title)
-            .children(rows)
-            .children(status)
+                        .child("Collections")
+                        .into_any_element();
+                };
+                let Some(group) = this.groups.get(row) else {
+                    return this.status(cx);
+                };
+                let card = |col| this.card(row, col, &group.cards[col], cx);
+                div()
+                    .w_full()
+                    .pb(px(28.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .px(px(40.))
+                            .text_size(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.bright)
+                            .child(group.title.clone()),
+                    )
+                    .child(CARDS.build(
+                        ("collection-row", row),
+                        &this.row_scrolls[row],
+                        group.cards.len(),
+                        viewport,
+                        card,
+                    ))
+                    .into_any_element()
+            }),
+        );
+        div().id("collections").size_full().child(page.size_full())
     }
 }
 

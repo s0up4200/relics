@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement, Render, RenderImage, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Task,
-    Window, div, linear_color_stop, linear_gradient, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
+    ListState, MouseButton, ParentElement, Render, RenderImage, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Task, Window, div, linear_color_stop, linear_gradient, list, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -21,6 +21,7 @@ use crate::home::{Open, Play, badge_label, card, progress, progress_bar};
 use crate::keys::Key;
 use crate::player::PlayItem;
 use crate::search::OpenPerson;
+use crate::sideways::Row;
 
 const EPISODE_WIDTH: f32 = 250.;
 const EPISODE_HEIGHT: f32 = 140.;
@@ -68,7 +69,15 @@ pub struct Detail {
     /// The Items of More Like This, from the similar call, and their Thumbhashes.
     similar: Vec<wire::CatalogItem>,
     similar_thumbs: Vec<Option<Arc<RenderImage>>>,
-    scroll: ScrollHandle,
+    /// The page list. It draws only the items near the viewport: the hero, one item for each row of cards, and one
+    /// for each line of the episode grid.
+    page: ListState,
+    /// The items of the page list when it last drew, from `Rows::items`.
+    items: Vec<(usize, usize)>,
+    /// The sideways scroll of each row of cards, by the row number of `Focus::place`.
+    row_scrolls: [ScrollHandle; 8],
+    /// The width of the window when the page last drew.
+    viewport: f32,
     artwork: Entity<ArtworkCache>,
     /// The artwork rung of the Item and of the episodes, at the window scale when the page opened.
     // ponytail: read once; a move to a larger scale keeps it until the page opens again.
@@ -118,7 +127,10 @@ impl Detail {
             season_thumbs: Vec::new(),
             similar: Vec::new(),
             similar_thumbs: Vec::new(),
-            scroll: ScrollHandle::new(),
+            page: ListState::new(0, ListAlignment::Top, px(800.)),
+            items: Vec::new(),
+            row_scrolls: std::array::from_fn(|_| ScrollHandle::new()),
+            viewport,
             artwork: artwork::global(cx),
             image_size: Rung::fit(Kind::Backdrop, width, scale)
                 .max(Rung::fit(Kind::Poster, POSTER_WIDTH, scale))
@@ -305,9 +317,12 @@ impl Detail {
             (focus, key) => match self.rows().step(focus, key) {
                 Step::To(focus) => {
                     self.focus = focus;
-                    // ponytail: scrolls to the row, not the card; a season with many rows of episodes can hide
-                    // the focused card below the window.
-                    self.scroll.scroll_to_item(self.rows().child(focus));
+                    let rows = self.rows();
+                    self.page.scroll_to_reveal_item(rows.child(focus));
+                    let (row, i) = focus.place();
+                    if let Some(sideways) = sideways(row) {
+                        sideways.reveal(&self.row_scrolls[row], i);
+                    }
                 }
                 Step::OutLeft | Step::Stay => return false,
             },
@@ -667,7 +682,8 @@ impl Detail {
     /// A card for each season: the poster, the title and the watched count. The chosen season has a light border.
     fn season_cards(&self, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let cards = self.seasons.iter().enumerate().map(|(i, season)| {
+        let card = |i: usize| {
+            let season = &self.seasons[i];
             let focused = self.active && self.focus == Focus::Season(i);
             let border = match (focused, i == self.season) {
                 (true, _) => t.accent,
@@ -707,23 +723,20 @@ impl Detail {
                         .child(season.title.clone()),
                 )
                 .child(div().text_size(px(12.)).text_color(t.secondary).child(season_line(season)));
-            self.with_menu(card, (Mark::Season(i), Focus::Season(i)), season_watched(season), cx)
-        });
-        div()
-            .id("detail-seasons")
-            .px(px(MARGIN))
-            .flex()
-            .gap(px(GAP))
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .children(cards)
-            .into_any_element()
+            self.with_menu(card, (Mark::Season(i), Focus::Season(i)), season_watched(season), cx).into_any_element()
+        };
+        let row = Focus::Season(0).place().0;
+        let scroll = &self.row_scrolls[row];
+        SEASONS.build("detail-seasons", scroll, self.seasons.len(), self.viewport, card).into_any_element()
     }
 
-    /// The episode grid. On an episode page it has the More Episodes title.
-    fn episode_grid(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
+    /// The line `line` of the episode grid. On an episode page the first line has the More Episodes title.
+    fn episode_line(&self, item: &wire::CatalogItemDetail, line: usize, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let cards = self.episodes.iter().enumerate().map(|(i, episode)| {
+        let start = line * self.columns;
+        let end = (start + self.columns).min(self.episodes.len());
+        let cards = (start..end).map(|i| {
+            let episode = &self.episodes[i];
             let mark = (Mark::Episode(i), Focus::Episode(i));
             self.with_menu(self.episode_card(i, episode, cx), mark, episode_watched(episode), cx)
         });
@@ -732,10 +745,10 @@ impl Detail {
             .flex()
             .flex_col()
             .gap(px(12.))
-            .children((item.type_ == "episode").then(|| {
+            .children((line == 0 && item.type_ == "episode").then(|| {
                 div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child("More Episodes")
             }))
-            .child(div().flex().flex_wrap().gap(px(GAP)).children(cards))
+            .child(div().flex().gap(px(GAP)).children(cards))
             .into_any_element()
     }
 
@@ -835,68 +848,69 @@ impl Detail {
             .child(div().text_size(px(12.)).text_color(t.secondary).truncate().child(line.to_string()))
     }
 
-    /// The Cast, Crew, Trailers and More Like This sections that have cards. Each has a row of cards that scrolls
-    /// sideways.
-    fn sections(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> Vec<AnyElement> {
+    /// The Cast, Crew, Trailers or More Like This section, by its row number in `Focus::place`. It has a title and
+    /// a row of cards that scrolls sideways.
+    fn section(&self, row: usize, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
-        let section = |title: &'static str, id: &'static str, cards: Vec<gpui::Stateful<gpui::Div>>| {
-            (!cards.is_empty()).then(|| {
-                div()
-                    .px(px(MARGIN))
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child(title))
-                    .child(
-                        div().id(id).flex().gap(px(GAP)).overflow_x_scroll().restrict_scroll_to_axis().children(cards),
-                    )
-                    .into_any_element()
-            })
+        let videos = trailers(item);
+        let (title, id, count): (&str, &str, usize) = match Focus::at(row, 0) {
+            Focus::Cast(_) => ("Cast", "detail-cast", item.cast.len()),
+            Focus::Crew(_) => ("Crew", "detail-crew", item.crew.len()),
+            Focus::Trailer(_) => ("Trailers", "detail-trailers", videos.len()),
+            _ => ("More Like This", "detail-similar", self.similar.len()),
         };
-        let cast = item.cast.iter().enumerate().map(|(i, credit)| {
-            let card = (credit.name.as_str(), credit.character.as_str(), &credit.photo_url);
-            self.person_card(Focus::Cast(i), card, 2 + i, cx)
-        });
-        let crew = item.crew.iter().enumerate().map(|(i, credit)| {
-            let card = (credit.name.as_str(), credit.job.as_str(), &credit.photo_url);
-            self.person_card(Focus::Crew(i), card, 2 + item.cast.len() + i, cx)
-        });
-        let videos = trailers(item).into_iter().enumerate().map(|(i, (video, _))| {
-            let focused = self.active && self.focus == Focus::Trailer(i);
-            let official = if video.is_official { " · Official" } else { "" };
-            div()
-                .id(("detail-trailer", i))
-                .clickable()
-                .w(px(TRAILER_WIDTH))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .p(px(12.))
-                .rounded(px(10.))
-                .bg(t.surface)
-                .border_2()
-                .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .on_click(cx.listener(move |this, _, _, cx| this.open_trailer(i, cx)))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(if focused { t.bright } else { t.foreground })
-                        .line_clamp(2)
-                        .child(format!("▶ {}", video.name.as_deref().unwrap_or(&video.kind))),
-                )
-                .child(div().text_size(px(12.)).text_color(t.secondary).child(format!("{}{official}", video.kind)))
-        });
-        let similar = self.similar.iter().enumerate().map(|(i, similar)| self.similar_card(i, similar, cx));
-        [
-            section("Cast", "detail-cast", cast.collect()),
-            section("Crew", "detail-crew", crew.collect()),
-            section("Trailers", "detail-trailers", videos.collect()),
-            section("More Like This", "detail-similar", similar.collect()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        let card = |i: usize| match Focus::at(row, i) {
+            Focus::Cast(i) => {
+                let credit = &item.cast[i];
+                let card = (credit.name.as_str(), credit.character.as_str(), &credit.photo_url);
+                self.person_card(Focus::Cast(i), card, 2 + i, cx).into_any_element()
+            }
+            Focus::Crew(i) => {
+                let credit = &item.crew[i];
+                let card = (credit.name.as_str(), credit.job.as_str(), &credit.photo_url);
+                self.person_card(Focus::Crew(i), card, 2 + item.cast.len() + i, cx).into_any_element()
+            }
+            Focus::Trailer(i) => self.trailer_card(i, videos[i].0, cx).into_any_element(),
+            _ => self.similar_card(i, &self.similar[i], cx).into_any_element(),
+        };
+        let cards = sideways(row).expect("a section scrolls sideways");
+        div()
+            .px(px(MARGIN))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child(title))
+            .child(cards.build(id, &self.row_scrolls[row], count, self.viewport, card))
+            .into_any_element()
+    }
+
+    /// A Trailers card: the name and the kind of the video.
+    fn trailer_card(&self, i: usize, video: &wire::ItemVideoInfo, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let t = cx.omarchy();
+        let focused = self.active && self.focus == Focus::Trailer(i);
+        let official = if video.is_official { " · Official" } else { "" };
+        div()
+            .id(("detail-trailer", i))
+            .clickable()
+            .w(px(TRAILER_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .p(px(12.))
+            .rounded(px(10.))
+            .bg(t.surface)
+            .border_2()
+            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+            .on_click(cx.listener(move |this, _, _, cx| this.open_trailer(i, cx)))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(if focused { t.bright } else { t.foreground })
+                    .line_clamp(2)
+                    .child(format!("▶ {}", video.name.as_deref().unwrap_or(&video.kind))),
+            )
+            .child(div().text_size(px(12.)).text_color(t.secondary).child(format!("{}{official}", video.kind)))
     }
 
     /// A More Like This card, the same as a grid card.
@@ -936,30 +950,39 @@ impl Render for Detail {
             (None, None) => Some(div().px(px(MARGIN)).text_color(t.secondary).child("Loading…")),
             _ => None,
         };
-        // The children are the hero and one child for each row that is not empty, in the order of `Rows`, so that
-        // `key` can scroll to them by index. A series has no versions and a movie has no seasons.
-        let mut page = div()
-            .id("detail-page")
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(24.))
-            .pb(px(80.))
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll);
-        if let Some(item) = &self.item {
-            page = page.child(self.hero(item, viewport - crate::pages::sidebar_width(viewport, true), cx));
-            if self.picker_len() > 0 {
-                page = page.child(self.version_pills(cx));
-            }
-            if !self.seasons.is_empty() {
-                page = page.child(self.season_cards(cx));
-            }
-            if !self.episodes.is_empty() {
-                page = page.child(self.episode_grid(item, cx));
-            }
-            page = page.children(self.sections(item, cx));
+        let items = if self.item.is_some() { self.rows().items() } else { Vec::new() };
+        if items != self.items {
+            // Keep the scroll position when a row loads or the grid gets other columns.
+            let top = self.page.logical_scroll_top();
+            self.page.reset(items.len());
+            self.page.scroll_to(top);
+            self.items = items;
         }
+        self.viewport = viewport;
+        let hero_width = viewport - crate::pages::sidebar_width(viewport, true);
+        let page = list(
+            self.page.clone(),
+            cx.processor(move |this, index: usize, _, cx| {
+                let (Some(&(row, line)), Some(item)) = (this.items.get(index), this.item.as_ref()) else {
+                    return div().into_any_element();
+                };
+                let child = match row {
+                    0 => this.hero(item, hero_width, cx),
+                    1 => this.version_pills(cx),
+                    2 => this.season_cards(cx),
+                    EPISODE_ROW => this.episode_line(item, line, cx),
+                    row => this.section(row, item, cx),
+                };
+                // The lines of the episode grid have the gap of the cards. The last item has the bottom margin.
+                let gap = match this.items.get(index + 1) {
+                    None => 80.,
+                    Some(&(next, _)) if next == row => GAP,
+                    Some(_) => 24.,
+                };
+                div().pb(px(gap)).child(child).into_any_element()
+            }),
+        )
+        .flex_1();
         let notice = self.notice.clone().map(|notice| {
             div()
                 .absolute()
@@ -972,7 +995,7 @@ impl Render for Detail {
                 .text_color(t.danger)
                 .child(notice)
         });
-        div().relative().size_full().child(page.children(status)).children(notice)
+        div().relative().size_full().flex().flex_col().children(status).child(page).children(notice)
     }
 }
 
@@ -1238,6 +1261,20 @@ impl Focus {
 /// The row of the episode grid. The other rows go left and right only.
 const EPISODE_ROW: usize = 3;
 
+const SEASONS: Row = Row { width: SEASON_WIDTH, gap: GAP, pad: MARGIN };
+
+/// The size of the cards of a row that scrolls sideways, by the row number of `Focus::place`.
+fn sideways(row: usize) -> Option<Row> {
+    let width = match Focus::at(row, 0) {
+        Focus::Season(_) => return Some(SEASONS),
+        Focus::Cast(_) | Focus::Crew(_) => CAST_WIDTH,
+        Focus::Trailer(_) => TRAILER_WIDTH,
+        Focus::Similar(_) => crate::grid::POSTER_WIDTH,
+        Focus::Action(_) | Focus::Version(_) | Focus::Episode(_) => return None,
+    };
+    Some(Row { width, gap: GAP, pad: 0. })
+}
+
 /// Where a key takes the focus.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
@@ -1286,10 +1323,26 @@ impl Rows {
         }
     }
 
-    /// The index of the page child that holds the control: the hero, then one child for each row that is not empty.
+    /// The items of the page list, as the row and the line of the episode grid: the hero, one item for each other
+    /// row that is not empty, and one for each line of the episode grid.
+    pub fn items(&self) -> Vec<(usize, usize)> {
+        (0..8)
+            .flat_map(|row| {
+                let lines = match row {
+                    0 => 1,
+                    EPISODE_ROW => self.episodes.div_ceil(self.columns),
+                    row => usize::from(self.len(row) > 0),
+                };
+                (0..lines).map(move |line| (row, line))
+            })
+            .collect()
+    }
+
+    /// The index of the page item that holds the control.
     pub fn child(&self, focus: Focus) -> usize {
-        let (row, _) = focus.place();
-        (0..row).filter(|&r| r == 0 || self.len(r) > 0).count()
+        let (row, i) = focus.place();
+        let line = if row == EPISODE_ROW { i / self.columns } else { 0 };
+        self.items().iter().position(|&item| item == (row, line)).unwrap_or(0)
     }
 
     pub fn step(&self, focus: Focus, key: Key) -> Step {
@@ -1736,11 +1789,17 @@ mod tests {
         assert_eq!(series.step(Focus::Trailer(0), Key::Up), to(Focus::Crew(0)));
         let no_crew = Rows { crew: 0, ..series };
         assert_eq!(no_crew.step(Focus::Trailer(0), Key::Up), to(Focus::Cast(0)), "an empty row is skipped");
-        // The page children are the hero and one for each row that is not empty.
+        // The page items are the hero, one for each row that is not empty, and one for each line of episodes.
         assert_eq!(series.child(Focus::Action(1)), 0);
         assert_eq!(series.child(Focus::Season(1)), 1);
-        assert_eq!(series.child(Focus::Trailer(0)), 5, "hero, seasons, episodes, cast, crew; a series has no versions");
-        assert_eq!(no_crew.child(Focus::Trailer(0)), 4);
+        assert_eq!(series.child(Focus::Episode(3)), 3, "the second line of the grid");
+        assert_eq!(series.child(Focus::Episode(4)), 4);
+        assert_eq!(
+            series.child(Focus::Trailer(0)),
+            7,
+            "hero, seasons, three lines of episodes, cast, crew; a series has no versions"
+        );
+        assert_eq!(no_crew.child(Focus::Trailer(0)), 6);
     }
 
     #[test]
