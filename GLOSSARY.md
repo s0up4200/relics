@@ -55,6 +55,10 @@ _Avoid_: Banner, header
 The wide artwork of an Item that fills the Hero. On an episode, it can be the episode still or the artwork of the series.
 _Avoid_: Background, fanart
 
+**User rating**:
+The 1 to 5 stars that a Profile gives an Item. The Profile can clear it. It is not the TMDB or IMDb score, and it is not the content rating.
+_Avoid_: rating, score, vote
+
 **Person**:
 A cast or crew member that the Silo server knows, with the titles that they took part in.
 _Avoid_: Actor, as the general name. Actor is one role that a Person can have.

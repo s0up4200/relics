@@ -377,16 +377,13 @@ impl Detail {
                 );
             }
             Action::Rate(stars) => {
-                let call = async move { client.set_rating(&id, Some(stars)).await };
+                let rating = star_press(item.user_rating, stars);
+                let call = async move { client.set_rating(&id, rating).await };
                 self.write(
                     call,
-                    move |this| this.item.iter_mut().for_each(|item| item.user_rating = Some(stars.into())),
+                    move |this| this.item.iter_mut().for_each(|item| item.user_rating = rating.map(Into::into)),
                     cx,
                 );
-            }
-            Action::ClearRating => {
-                let call = async move { client.set_rating(&id, None).await };
-                self.write(call, |this| this.item.iter_mut().for_each(|item| item.user_rating = None), cx);
             }
             Action::Watched => self.mark(Mark::Item, cx),
         }
@@ -665,23 +662,45 @@ impl Detail {
         let (poster, column) = hero_columns(width);
         let glow = artwork_color(item.backdrop_thumbhash.as_deref(), t.accent);
         let background = t.background;
-        let buttons = actions(item, &self.seasons).into_iter().enumerate().map(|(i, action)| {
-            let mut pill = self.pill(
-                ("detail-action", i),
-                action_label(item, action).into(),
-                i == 0,
-                self.focus == Focus::Action(i),
-                cx,
-            );
-            if let Action::Rate(_) = action {
-                // A star is a narrow button.
-                pill = pill.px(px(8.));
-            }
-            pill.on_click(cx.listener(move |this, _, _, cx| {
+        let (mut buttons, mut star_buttons) = (Vec::new(), Vec::new());
+        for (i, action) in actions(item, &self.seasons).into_iter().enumerate() {
+            let focused = self.focus == Focus::Action(i);
+            let label: SharedString = action_label(item, action).into();
+            let click = cx.listener(move |this, _, _, cx| {
                 this.focus = Focus::Action(i);
                 this.act(action, cx);
-            }))
-        });
+            });
+            match action {
+                // A bare star. The focused star shows in the accent color, with no ring.
+                Action::Rate(_) => star_buttons.push(
+                    div()
+                        .id(("detail-action", i))
+                        .clickable()
+                        .px(px(2.))
+                        .text_color(if self.active && focused { t.accent } else { t.foreground })
+                        .child(label)
+                        .on_click(click),
+                ),
+                _ => buttons.push(
+                    self.pill(("detail-action", i), label, i == 0, focused, cx).on_click(click).into_any_element(),
+                ),
+            }
+        }
+        // The stars share one glass pill, so they wrap to the next line as one unit.
+        buttons.push(
+            div()
+                .flex()
+                .px(px(14.))
+                .py(px(9.))
+                .rounded_full()
+                .text_size(px(14.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .bg(gpui::hsla(0., 0., 1., 0.1))
+                .border_2()
+                .border_color(gpui::transparent_black())
+                .children(star_buttons)
+                .into_any_element(),
+        );
         let labels = self.versions.get(self.version).map_or_else(|| quality_badges(item), version_labels);
         let title_text = {
             let (text, color) = (item.title.clone(), t.bright);
@@ -1277,13 +1296,12 @@ pub enum Action {
     Favorite,
     /// Mark watched, or Mark unwatched.
     Watched,
-    /// Give the Item 1 to 5 stars.
+    /// Give the Item 1 to 5 stars, or clear the User rating when it has this number of stars.
     Rate(u8),
-    ClearRating,
 }
 
-/// The buttons of the hero. Start over shows only when Resume does, Shuffle only on a series of 2 episodes or more,
-/// and Clear rating only when the Item has a rating.
+/// The buttons of the hero. Start over shows only when Resume does, and Shuffle only on a series of 2 episodes or
+/// more. The 5 stars come last.
 pub fn actions(item: &wire::CatalogItemDetail, seasons: &[wire::Season]) -> Vec<Action> {
     let resume = item.position_seconds.is_some_and(|position| position > 0.);
     let mut actions = vec![Action::Play { resume }];
@@ -1296,10 +1314,13 @@ pub fn actions(item: &wire::CatalogItemDetail, seasons: &[wire::Season]) -> Vec<
     }
     actions.extend([Action::Watchlist, Action::Favorite, Action::Watched]);
     actions.extend((1..=5).map(Action::Rate));
-    if item.user_rating.is_some() {
-        actions.push(Action::ClearRating);
-    }
     actions
+}
+
+/// The User rating that a press of a star sends. The star of the current User rating sends no rating, which clears
+/// it. Another star sends its own number.
+pub fn star_press(user_rating: Option<i64>, stars: u8) -> Option<u8> {
+    (user_rating != Some(stars.into())).then_some(stars)
 }
 
 /// The text of a hero button. A star is full up to the rating of the Item.
@@ -1319,7 +1340,6 @@ pub fn action_label(item: &wire::CatalogItemDetail, action: Action) -> String {
         Action::Watched => "Mark watched",
         Action::Rate(stars) if item.user_rating.is_some_and(|rating| i64::from(stars) <= rating) => "★",
         Action::Rate(_) => "☆",
-        Action::ClearRating => "Clear rating",
     }
     .to_string()
 }
@@ -2127,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hero_has_favorite_mark_watched_and_five_stars_and_clear_shows_only_for_a_rating() {
+    fn the_hero_has_favorite_mark_watched_and_ends_with_five_stars_that_fill_up_to_the_user_rating() {
         let stars = (1..=5).map(Action::Rate);
         let fresh = detail(json!({"user_state": null}));
         let expected: Vec<_> = [Action::Play { resume: false }, Action::Watchlist, Action::Favorite, Action::Watched]
@@ -2141,9 +2161,17 @@ mod tests {
         let rated = detail(
             json!({"user_rating": 3, "user_state": {"played": true, "is_favorite": true, "in_watchlist": false}}),
         );
-        assert_eq!(actions(&rated, &[]).last(), Some(&Action::ClearRating));
+        assert_eq!(actions(&rated, &[]), expected, "a User rating adds no Clear rating action");
         let labels: Vec<_> = actions(&rated, &[]).into_iter().skip(2).map(|a| action_label(&rated, a)).collect();
-        assert_eq!(labels, ["♥ Favorite", "✓ Watched", "★", "★", "★", "☆", "☆", "Clear rating"]);
+        assert_eq!(labels, ["♥ Favorite", "✓ Watched", "★", "★", "★", "☆", "☆"]);
+    }
+
+    #[test]
+    fn a_star_press_sets_that_star_and_the_star_of_the_user_rating_clears_it() {
+        assert_eq!(star_press(Some(3), 3), None);
+        assert_eq!(star_press(Some(3), 1), Some(1));
+        assert_eq!(star_press(Some(3), 5), Some(5));
+        assert_eq!((1..=5).map(|stars| star_press(None, stars)).collect::<Vec<_>>(), [1, 2, 3, 4, 5].map(Some));
     }
 
     fn season(fields: serde_json::Value) -> wire::Season {
