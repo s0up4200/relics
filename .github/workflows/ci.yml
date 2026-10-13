@@ -10,6 +10,9 @@ jobs:
     # Arch Linux, because the Ubuntu runners have an old mpv.
     runs-on: ubuntu-latest
     container: archlinux:latest
+    env:
+      # Full debug info makes the target dir larger than the free disk of the runner, and the linker can crash.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Install packages
         run: >-
@@ -17,12 +20,9 @@ jobs:
           base-devel clang cmake git rust mpv
           wayland libxkbcommon libxkbcommon-x11 libxcb fontconfig freetype2 alsa-lib vulkan-headers
       - uses: actions/checkout@v5
-      - uses: actions/cache@v4
+      # Keeps the built dependencies, and saves them also when a step fails.
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
+          cache-on-failure: true
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
