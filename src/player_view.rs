@@ -847,22 +847,20 @@ pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Choice)> {
 }
 
 /// The rows of the Quality list: the file versions when the Item has more than one, then the steps of the
-/// Quality ladder when the plan offers more than one. A pick of a version sends its file id, a pick of a step its
+/// Quality ladder, also when the plan offers only one. A pick of a version sends its file id, a pick of a step its
 /// label.
 pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, quality: &str) -> Vec<(Pick, Choice)> {
-    let ladder = &plan.available_qualities;
-    // The Version tag tells a version from a ladder step, so it shows only when the list has both.
-    let tags = if ladder.len() > 1 { vec!["Version"] } else { Vec::new() };
+    // A single step shows too, so that the list tells what plays. The Version tag tells a version from a step.
     let versions = versions.iter().filter(|_| versions.len() > 1).map(|version| {
         let row = Choice {
             label: detail::version_row(version),
             detail: version.edition_raw.clone().unwrap_or_default(),
-            tags: tags.clone(),
+            tags: vec!["Version"],
             current: *version.file_id == *plan.effective_media_file_id,
         };
         (Pick::Version(version.file_id.to_string()), row)
     });
-    let steps = ladder.iter().filter(|_| ladder.len() > 1).map(|step| {
+    let steps = plan.available_qualities.iter().map(|step| {
         let row = Choice {
             label: step_name(step),
             detail: step.bitrate_kbps.map(bitrate).unwrap_or_default(),
@@ -1067,11 +1065,15 @@ mod tests {
                 (Pick::Quality("720p-low".into()), "720p Low", "800 kbps", false),
             ]
         );
-        // Without ladder steps, a row needs no Version tag.
+        // With one step, the versions keep the Version tag, and the step shows as the row that plays.
         let versions = quality_rows(&[version("42", "2160p"), version("43", "1080p")], &plan(json!({})), "original");
-        assert!(versions.iter().all(|(_, row)| row.tags.is_empty()));
-        // One version and one step give no choice.
-        assert!(quality_rows(&[version("42", "1080p")], &plan(json!({})), "original").is_empty());
+        assert_eq!(versions.len(), 3);
+        assert!(versions[..2].iter().all(|(_, row)| row.tags == ["Version"]));
+        assert_eq!((versions[2].0.clone(), versions[2].1.current), (Pick::Quality("original".into()), true));
+        // One version and one step: the list has only the step that plays, not None.
+        let single = quality_rows(&[version("42", "1080p")], &plan(json!({})), "original");
+        let single: Vec<_> = single.iter().map(|(pick, row)| (pick.clone(), row.label.as_str(), row.current)).collect();
+        assert_eq!(single, [(Pick::Quality("original".into()), "Original", true)]);
     }
 
     #[test]
