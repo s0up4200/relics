@@ -20,7 +20,7 @@ use crate::click::Clickable as _;
 use crate::grid::Move;
 use crate::home::{Open, Play, badge_label, card, progress, progress_bar};
 use crate::keys::Key;
-use crate::player::PlayItem;
+use crate::player::{PlayItem, start_shuffle};
 use crate::search::OpenPerson;
 use crate::sideways::Row;
 
@@ -62,6 +62,8 @@ pub struct Detail {
     notice: Option<String>,
     /// The season or episode card whose menu is open.
     menu: Option<Mark>,
+    /// The chosen entry of the open menu: 0 is Mark watched, 1 is Shuffle season.
+    menu_entry: usize,
     /// The Thumbhash of the backdrop, the poster and each cast photo.
     thumbs: Vec<Option<Arc<RenderImage>>>,
     episode_thumbs: Vec<Option<Arc<RenderImage>>>,
@@ -88,6 +90,7 @@ pub struct Detail {
     _loading: Task<()>,
     _episodes: Task<()>,
     _similar: Task<()>,
+    _shuffle: Task<()>,
 }
 
 impl EventEmitter<Play> for Detail {}
@@ -128,6 +131,7 @@ impl Detail {
             error: None,
             notice: None,
             menu: None,
+            menu_entry: 0,
             thumbs: Vec::new(),
             episode_thumbs: Vec::new(),
             season_thumbs: Vec::new(),
@@ -146,6 +150,7 @@ impl Detail {
             _loading: Task::ready(()),
             _episodes: Task::ready(()),
             _similar: Task::ready(()),
+            _shuffle: Task::ready(()),
         };
         detail.load(cx);
         detail
@@ -298,7 +303,12 @@ impl Detail {
         self.menu = self.open_menu();
         if let Some(mark) = self.menu {
             match key {
-                Key::Other("enter") => self.mark(mark, cx),
+                Key::Down if self.shufflable_season(mark).is_some() => self.menu_entry = 1,
+                Key::Up => self.menu_entry = 0,
+                Key::Other("enter") => match self.shufflable_season(mark).filter(|_| self.menu_entry == 1) {
+                    Some(id) => self.shuffle_season(id, cx),
+                    None => self.mark(mark, cx),
+                },
                 Key::Other("escape" | "backspace" | "o") => self.menu = None,
                 _ => {}
             }
@@ -311,8 +321,8 @@ impl Detail {
                     self.act(action, cx);
                 }
             }
-            (Focus::Season(i), Key::Other("o")) => self.menu = Some(Mark::Season(i)),
-            (Focus::Episode(i), Key::Other("o")) => self.menu = Some(Mark::Episode(i)),
+            (Focus::Season(i), Key::Other("o")) => self.show_menu(Mark::Season(i)),
+            (Focus::Episode(i), Key::Other("o")) => self.show_menu(Mark::Episode(i)),
             (Focus::Version(i), Key::Other("enter")) => self.choose_version(i, cx),
             (Focus::Season(i), Key::Other("enter")) => self.choose_season(i, cx),
             (Focus::Episode(i), Key::Other("enter" | "p")) => self.play_episode(i, cx),
@@ -350,6 +360,7 @@ impl Detail {
                 play.start_over = true;
                 cx.emit(Play(play));
             }
+            Action::Shuffle => self.shuffle("series", id, cx),
             Action::Watchlist => {
                 let on = !state(|s| s.in_watchlist);
                 let call = async move { client.set_watchlist(&id, on).await };
@@ -419,6 +430,32 @@ impl Detail {
         );
     }
 
+    /// Opens the menu of a season or episode card, with the first entry chosen.
+    fn show_menu(&mut self, mark: Mark) {
+        self.menu = Some(mark);
+        self.menu_entry = 0;
+    }
+
+    /// The id of the season that the menu of `mark` can shuffle: a season card of 2 episodes or more.
+    fn shufflable_season(&self, mark: Mark) -> Option<String> {
+        match mark {
+            Mark::Season(i) => self.seasons.get(i).filter(|s| s.episode_count >= 2).map(|s| s.content_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// Closes the menu and starts a shuffle of the season `id`.
+    fn shuffle_season(&mut self, id: String, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.shuffle("season", id, cx);
+    }
+
+    /// Starts a server shuffle of a series or a season. A failure shows in the notice.
+    fn shuffle(&mut self, kind: &'static str, id: String, cx: &mut Context<Self>) {
+        self.notice = None;
+        self._shuffle = start_shuffle(self.client.clone(), kind, id, cx, |this, err| this.notice = Some(err));
+    }
+
     /// The open menu of a season or episode card. A click on another control moves the focus, and that closes the
     /// menu.
     fn open_menu(&self) -> Option<Mark> {
@@ -440,16 +477,30 @@ impl Detail {
             MouseButton::Right,
             cx.listener(move |this, _, _, cx| {
                 this.focus = focus;
-                this.menu = Some(mark);
+                this.show_menu(mark);
                 cx.notify();
             }),
         );
-        let menu = (self.open_menu() == Some(mark)).then(|| {
-            let label = if watched { "Mark unwatched" } else { "Mark watched" };
-            self.pill(("detail-mark", 0), label.into(), false, focus, cx)
+        let open = self.open_menu() == Some(mark);
+        let entry = |i: usize| open && self.menu_entry == i;
+        let label = if watched { "Mark unwatched" } else { "Mark watched" };
+        let mark_pill = open.then(|| {
+            self.pill(("detail-mark", 0), label.into(), false, entry(0), cx)
                 .on_click(cx.listener(move |this, _, _, cx| this.mark(mark, cx)))
         });
-        div().flex_none().flex().flex_col().items_start().gap(px(6.)).child(card).children(menu)
+        let shuffle_pill = self.shufflable_season(mark).filter(|_| open).map(|id| {
+            self.pill(("detail-shuffle", 0), "Shuffle season".into(), false, entry(1), cx)
+                .on_click(cx.listener(move |this, _, _, cx| this.shuffle_season(id.clone(), cx)))
+        });
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(6.))
+            .child(card)
+            .children(mark_pill)
+            .children(shuffle_pill)
     }
 
     /// Sends a write action. The page shows the new state only when the server saved it. A failure, for example
@@ -558,11 +609,11 @@ impl Detail {
         id: (&'static str, usize),
         label: SharedString,
         primary: bool,
-        focus: Focus,
+        focused: bool,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let t = cx.omarchy();
-        let focused = self.active && self.focus == focus;
+        let focused = self.active && focused;
         div()
             .id(id)
             .clickable()
@@ -589,8 +640,13 @@ impl Detail {
         let glow = artwork_color(item.backdrop_thumbhash.as_deref(), t.accent);
         let background = t.background;
         let buttons = actions(item).into_iter().enumerate().map(|(i, action)| {
-            let mut pill =
-                self.pill(("detail-action", i), action_label(item, action).into(), i == 0, Focus::Action(i), cx);
+            let mut pill = self.pill(
+                ("detail-action", i),
+                action_label(item, action).into(),
+                i == 0,
+                self.focus == Focus::Action(i),
+                cx,
+            );
             if let Action::Rate(_) = action {
                 // A star is a narrow button.
                 pill = pill.px(px(8.));
@@ -732,7 +788,7 @@ impl Detail {
         let pills = self.versions.iter().enumerate().map(|(i, version)| {
             let mark = if i == self.version { "✓ " } else { "" };
             let label = format!("{mark}{}", version_row(version)).into();
-            self.pill(("detail-version", i), label, i == self.version, Focus::Version(i), cx)
+            self.pill(("detail-version", i), label, i == self.version, self.focus == Focus::Version(i), cx)
                 .on_click(cx.listener(move |this, _, _, cx| this.choose_version(i, cx)))
         });
         div().px(px(MARGIN)).flex().flex_wrap().gap(px(8.)).children(pills).into_any_element()
@@ -1188,6 +1244,8 @@ pub enum Action {
         resume: bool,
     },
     StartOver,
+    /// Start a shuffle of the episodes of the series.
+    Shuffle,
     Watchlist,
     Favorite,
     /// Mark watched, or Mark unwatched.
@@ -1197,13 +1255,16 @@ pub enum Action {
     ClearRating,
 }
 
-/// The buttons of the hero. Start over shows only when Resume does, and Clear rating only when the Item has a
-/// rating.
+/// The buttons of the hero. Start over shows only when Resume does, Shuffle only on a series of 2 episodes or more,
+/// and Clear rating only when the Item has a rating.
 pub fn actions(item: &wire::CatalogItemDetail) -> Vec<Action> {
     let resume = item.position_seconds.is_some_and(|position| position > 0.);
     let mut actions = vec![Action::Play { resume }];
     if resume {
         actions.push(Action::StartOver);
+    }
+    if item.type_ == "series" && item.episode_count.is_some_and(|count| count >= 2) {
+        actions.push(Action::Shuffle);
     }
     actions.extend([Action::Watchlist, Action::Favorite, Action::Watched]);
     actions.extend((1..=5).map(Action::Rate));
@@ -1221,6 +1282,7 @@ pub fn action_label(item: &wire::CatalogItemDetail, action: Action) -> String {
         Action::Play { resume: true } => "▶ Resume",
         Action::Play { resume: false } => "▶ Play",
         Action::StartOver => "Start over",
+        Action::Shuffle => "Shuffle",
         Action::Watchlist if on(|s| s.in_watchlist) => "✓ Watchlist",
         Action::Watchlist => "+ Watchlist",
         Action::Favorite if on(|s| s.is_favorite) => "♥ Favorite",
@@ -1667,6 +1729,17 @@ mod tests {
         assert!(actions(&fresh).starts_with(&[Action::Play { resume: false }, Action::Watchlist]));
         let started = detail(json!({"position_seconds": 600.0}));
         assert!(actions(&started).starts_with(&[Action::Play { resume: true }, Action::StartOver, Action::Watchlist]));
+    }
+
+    #[test]
+    fn a_series_of_two_episodes_or_more_offers_shuffle_after_play_and_start_over() {
+        let series = detail(json!({"type": "series", "episode_count": 2, "position_seconds": 600.0}));
+        assert!(actions(&series).starts_with(&[Action::Play { resume: true }, Action::StartOver, Action::Shuffle]));
+        assert_eq!(action_label(&series, Action::Shuffle), "Shuffle");
+        let single = detail(json!({"type": "series", "episode_count": 1}));
+        assert!(!actions(&single).contains(&Action::Shuffle));
+        let movie = detail(json!({"type": "movie", "episode_count": 5}));
+        assert!(!actions(&movie).contains(&Action::Shuffle));
     }
 
     #[test]
