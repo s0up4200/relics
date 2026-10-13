@@ -340,6 +340,8 @@ impl SettingsPage {
                 .border_color(if focused { t.accent } else { t.divider() })
                 .text_color(if n == 1 { t.danger } else { t.foreground })
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    // The open Choice list belongs to the old row. It must close before the row changes.
+                    this.picker = None;
                     this.row = row;
                     this.action = n;
                     this.act(index, n, cx);
