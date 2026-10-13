@@ -14,6 +14,7 @@ use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::click::Clickable as _;
 use crate::keys::Key;
+use crate::sideways::Row;
 
 /// The user pressed p on a card, or Play on the detail page.
 pub struct Play(pub crate::player::PlayItem);
@@ -219,7 +220,7 @@ impl Home {
             return false;
         }
         self.page.scroll_to_reveal_item(row);
-        self.row_scrolls[row].scroll_to_item(col);
+        cards(&self.sections[row]).reveal(&self.row_scrolls[row], col);
         self.focus = focus;
         cx.notify();
         true
@@ -240,10 +241,14 @@ impl Home {
             .into_any_element()
     }
 
-    fn row(&self, index: usize, section: &HomeSection, cx: &Context<Self>) -> AnyElement {
+    /// The row of a section. `viewport` is the width of the window.
+    fn row(&self, index: usize, section: &HomeSection, viewport: f32, cx: &Context<Self>) -> AnyElement {
         let t = cx.omarchy();
         let (width, height) = card_size(&section.section_type, section.featured);
-        let cards = section.items.iter().enumerate().map(|(col, item)| {
+        let card = |col: usize| {
+            let Some(item) = section.items.get(col) else {
+                return self.view_all_card(index, col, (width, height), cx);
+            };
             let focused = self.active && self.focus == Focus::Card { row: index, col };
             let url = art_url(section, item).and_then(|url| self.client.server().url.join(url).ok());
             let thumb = self.thumbs.get(index).and_then(|row| row.get(col)).cloned().flatten();
@@ -260,30 +265,8 @@ impl Home {
                 return self.card_target(index, col, art, cx);
             }
             self.card_target(index, col, card(item, url.map(String::from), thumb, (width, height), focused, t), cx)
-        });
-        let col = section.items.len();
-        let view_all = section.view_all.then(|| {
-            let focused = self.active && self.focus == Focus::Card { row: index, col };
-            div()
-                .id(("view-all", index))
-                .clickable()
-                .w(px(width))
-                .h(px(height))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(12.))
-                .bg(t.surface)
-                .border_2()
-                .border_color(if focused { t.accent } else { gpui::transparent_black() })
-                .text_color(if focused { t.bright } else { t.secondary })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.focus = Focus::Card { row: index, col };
-                    this.view_all(index, cx);
-                }))
-                .child("View all")
-        });
+        };
+        let count = section.items.len() + usize::from(section.view_all);
         div()
             .flex()
             .flex_col()
@@ -297,18 +280,33 @@ impl Home {
                         .child(section.title.clone()),
                 ),
             )
-            .child(
-                div()
-                    .id(("home-row", index))
-                    .px(px(40.))
-                    .flex()
-                    .gap(px(14.))
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&self.row_scrolls[index])
-                    .children(cards)
-                    .children(view_all),
-            )
+            .child(cards(section).build(("home-row", index), &self.row_scrolls[index], count, viewport, card))
+            .into_any_element()
+    }
+
+    /// The "View all" card at the end of a row, the same size as the other cards.
+    fn view_all_card(&self, index: usize, col: usize, (width, height): (f32, f32), cx: &Context<Self>) -> AnyElement {
+        let t = cx.omarchy();
+        let focused = self.active && self.focus == Focus::Card { row: index, col };
+        div()
+            .id(("view-all", index))
+            .clickable()
+            .w(px(width))
+            .h(px(height))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(12.))
+            .bg(t.surface)
+            .border_2()
+            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+            .text_color(if focused { t.bright } else { t.secondary })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.focus = Focus::Card { row: index, col };
+                this.view_all(index, cx);
+            }))
+            .child("View all")
             .into_any_element()
     }
 
@@ -334,13 +332,14 @@ impl Home {
 }
 
 impl Render for Home {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size().width.to_f64() as f32;
         // The list draws only the sections near the viewport. Each row keeps its own sideways scroll.
         let page = list(
             self.page.clone(),
-            cx.processor(|this, index: usize, _, cx| {
+            cx.processor(move |this, index: usize, _, cx| {
                 let item = match this.sections.get(index) {
-                    Some(section) => div().pb(px(36.)).child(this.row(index, section, cx)).into_any_element(),
+                    Some(section) => div().pb(px(36.)).child(this.row(index, section, viewport, cx)).into_any_element(),
                     None => this.status(cx),
                 };
                 div().when(index == 0, |d| d.pt(px(32.))).child(item).into_any_element()
@@ -348,6 +347,12 @@ impl Render for Home {
         );
         div().id("home-page").size_full().child(page.size_full())
     }
+}
+
+/// The size of the row of a section: its cards, the gap between them, and the page margin at each end.
+fn cards(section: &HomeSection) -> Row {
+    let (width, _) = card_size(&section.section_type, section.featured);
+    Row { width, gap: 14., pad: 40. }
 }
 
 /// Continue watching and Next up use 16:9 cards. Other sections use 2:3 posters.
