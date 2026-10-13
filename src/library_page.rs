@@ -106,7 +106,7 @@ impl LibraryPage {
                 // The filter panel works without the values: it has no genre, language, studio, network or
                 // country section then.
                 Err(err) => {
-                    eprintln!("silo-omarchy: cannot read the filter values of library {id}: {err}")
+                    eprintln!("relics: cannot read the filter values of library {id}: {err}")
                 }
             }
         });

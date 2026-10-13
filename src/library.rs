@@ -138,7 +138,7 @@ impl LibraryWindow {
         });
         let state_dir = State::dir();
         let state = State::load(&state_dir).unwrap_or_else(|err| {
-            eprintln!("silo-omarchy: cannot read the state in {}: {err}", state_dir.display());
+            eprintln!("relics: cannot read the state in {}: {err}", state_dir.display());
             State::fresh()
         });
         let device =
@@ -401,13 +401,13 @@ impl LibraryWindow {
         // of the Profile before. When the read fails, playback uses the default Server settings.
         self.opening = Some(cx.spawn_in(window, async move |this, cx| {
             if let Err(err) = client.load_server_settings().await {
-                eprintln!("silo-omarchy: cannot read the Server settings: {err}");
+                eprintln!("relics: cannot read the Server settings: {err}");
             }
             cx.background_spawn({
                 let client = client.clone();
                 async move {
                     if let Err(err) = client.sync_progress().await {
-                        eprintln!("silo-omarchy: progress sync failed: {err}");
+                        eprintln!("relics: progress sync failed: {err}");
                     }
                 }
             })
@@ -599,10 +599,10 @@ impl LibraryWindow {
             if let Ok(Some(tokens)) = secrets::load(&server.id, &account_id).await
                 && let Err(err) = Client::new(http, server.clone(), device, tokens).sign_out().await
             {
-                eprintln!("silo-omarchy: the server sign-out failed: {err}");
+                eprintln!("relics: the server sign-out failed: {err}");
             }
             if let Err(err) = secrets::delete(&server.id, &account_id).await {
-                eprintln!("silo-omarchy: cannot delete the tokens in the Secret Service: {err}");
+                eprintln!("relics: cannot delete the tokens in the Secret Service: {err}");
             }
         })
         .detach();
@@ -656,10 +656,10 @@ impl LibraryWindow {
             stopped.await;
             if sign_out {
                 if let Err(err) = old.sign_out().await {
-                    eprintln!("silo-omarchy: the server sign-out failed: {err}");
+                    eprintln!("relics: the server sign-out failed: {err}");
                 }
                 if let Err(err) = secrets::delete(&key.0, &key.1).await {
-                    eprintln!("silo-omarchy: cannot delete the tokens in the Secret Service: {err}");
+                    eprintln!("relics: cannot delete the tokens in the Secret Service: {err}");
                 }
             }
             this.update(cx, |this, _| this.kept.entry(key).or_default().extend(old.take_pending())).ok();
@@ -771,7 +771,7 @@ impl LibraryWindow {
                     client
                         .sync_progress()
                         .await
-                        .inspect_err(|err| eprintln!("silo-omarchy: progress sync failed: {err}"))
+                        .inspect_err(|err| eprintln!("relics: progress sync failed: {err}"))
                         .ok()
                 }
             })
@@ -807,7 +807,7 @@ impl LibraryWindow {
 
     fn save_state(&self) {
         if let Err(err) = self.state.save(&self.state_dir) {
-            eprintln!("silo-omarchy: cannot write the state in {}: {err}", self.state_dir.display());
+            eprintln!("relics: cannot write the state in {}: {err}", self.state_dir.display());
         }
     }
 
@@ -826,7 +826,7 @@ impl LibraryWindow {
             .flex_col()
             .rounded(px(16.))
             .bg(t.surface)
-            .child(div().text_size(px(28.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("silo"))
+            .child(div().text_size(px(28.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("relics"))
             .child(div().text_size(px(13.)).text_color(t.secondary).child("Server address"))
             .child(input("server-url", &self.url, window, cx))
             .child(
@@ -879,7 +879,7 @@ impl Render for LibraryWindow {
                     .items_center()
                     .gap(px(14.))
                     .child(div().text_size(px(20.)).text_color(t.bright).child(text.clone()))
-                    .child(div().text_color(t.secondary).child("silo-omarchy retries by itself."))
+                    .child(div().text_color(t.secondary).child("Relics retries by itself."))
                     .child(
                         button("retry", "Retry", ButtonVariant::Primary, cx)
                             .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))),

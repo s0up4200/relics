@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, FakeHttpClient, HttpClient, Response, Url};
-use silo_omarchy::api::{Client, Device, Server, Tokens};
+use relics::api::{Client, Device, Server, Tokens};
 
 /// The device id of each test client.
 pub const DEVICE_ID: &str = "6c1f0d3e-0000-4000-8000-000000000001";

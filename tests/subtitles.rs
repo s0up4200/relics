@@ -3,10 +3,10 @@
 //! (silo-server web/src/player/utils/subtitleSort.test.ts). The web
 //! `findPreferredSubtitleIndex` cases go through `always` mode, which uses the same match.
 
+use relics::api::wire::SubtitleInventoryItemV3;
+use relics::playback::subtitles::choose;
+use relics::settings::{ServerSettings, SubtitleMode};
 use serde_json::{Value, json};
-use silo_omarchy::api::wire::SubtitleInventoryItemV3;
-use silo_omarchy::playback::subtitles::choose;
-use silo_omarchy::settings::{ServerSettings, SubtitleMode};
 
 /// A track of the plan subtitle inventory. `fields` replace the defaults.
 fn sub(fields: Value) -> SubtitleInventoryItemV3 {

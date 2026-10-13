@@ -1,11 +1,11 @@
 # Template for the AUR package. The release workflow builds the package from this file.
 # To update the AUR, copy this file to the AUR clone, set pkgver, and run updpkgsums.
-pkgname=silo-omarchy
+pkgname=relics
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Native Silo media player for Omarchy'
+pkgdesc='Unofficial Silo client for Linux. Follows your Omarchy theme.'
 arch=('x86_64')
-url='https://github.com/s0up4200/silo-omarchy'
+url='https://github.com/s0up4200/relics'
 license=('unknown')
 depends=('mpv' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'vulkan-icd-loader' 'gcc-libs' 'glibc')
 makedepends=('cargo' 'clang' 'cmake')
@@ -34,6 +34,6 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
-  install -Dm0644 -t "$pkgdir/usr/share/omarchy/default/hypr/apps/" data/silo-omarchy.lua
-  install -Dm0644 -t "$pkgdir/usr/share/applications/" data/silo-omarchy.desktop
+  install -Dm0644 -t "$pkgdir/usr/share/omarchy/default/hypr/apps/" data/relics.lua
+  install -Dm0644 -t "$pkgdir/usr/share/applications/" data/relics.desktop
 }

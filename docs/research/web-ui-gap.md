@@ -1,6 +1,6 @@
 # Web UI compared with the native app
 
-This file lists what the Silo web UI shows, and what the native app (silo-omarchy) does not show yet.
+This file lists what the Silo web UI shows, and what the native app (Relics) does not show yet.
 The survey used the web UI at s.brr.tf on 2026-10-12, with an administrator account. The survey was read-only.
 
 Terms in this file:

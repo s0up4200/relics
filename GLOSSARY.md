@@ -9,7 +9,7 @@ The one Server and Account pair that the Library window shows now. The app shows
 _Avoid_: current server, selected server
 
 **Library window**:
-The app window where the user browses the Silo library and starts playback. Its app id is `silo-omarchy`.
+The app window where the user browses the Silo library and starts playback. Its app id is `relics`.
 
 **Account**:
 A user's sign-in on one Server. An Account holds the tokens and owns zero or more Profiles. One Server can have several Accounts in the app.

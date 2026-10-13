@@ -41,7 +41,7 @@ pub struct Track {
 /// Reads the `track-list` JSON of mpv. A list that does not parse gives no tracks.
 pub fn parse(json: &str) -> Vec<Track> {
     serde_json::from_str(json).unwrap_or_else(|err| {
-        eprintln!("silo-omarchy: cannot read the mpv track list: {err}");
+        eprintln!("relics: cannot read the mpv track list: {err}");
         Vec::new()
     })
 }

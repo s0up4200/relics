@@ -5,9 +5,9 @@ mod common;
 
 use common::{Log, fixture, json};
 use futures::executor::block_on;
+use relics::api::{Client, Decision, types};
+use relics::playback::{Operation, Replan, Sample};
 use serde_json::{Value, json};
-use silo_omarchy::api::{Client, Decision, types};
-use silo_omarchy::playback::{Operation, Replan, Sample};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 

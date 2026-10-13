@@ -37,7 +37,7 @@ const REVALIDATE_AFTER: Duration = Duration::from_secs(60 * 60);
 const TOUCH_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// The Artwork cache. It keeps an LRU of decoded images in memory, limited by decoded
-/// bytes, and the files in `$XDG_CACHE_HOME/silo-omarchy/artwork/`. GPUI decodes each
+/// bytes, and the files in `$XDG_CACHE_HOME/relics/artwork/`. GPUI decodes each
 /// image from a `Resource::Path`. The app has one Artwork cache, see [`global`]. Views show artwork with [`image`].
 pub struct ArtworkCache {
     this: WeakEntity<Self>,
@@ -119,13 +119,13 @@ pub fn global(cx: &mut App) -> Entity<ArtworkCache> {
     cache
 }
 
-/// `$XDG_CACHE_HOME/silo-omarchy/artwork/`, or `~/.cache/silo-omarchy/artwork/`.
+/// `$XDG_CACHE_HOME/relics/artwork/`, or `~/.cache/relics/artwork/`.
 fn cache_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
-    base.join("silo-omarchy/artwork")
+    base.join("relics/artwork")
 }
 
 impl ArtworkCache {

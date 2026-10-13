@@ -1,5 +1,5 @@
 //! The MPRIS service. While mpv plays, the app owns the bus name
-//! `org.mpris.MediaPlayer2.silo_omarchy`, so the media keys and the desktop media
+//! `org.mpris.MediaPlayer2.relics`, so the media keys and the desktop media
 //! controls reach the Playback session as inputs.
 
 use std::path::Path;
@@ -12,9 +12,9 @@ use crate::playback::Input;
 /// Takes the bus name and gives each MPRIS control to `on_input` as a Playback session input.
 /// The name stays until the `Player` and the task of `Player::run` are dropped.
 pub async fn start(on_input: impl Fn(Input) + Clone + 'static) -> zbus::Result<Player> {
-    let player = Player::builder("silo_omarchy")
-        .identity("Silo")
-        .desktop_entry("silo-omarchy")
+    let player = Player::builder("relics")
+        .identity("Relics")
+        .desktop_entry("relics")
         .can_raise(false)
         .can_quit(false)
         .can_play(true)
@@ -90,7 +90,7 @@ impl From<&wire::CatalogItemDetail> for Track {
             ),
             None => (item.year.map(|year| year.to_string()), None),
         };
-        Self { id: format!("/org/silo_omarchy/item/{hex}"), title: item.title.clone(), artist, album }
+        Self { id: format!("/org/relics/item/{hex}"), title: item.title.clone(), artist, album }
     }
 }
 
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn the_track_id_is_an_object_path_that_keeps_items_apart() {
         let id = |content_id: &str| Track::from(&item(serde_json::json!({"content_id": content_id}))).id;
-        assert_eq!(id("movie:heat-1995"), "/org/silo_omarchy/item/6d6f7669653a686561742d31393935");
+        assert_eq!(id("movie:heat-1995"), "/org/relics/item/6d6f7669653a686561742d31393935");
         assert_ne!(id("movie:a_b"), id("movie:a-b"));
     }
 }

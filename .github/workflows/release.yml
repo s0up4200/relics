@@ -46,7 +46,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           # makepkg uses this file and does not download the source.
-          git archive --prefix="silo-omarchy-$VERSION/" -o "packaging/aur/silo-omarchy-$VERSION.tar.gz" HEAD
+          git archive --prefix="relics-$VERSION/" -o "packaging/aur/relics-$VERSION.tar.gz" HEAD
           sed -i "s/^pkgver=.*/pkgver=$VERSION/" packaging/aur/PKGBUILD
           # makepkg refuses to run as root. --syncdeps installs depends and makedepends, so a missing entry fails here.
           useradd -m builder

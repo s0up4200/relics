@@ -7,8 +7,8 @@ mod common;
 use common::{DEVICE_ID, Reply, Seen, fixture, http, json, not_found, ok, problem, reply, server};
 use futures::executor::block_on;
 use http_client::HttpClient;
-use silo_omarchy::api::{self, Client, Device, Error, Tokens, wire};
-use silo_omarchy::artwork::Rung;
+use relics::api::{self, Client, Device, Error, Tokens, wire};
+use relics::artwork::Rung;
 
 fn device() -> Device {
     Device { id: DEVICE_ID.into(), name: "omarchy-box".into() }

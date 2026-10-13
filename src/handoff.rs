@@ -1,4 +1,4 @@
-//! The hand-off of a Browser sign-in link between processes. The browser starts a second `silo-omarchy` with
+//! The hand-off of a Browser sign-in link between processes. The browser starts a second `relics` with
 //! the `org.siloserver.silo:` link. That process sends the link over a Unix socket to the running app and
 //! quits (ADR 0004).
 
@@ -28,10 +28,10 @@ pub enum Sent {
     NothingWaits,
 }
 
-/// `$XDG_RUNTIME_DIR/silo-omarchy.sock`, or `None` when `$XDG_RUNTIME_DIR` is not set.
+/// `$XDG_RUNTIME_DIR/relics.sock`, or `None` when `$XDG_RUNTIME_DIR` is not set.
 pub fn socket_path() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())?;
-    Some(PathBuf::from(dir).join("silo-omarchy.sock"))
+    Some(PathBuf::from(dir).join("relics.sock"))
 }
 
 /// Sends `link` to the app that listens on `path`.

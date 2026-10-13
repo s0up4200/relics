@@ -114,7 +114,7 @@ impl Surface {
     /// the compositor refuses. Then no Item can play.
     pub fn new(window: &Window) -> Option<Rc<Self>> {
         Self::make(window)
-            .inspect_err(|err| eprintln!("silo-omarchy: no video surface, so no Item can play: {err}"))
+            .inspect_err(|err| eprintln!("relics: no video surface, so no Item can play: {err}"))
             .ok()
             .map(Rc::new)
     }
@@ -165,7 +165,7 @@ impl Surface {
         let (ready, started) = mpsc::channel();
         let (display, surface, wake) = (DisplayPtr(self.display), self.surface.clone(), tx.clone());
         let thread = std::thread::Builder::new()
-            .name("silo-video".into())
+            .name("relics-video".into())
             .spawn(move || {
                 let display = display;
                 run(video, display.0, &surface, size, rx, wake, ready);
@@ -363,11 +363,11 @@ fn run(
             }
         }
         if let Err(err) = context.render::<Arc<Egl>>(0, size.0, size.1, true) {
-            eprintln!("silo-omarchy: mpv cannot draw the video: {err}");
+            eprintln!("relics: mpv cannot draw the video: {err}");
         }
         if let Err(err) = gl.egl.swap_buffers(gl.display, gl.surface) {
             // The thread ends, and the Player view shows no more frames. It must not panic.
-            eprintln!("silo-omarchy: the video cannot show: {err}");
+            eprintln!("relics: the video cannot show: {err}");
             break;
         }
         context.report_swap();

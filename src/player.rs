@@ -282,7 +282,7 @@ impl Controller {
                 // The subtitle delay carries as the Track picker choice does. mpv keeps it, so another Item
                 // resets it.
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.set_sub_delay(0.0)) {
-                    eprintln!("silo-omarchy: cannot reset the subtitle delay: {err}");
+                    eprintln!("relics: cannot reset the subtitle delay: {err}");
                 }
                 Carry::default()
             }
@@ -330,7 +330,7 @@ impl Controller {
                     this.versions = versions;
                     cx.notify();
                 }),
-                Err(err) => return eprintln!("silo-omarchy: cannot read the versions of {content_id}: {err}"),
+                Err(err) => return eprintln!("relics: cannot read the versions of {content_id}: {err}"),
             }
             .ok();
         }));
@@ -347,7 +347,7 @@ impl Controller {
             loop {
                 let trickplay = match client.trickplay(&content_id, &file_id).await {
                     Ok(trickplay) => trickplay,
-                    Err(err) => return eprintln!("silo-omarchy: no seek thumbnails for {content_id}: {err}"),
+                    Err(err) => return eprintln!("relics: no seek thumbnails for {content_id}: {err}"),
                 };
                 let wait = (trickplay.expires_at - chrono::Utc::now() - chrono::TimeDelta::minutes(1))
                     .to_std()
@@ -379,7 +379,7 @@ impl Controller {
                 None => match client.item(&content_id, artwork::Rung::Small).await {
                     Ok(episode) => episode.series_id.zip(episode.season_number),
                     Err(err) => {
-                        eprintln!("silo-omarchy: cannot read the season of {content_id}: {err}");
+                        eprintln!("relics: cannot read the season of {content_id}: {err}");
                         None
                     }
                 },
@@ -396,7 +396,7 @@ impl Controller {
             let episode = |found: Result<Option<wire::Episode>, _>| match found {
                 Ok(found) => found.map(|episode| PlayItem::episode(series_id.clone(), episode)),
                 Err(err) => {
-                    eprintln!("silo-omarchy: cannot find the episode before or after {content_id}: {err}");
+                    eprintln!("relics: cannot find the episode before or after {content_id}: {err}");
                     None
                 }
             };
@@ -425,7 +425,7 @@ impl Controller {
                 .await
             {
                 Ok(item) => item,
-                Err(err) => return eprintln!("silo-omarchy: cannot read {content_id} for MPRIS: {err}"),
+                Err(err) => return eprintln!("relics: cannot read {content_id} for MPRIS: {err}"),
             };
             let poster = item.poster_url.as_deref().filter(|url| !url.is_empty());
             let poster = poster.and_then(|url| client.server().url.join(url).ok()).map(String::from);
@@ -452,7 +452,7 @@ impl Controller {
                     })
                     .ok();
                 }
-                Err(err) => eprintln!("silo-omarchy: cannot download the poster for MPRIS: {err}"),
+                Err(err) => eprintln!("relics: cannot download the poster for MPRIS: {err}"),
             }
         })
     }
@@ -463,7 +463,7 @@ impl Controller {
         self._mpris = Some(cx.spawn(async move |this, cx| {
             let player = match mpris::start(move |input| drop(tx.unbounded_send(input))).await {
                 Ok(player) => Rc::new(player),
-                Err(err) => return eprintln!("silo-omarchy: the media keys do not work: {err}"),
+                Err(err) => return eprintln!("relics: the media keys do not work: {err}"),
             };
             let run = player.run();
             if this
@@ -502,7 +502,7 @@ impl Controller {
                 player.set_metadata(metadata).await
             };
             if let Err(err) = result.await {
-                eprintln!("silo-omarchy: cannot update MPRIS: {err}");
+                eprintln!("relics: cannot update MPRIS: {err}");
             }
         })
         .detach();
@@ -572,7 +572,7 @@ impl Controller {
             Command::Load { url, headers, start, aid } => match self.open_mpv(cx) {
                 Ok(mpv) => {
                     if let Err(err) = mpv.load(&url, &headers, start, aid) {
-                        eprintln!("silo-omarchy: mpv cannot play {url}: {err}");
+                        eprintln!("relics: mpv cannot play {url}: {err}");
                         self.step(Input::LoadFailed, cx);
                     }
                 }
@@ -585,24 +585,24 @@ impl Controller {
             },
             Command::Refresh => self.answer(cx, async move {
                 let access = client.refresh_access().await;
-                Input::Refreshed(access.inspect_err(|err| eprintln!("silo-omarchy: token refresh failed: {err}")).ok())
+                Input::Refreshed(access.inspect_err(|err| eprintln!("relics: token refresh failed: {err}")).ok())
             }),
             Command::Replan(replan) => self.answer(cx, async move {
                 let decision = client.replan(&replan).await;
-                Input::Replanned(decision.inspect_err(|err| eprintln!("silo-omarchy: replan failed: {err}")).ok())
+                Input::Replanned(decision.inspect_err(|err| eprintln!("relics: replan failed: {err}")).ok())
             }),
             // The client keeps the position of a failed report and sends it with syncProgress later.
             Command::Progress { session_id, sample } => cx
                 .background_spawn(async move {
                     if let Err(err) = client.report_progress(&session_id, &sample).await {
-                        eprintln!("silo-omarchy: progress report failed: {err}");
+                        eprintln!("relics: progress report failed: {err}");
                     }
                 })
                 .detach(),
             Command::Stop { session_id, sample } => {
                 let stop = cx.background_spawn(async move {
                     if let Err(err) = client.stop_playback(&session_id, sample.as_ref()).await {
-                        eprintln!("silo-omarchy: stop report failed: {err}");
+                        eprintln!("relics: stop report failed: {err}");
                     }
                 });
                 if let Some(older) = self.stopping.replace(stop) {
@@ -611,24 +611,24 @@ impl Controller {
             }
             Command::AddSubtitle { url, title, language } => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_subtitle(&url, &title, &language)) {
-                    eprintln!("silo-omarchy: cannot add the subtitles {url}: {err}");
+                    eprintln!("relics: cannot add the subtitles {url}: {err}");
                 }
             }
             Command::SelectSubtitle(sid) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.select_subtitle(sid)) {
-                    eprintln!("silo-omarchy: cannot show subtitle track {sid:?}: {err}");
+                    eprintln!("relics: cannot show subtitle track {sid:?}: {err}");
                 }
             }
             Command::SelectAudio(aid) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.select_audio(aid)) {
-                    eprintln!("silo-omarchy: cannot play audio track {aid}: {err}");
+                    eprintln!("relics: cannot play audio track {aid}: {err}");
                 }
             }
             Command::ShowMarkers(markers) => self.markers = markers,
             Command::ShowPrompt(label) => self.prompt = label,
             Command::Seek(position) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.seek(position)) {
-                    eprintln!("silo-omarchy: cannot seek to {position}: {err}");
+                    eprintln!("relics: cannot seek to {position}: {err}");
                 }
             }
             Command::PlayNext => {
@@ -654,7 +654,7 @@ impl Controller {
             }
             Command::SetPause(paused) => {
                 if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.set_pause(paused)) {
-                    eprintln!("silo-omarchy: cannot pause or play: {err}");
+                    eprintln!("relics: cannot pause or play: {err}");
                 }
             }
             Command::UpNext(left) => self.up_next = left,
@@ -798,7 +798,7 @@ impl Controller {
 
     pub fn add_volume(&mut self, delta: f64, cx: &mut Context<Self>) {
         if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_volume(delta)) {
-            eprintln!("silo-omarchy: cannot change the volume: {err}");
+            eprintln!("relics: cannot change the volume: {err}");
         }
         cx.notify();
     }
@@ -810,14 +810,14 @@ impl Controller {
 
     pub fn add_sub_delay(&mut self, delta: f64, cx: &mut Context<Self>) {
         if let Some(Err(err)) = self.mpv.as_ref().map(|mpv| mpv.add_sub_delay(delta)) {
-            eprintln!("silo-omarchy: cannot change the subtitle delay: {err}");
+            eprintln!("relics: cannot change the subtitle delay: {err}");
         }
         cx.notify();
     }
 
     pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
         if let Some(Err(err)) = self.mpv.as_ref().map(mpv::Player::toggle_mute) {
-            eprintln!("silo-omarchy: cannot mute: {err}");
+            eprintln!("relics: cannot mute: {err}");
         }
         cx.notify();
     }

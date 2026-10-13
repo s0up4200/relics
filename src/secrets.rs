@@ -5,10 +5,10 @@ use anyhow::Result;
 
 use crate::api::Tokens;
 
-const LABEL: &str = "silo-omarchy sign-in";
+const LABEL: &str = "Relics sign-in";
 
 fn attributes<'a>(server_id: &'a str, account_id: &'a str) -> Vec<(&'static str, &'a str)> {
-    vec![("application", "silo-omarchy"), ("server_id", server_id), ("account_id", account_id)]
+    vec![("application", "relics"), ("server_id", server_id), ("account_id", account_id)]
 }
 
 /// Fails when the Secret Service is missing or stays locked.
@@ -39,7 +39,7 @@ pub async fn save(server_id: &str, account_id: &str, tokens: &Tokens) -> Result<
 
 fn pin_attributes<'a>(server_id: &'a str, account_id: &'a str, profile_id: &'a str) -> Vec<(&'static str, &'a str)> {
     vec![
-        ("application", "silo-omarchy-pin"),
+        ("application", "relics-pin"),
         ("server_id", server_id),
         ("account_id", account_id),
         ("profile_id", profile_id),
@@ -61,7 +61,7 @@ pub async fn save_pin_token(server_id: &str, account_id: &str, profile_id: &str,
     let keyring = oo7::Keyring::new().await?;
     keyring.unlock().await?;
     let attributes = pin_attributes(server_id, account_id, profile_id);
-    keyring.create_item("silo-omarchy PIN token", &attributes, token, true).await?;
+    keyring.create_item("Relics PIN token", &attributes, token, true).await?;
     Ok(())
 }
 
@@ -71,7 +71,7 @@ pub async fn delete(server_id: &str, account_id: &str) -> Result<()> {
     keyring.unlock().await?;
     // A search matches each item that has these attributes, so the PIN items of all Profiles go too.
     keyring.delete(&attributes(server_id, account_id)).await?;
-    let pins = vec![("application", "silo-omarchy-pin"), ("server_id", server_id), ("account_id", account_id)];
+    let pins = vec![("application", "relics-pin"), ("server_id", server_id), ("account_id", account_id)];
     keyring.delete(&pins).await?;
     Ok(())
 }

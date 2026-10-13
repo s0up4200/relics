@@ -5,7 +5,7 @@ mod common;
 
 use common::{fake, json, not_found, ok};
 use futures::executor::block_on;
-use silo_omarchy::artwork::Rung;
+use relics::artwork::Rung;
 
 #[test]
 fn the_detail_page_reads_the_item_with_large_artwork() {

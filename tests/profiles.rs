@@ -7,7 +7,7 @@ mod common;
 use common::{fixture, http, ok, problem};
 use futures::FutureExt as _;
 use futures::executor::block_on;
-use silo_omarchy::api::{self, Client, Error, PinCheck, wire};
+use relics::api::{self, Client, Error, PinCheck, wire};
 
 /// A fake Silo server at `https://silo.test/` and a client of it with no Profile.
 fn client(reply: impl Fn(&common::Seen) -> common::Reply + Send + Sync + 'static) -> (Client, common::Log) {

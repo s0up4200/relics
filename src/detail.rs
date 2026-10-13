@@ -161,7 +161,7 @@ impl Detail {
         let (client, id) = (self.client.clone(), self.id.clone());
         self._similar = cx.spawn(async move |this, cx| {
             let items = client.similar(&id).await.unwrap_or_else(|err| {
-                eprintln!("silo-omarchy: cannot read the Items like {id}: {err}");
+                eprintln!("relics: cannot read the Items like {id}: {err}");
                 Vec::new()
             });
             this.update(cx, |this, cx| {

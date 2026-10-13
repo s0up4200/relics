@@ -5,10 +5,10 @@ mod common;
 
 use common::{fake, not_found, ok};
 use futures::executor::block_on;
+use relics::artwork::Rung;
+use relics::browse::{Facet, SortField};
+use relics::search;
 use serde_json::json;
-use silo_omarchy::artwork::Rung;
-use silo_omarchy::browse::{Facet, SortField};
-use silo_omarchy::search;
 
 #[test]
 fn the_people_row_asks_for_video_people_that_match_the_text() {

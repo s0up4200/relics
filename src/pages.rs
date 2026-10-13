@@ -201,7 +201,7 @@ impl Pages {
                 .ok();
             }
             // The sidebar shows Home only. It reads the list again when it gets the focus.
-            Err(err) => eprintln!("silo-omarchy: cannot read the libraries: {err}"),
+            Err(err) => eprintln!("relics: cannot read the libraries: {err}"),
         });
     }
 
@@ -610,7 +610,7 @@ impl Pages {
                     .text_size(px(22.))
                     .font_weight(FontWeight::EXTRA_BOLD)
                     .text_color(t.bright)
-                    .child(if rail { "s" } else { "silo" }),
+                    .child(if rail { "r" } else { "relics" }),
             )
             .children(rows)
             .child(div().flex_1())

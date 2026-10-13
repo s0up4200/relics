@@ -5,9 +5,9 @@ use gpui::{
     AppContext as _, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, px, size,
 };
+use relics::handoff;
+use relics::library::LibraryWindow;
 use reqwest_client::ReqwestClient;
-use silo_omarchy::handoff;
-use silo_omarchy::library::LibraryWindow;
 
 // The sidebar and Player view icons that the default gpui-kit bundle does not have.
 gpui_kit::assets::icon_assets!(
@@ -71,19 +71,19 @@ fn main() {
     }
     let links = socket.and_then(|socket| {
         handoff::listen(&socket)
-            .inspect_err(|err| eprintln!("silo-omarchy: cannot listen on {}: {err}", socket.display()))
+            .inspect_err(|err| eprintln!("relics: cannot listen on {}: {err}", socket.display()))
             .ok()
     });
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_omarchy::init(cx);
-        let user_agent = concat!("silo-omarchy/", env!("CARGO_PKG_VERSION"));
+        let user_agent = concat!("relics/", env!("CARGO_PKG_VERSION"));
         let http = ReqwestClient::proxy_and_user_agent(gpui::http_client::read_proxy_from_env(), user_agent)
             .expect("create the HTTP client");
         cx.set_http_client(Arc::new(http));
         cx.open_window(
             WindowOptions {
-                app_id: Some("silo-omarchy".into()),
-                titlebar: Some(TitlebarOptions { title: Some("Silo".into()), ..Default::default() }),
+                app_id: Some("relics".into()),
+                titlebar: Some(TitlebarOptions { title: Some("Relics".into()), ..Default::default() }),
                 // The Player view leaves a transparent hole where the video shows (ADR 0003).
                 window_background: WindowBackgroundAppearance::Transparent,
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1400.), px(900.)), cx))),
