@@ -125,6 +125,10 @@ _Avoid_: disconnected, down
 The list in the Player view where the user picks the audio track or the subtitle track.
 _Avoid_: track menu, cycle
 
+**Choice list**:
+A list where the user picks one value. A check mark shows the current value. j/k move, Enter or a click picks, Escape closes. The Track picker and the Quality list in the Player view are Choice lists, and so is the list of a Server setting on the Settings page.
+_Avoid_: selector, dropdown, menu
+
 **Chapter**:
 A titled time range of a file version, from the file. The Chapters list in the Player view seeks to the start of a chapter. A chapter is not a Marker.
 

@@ -6,21 +6,24 @@
 //! - Player: the hardware decoding Local setting.
 //! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
 //!
-//! j/k move between the rows. l, Right or Enter gives the next value, h or Left the previous one. On an
-//! Account row h/l choose Sign out or Remove, and Enter does it.
+//! j/k move between the rows. l or Right gives the next value, h or Left the previous one. Enter or a click
+//! on a setting with more than two choices opens the list of its choices below the row. In the list j/k move,
+//! Enter or a click picks the choice, and Escape, Backspace or h closes it. Enter on an On/Off setting toggles it.
+//! On an Account row h/l choose Sign out or Remove, and Enter does it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
+    App, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use serde_json::Value;
 
 use crate::api::Client;
+use crate::choice_list::{Choice, ChoiceList, Outcome};
 use crate::click::Clickable as _;
 use crate::keys::Key;
 use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
@@ -65,6 +68,8 @@ pub struct SettingsPage {
     row: usize,
     /// On an Account row: 0 is Sign out, 1 is Remove.
     action: usize,
+    /// The open Choice list below the focused row.
+    picker: Option<ChoiceList>,
     /// The page has the keyboard focus.
     pub active: bool,
     _load: Task<()>,
@@ -91,6 +96,7 @@ impl SettingsPage {
             local: LocalSettings::load(&LocalSettings::dir()),
             row: 0,
             action: 0,
+            picker: None,
             active: true,
             _load: Task::ready(()),
             writes: HashMap::new(),
@@ -121,14 +127,56 @@ impl SettingsPage {
         FIRST_PAIR + self.pairs.len()
     }
 
+    /// The choices of a Server setting. They are empty before the page read the settings.
+    fn options(&self, index: usize) -> Vec<(Value, String)> {
+        let Some(server) = &self.server else {
+            return Vec::new();
+        };
+        settings::options(KEYS[index], &server.value(KEYS[index]))
+    }
+
     /// Changes a Server setting by `delta` choices and writes it.
     fn change(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
+        if let Some(server) = &self.server {
+            let old = server.value(KEYS[index]);
+            self.set(index, step(&self.options(index), &old, delta), cx);
+        }
+    }
+
+    /// The choices of a Server setting as the rows of a Choice list.
+    fn choices(&self, index: usize) -> Vec<Choice> {
+        let Some(server) = &self.server else {
+            return Vec::new();
+        };
+        let current = server.value(KEYS[index]);
+        self.options(index).into_iter().map(|(value, label)| Choice::new(label, value == current)).collect()
+    }
+
+    /// Enter on a Server setting: it opens the Choice list, or toggles an On/Off setting.
+    fn open_picker(&mut self, index: usize, cx: &mut Context<Self>) {
+        let choices = self.choices(index);
+        if choices.len() <= 2 {
+            return self.change(index, 1, cx);
+        }
+        self.picker = Some(ChoiceList::open(&choices));
+    }
+
+    /// Picks the choice at `focus` in the open list, and closes the list.
+    fn pick(&mut self, focus: usize, cx: &mut Context<Self>) {
+        self.picker = None;
+        if let Some((value, _)) = self.options(self.row).into_iter().nth(focus) {
+            self.set(self.row, value, cx);
+        }
+        cx.notify();
+    }
+
+    /// Sets a Server setting and writes it.
+    fn set(&mut self, index: usize, new: Value, cx: &mut Context<Self>) {
         let Some(server) = &mut self.server else {
             return;
         };
         let key = KEYS[index];
         let old = server.value(key);
-        let new = step(&settings::options(key, &old), &old, delta);
         server.set(key, &new);
         self.message = None;
         let client = self.client.clone();
@@ -181,6 +229,18 @@ impl SettingsPage {
     /// A key while the page has the focus. Returns false for a key that the page does not use.
     pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
         let row = self.row;
+        if self.picker.is_some() {
+            let len = self.options(row).len();
+            let outcome = self.picker.as_mut().map_or(Outcome::Unused, |picker| picker.key(key, len));
+            match outcome {
+                Outcome::Moved => {}
+                Outcome::Picked(index) => self.pick(index, cx),
+                Outcome::Closed => self.picker = None,
+                Outcome::Unused => return false,
+            }
+            cx.notify();
+            return true;
+        }
         match key {
             Key::Down => {
                 self.row = (row + 1).min(self.add_row());
@@ -192,7 +252,8 @@ impl SettingsPage {
             }
             Key::Other("r") if self.load_error.is_some() => self.load(cx),
             _ if row < HWDEC_ROW => match key {
-                Key::Right | Key::Other("enter") => self.change(row, 1, cx),
+                Key::Right => self.change(row, 1, cx),
+                Key::Other("enter") => self.open_picker(row, cx),
                 Key::Left => self.change(row, -1, cx),
                 _ => return false,
             },
@@ -217,7 +278,8 @@ impl SettingsPage {
             .child(text)
     }
 
-    /// One row: a label on the left and a value on the right. A click acts like Enter.
+    /// One row: a label on the left and a value on the right. A click acts like Enter. A click on the row of
+    /// the open list closes the list.
     fn row(&self, row: usize, label: SharedString, value: SharedString, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
         let focused = self.active && self.row == row;
@@ -235,11 +297,31 @@ impl SettingsPage {
             .border_2()
             .border_color(if focused { t.accent } else { gpui::transparent_black() })
             .on_click(cx.listener(move |this, _, _, cx| {
+                let close = this.picker.take().is_some() && this.row == row;
                 this.row = row;
-                this.key(Key::Other("enter"), cx);
+                if !close {
+                    this.key(Key::Other("enter"), cx);
+                }
+                cx.notify();
             }))
             .child(div().flex_1().truncate().child(label))
             .child(div().text_color(t.bright).child(value))
+    }
+
+    /// The open Choice list below a row, with a maximum height. A click on a choice picks it.
+    fn picker(&self, picker: &ChoiceList, choices: Vec<Choice>, cx: &Context<Self>) -> impl IntoElement {
+        let t = cx.omarchy();
+        let this = cx.entity().downgrade();
+        let on_pick = move |i, _: &mut Window, cx: &mut App| {
+            this.update(cx, |this, cx| this.pick(i, cx)).ok();
+        };
+        picker
+            .render("settings-choice", choices, on_pick, cx)
+            .max_w(px(720.))
+            .max_h(px(320.))
+            .p(px(6.))
+            .rounded(px(10.))
+            .bg(t.surface)
     }
 
     fn pair_row(&self, index: usize, pair: &Pair, cx: &Context<Self>) -> impl IntoElement {
@@ -295,12 +377,17 @@ impl Render for SettingsPage {
             Some(server) => KEYS
                 .iter()
                 .enumerate()
-                .map(|(row, key)| {
+                .flat_map(|(row, key)| {
                     let current = server.value(key);
                     let options = settings::options(key, &current);
                     let value = options.into_iter().find(|(v, _)| *v == current).map(|(_, l)| l).unwrap_or_default();
-                    self.row(row, settings::label(key).into(), value.into(), cx).into_any_element()
+                    let picker = self.picker.as_ref().filter(|_| self.row == row);
+                    [
+                        Some(self.row(row, settings::label(key).into(), value.into(), cx).into_any_element()),
+                        picker.map(|picker| self.picker(picker, self.choices(row), cx).into_any_element()),
+                    ]
                 })
+                .flatten()
                 .collect(),
             None => {
                 let retry = button("settings-retry", "Retry", ButtonVariant::Secondary, &*cx)

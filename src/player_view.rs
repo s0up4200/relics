@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollHandle,
+    AnyElement, App, Bounds, ClickEvent, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollDelta,
     ScrollWheelEvent, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, canvas, div, px, relative,
 };
 use gpui_omarchy::{ActiveTheme as _, IconName, icon};
 
 use crate::api::types::{Delivery, StreamProtocol};
 use crate::api::wire;
+use crate::choice_list::{Choice, ChoiceList, Outcome};
 use crate::click::Clickable as _;
 use crate::filter_panel::bar_pill;
 use crate::keys::Key;
@@ -113,21 +114,10 @@ impl List {
     }
 }
 
-/// An open list and its keyboard focus.
+/// An open list and its Choice list.
 struct Picker {
     list: List,
-    focus: usize,
-    scroll: ScrollHandle,
-}
-
-/// One row of a picker.
-pub struct Row {
-    pub label: String,
-    /// The second line, for example the codec and the channels.
-    pub detail: String,
-    pub tags: Vec<&'static str>,
-    /// The row plays now.
-    pub current: bool,
+    choices: ChoiceList,
 }
 
 impl PlayerView {
@@ -237,7 +227,7 @@ impl PlayerView {
     }
 
     /// The rows of `list` and the value that a pick of each one sends.
-    fn rows(&self, list: List, cx: &Context<Self>) -> Vec<(Pick, Row)> {
+    fn rows(&self, list: List, cx: &Context<Self>) -> Vec<(Pick, Choice)> {
         let player = self.player.read(cx);
         let tracks =
             |kind| track_rows(player.tracks(), kind).into_iter().map(|(id, row)| (Pick::Track(id), row)).collect();
@@ -280,33 +270,24 @@ impl PlayerView {
         if self.picker.as_ref().is_some_and(|picker| picker.list == list) {
             self.picker = None;
         } else {
-            let focus = self.rows(list, cx).iter().position(|(_, row)| row.current).unwrap_or(0);
-            let scroll = ScrollHandle::new();
-            scroll.scroll_to_item(focus);
-            self.picker = Some(Picker { list, focus, scroll });
+            let rows: Vec<_> = self.rows(list, cx).into_iter().map(|(_, row)| row).collect();
+            self.picker = Some(Picker { list, choices: ChoiceList::open(&rows) });
         }
         cx.notify();
     }
 
-    /// The keys of an open picker: Up, Down and Enter. Returns false for a key that the picker does not use.
-    fn picker_key(&mut self, key: &Key, cx: &mut Context<Self>) -> bool {
-        let Some(picker) = &self.picker else {
+    /// The keys of an open picker. Returns false for a key that the picker does not use.
+    fn picker_key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
+        let Some(list) = self.picker.as_ref().map(|picker| picker.list) else {
             return false;
         };
-        let (list, focus) = (picker.list, picker.focus);
-        let last = self.rows(list, cx).len().saturating_sub(1);
-        let focus = match key {
-            Key::Up => focus.saturating_sub(1),
-            Key::Down => (focus + 1).min(last),
-            Key::Other("enter") => {
-                self.pick(focus, cx);
-                return true;
-            }
-            _ => return false,
-        };
-        if let Some(picker) = &mut self.picker {
-            picker.focus = focus;
-            picker.scroll.scroll_to_item(focus);
+        let len = self.rows(list, cx).len();
+        let outcome = self.picker.as_mut().map_or(Outcome::Unused, |picker| picker.choices.key(key, len));
+        match outcome {
+            Outcome::Moved => {}
+            Outcome::Picked(index) => self.pick(index, cx),
+            Outcome::Closed => self.picker = None,
+            Outcome::Unused => return false,
         }
         cx.notify();
         true
@@ -315,7 +296,7 @@ impl PlayerView {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.wake(cx);
         let key = Key::parse(&event.keystroke.key);
-        if self.picker_key(&key, cx) {
+        if self.picker_key(key, cx) {
             return cx.stop_propagation();
         }
         match key {
@@ -626,48 +607,19 @@ impl PlayerView {
         [top.into_any_element(), bottom.into_any_element()]
     }
 
-    /// The open picker over the video, above the bottom bar. A click on a row moves the focus to it and picks it,
-    /// as Enter does.
+    /// The open picker over the video, above the bottom bar. A click on a row picks it, as Enter does.
     fn picker(&self, picker: &Picker, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
-        let rows = self.rows(picker.list, cx);
+        let rows: Vec<_> = self.rows(picker.list, cx).into_iter().map(|(_, row)| row).collect();
         let empty = rows.is_empty();
-        let rows = rows.into_iter().enumerate().map(|(i, (_, row))| {
-            let tags = row.tags.into_iter().map(|tag| {
-                div().px(px(6.)).rounded(px(4.)).bg(t.inset).text_size(px(11.)).text_color(t.secondary).child(tag)
-            });
-            div()
-                .id(("picker-row", i))
-                .clickable()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(12.))
-                .py(px(8.))
-                .rounded(px(8.))
-                .when(i == picker.focus, |row| row.bg(t.selection))
-                // The mark of the row that plays now.
-                .child(div().w(px(16.)).when(row.current, |mark| mark.child(icon(IconName::Check).size(px(16.)))))
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div().flex().flex_wrap().gap(px(6.)).text_color(t.bright).child(row.label).children(tags),
-                        )
-                        .when(!row.detail.is_empty(), |text| {
-                            text.child(div().text_size(px(12.)).text_color(t.secondary).child(row.detail))
-                        }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.wake(cx);
-                    if let Some(picker) = &mut this.picker {
-                        picker.focus = i;
-                    }
-                    this.pick(i, cx);
-                }))
-        });
+        let this = cx.entity().downgrade();
+        let on_pick = move |i, _: &mut Window, cx: &mut App| {
+            this.update(cx, |this, cx| {
+                this.wake(cx);
+                this.pick(i, cx);
+            })
+            .ok();
+        };
         div()
             .id("picker")
             .absolute()
@@ -684,15 +636,7 @@ impl PlayerView {
             .bg(t.surface)
             .child(div().px(px(12.)).py(px(6.)).text_color(t.secondary).child(picker.list.title()))
             .when(empty, |list| list.child(div().px(px(12.)).py(px(8.)).text_color(t.secondary).child("None")))
-            .child(
-                div()
-                    .id("picker-rows")
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .track_scroll(&picker.scroll)
-                    .children(rows),
-            )
+            .child(picker.choices.render("picker-rows", rows, on_pick, cx))
             .when(picker.list == List::Subtitles, |list| list.child(self.delay(cx)))
     }
 
@@ -889,15 +833,15 @@ impl Render for PlayerView {
 
 /// The Track picker rows of the tracks of `kind`, with the mpv track id that a pick sends. The subtitle list
 /// starts with Off, whose pick sends `None`.
-pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Row)> {
+pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Choice)> {
     let of_kind = || tracks.iter().filter(move |track| track.kind == kind);
     let rows = of_kind().map(|track| {
-        let row = Row { label: track.label(), detail: track.detail(), tags: track.tags(), current: track.selected };
+        let row = Choice { label: track.label(), detail: track.detail(), tags: track.tags(), current: track.selected };
         (Some(track.id), row)
     });
     let off = (kind == Kind::Sub).then(|| {
         let current = !of_kind().any(|track| track.selected);
-        (None, Row { label: "Off".into(), detail: String::new(), tags: Vec::new(), current })
+        (None, Choice { label: "Off".into(), detail: String::new(), tags: Vec::new(), current })
     });
     off.into_iter().chain(rows).collect()
 }
@@ -905,12 +849,12 @@ pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Row)> {
 /// The rows of the Quality list: the file versions when the Item has more than one, then the steps of the
 /// Quality ladder when the plan offers more than one. A pick of a version sends its file id, a pick of a step its
 /// label.
-pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, quality: &str) -> Vec<(Pick, Row)> {
+pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, quality: &str) -> Vec<(Pick, Choice)> {
     let ladder = &plan.available_qualities;
     // The Version tag tells a version from a ladder step, so it shows only when the list has both.
     let tags = if ladder.len() > 1 { vec!["Version"] } else { Vec::new() };
     let versions = versions.iter().filter(|_| versions.len() > 1).map(|version| {
-        let row = Row {
+        let row = Choice {
             label: detail::version_row(version),
             detail: version.edition_raw.clone().unwrap_or_default(),
             tags: tags.clone(),
@@ -919,7 +863,7 @@ pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, q
         (Pick::Version(version.file_id.to_string()), row)
     });
     let steps = ladder.iter().filter(|_| ladder.len() > 1).map(|step| {
-        let row = Row {
+        let row = Choice {
             label: step_name(step),
             detail: step.bitrate_kbps.map(bitrate).unwrap_or_default(),
             tags: Vec::new(),
@@ -933,7 +877,7 @@ pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, q
 /// The rows of the Chapters list. `offset` is the source time where player time starts, and `position` the
 /// player position. A pick sends the chapter start in player time; a chapter that starts before the stream
 /// seeks to its start. The detail is the start in the file, and the row of the chapter that plays is current.
-pub fn chapter_rows(chapters: &[wire::VersionChapter], offset: f64, position: Option<f64>) -> Vec<(Pick, Row)> {
+pub fn chapter_rows(chapters: &[wire::VersionChapter], offset: f64, position: Option<f64>) -> Vec<(Pick, Choice)> {
     let source = position.map(|position| position + offset);
     chapters
         .iter()
@@ -944,7 +888,7 @@ pub fn chapter_rows(chapters: &[wire::VersionChapter], offset: f64, position: Op
                 title => title.to_string(),
             };
             let current = source.is_some_and(|source| chapter.start_seconds <= source && source < chapter.end_seconds);
-            let row = Row { label, detail: clock(chapter.start_seconds), tags: Vec::new(), current };
+            let row = Choice { label, detail: clock(chapter.start_seconds), tags: Vec::new(), current };
             (Pick::Chapter((chapter.start_seconds - offset).max(0.0)), row)
         })
         .collect()
