@@ -346,7 +346,7 @@ fn run(
     };
     context.set_update_callback(move || drop(wake.send(Msg::Redraw)));
     ready.send(Ok(())).ok();
-    while let Ok(first) = rx.recv() {
+    'frames: while let Ok(first) = rx.recv() {
         // One frame for all the queued messages.
         let mut answers = Vec::new();
         for msg in std::iter::once(first).chain(rx.try_iter()) {
@@ -359,7 +359,7 @@ fn run(
                     }
                     answers.push(done);
                 }
-                Msg::Stop => return,
+                Msg::Stop => break 'frames,
             }
         }
         if let Err(err) = context.render::<Arc<Egl>>(0, size.0, size.1, true) {
@@ -367,11 +367,15 @@ fn run(
         }
         if let Err(err) = gl.egl.swap_buffers(gl.display, gl.surface) {
             // The thread ends, and the Player view shows no more frames. It must not panic.
-            return eprintln!("silo-omarchy: the video cannot show: {err}");
+            eprintln!("silo-omarchy: the video cannot show: {err}");
+            break;
         }
         context.report_swap();
         for done in answers {
             done.send(()).ok();
         }
     }
+    // libmpv2 frees the update callback before it stops mpv, and mpv can call the callback in between. The swap
+    // waits until mpv is not in the old callback. The empty callback that libmpv2 frees later owns no memory.
+    context.set_update_callback(|| {});
 }
