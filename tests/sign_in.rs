@@ -207,6 +207,32 @@ fn home_follows_the_layout_order_and_marks_featured_and_view_all() {
     );
 }
 
+#[test]
+fn home_drops_a_section_with_no_items() {
+    let layout = serde_json::json!({"sections": [
+        section("recommended", "Recommended for You", false),
+        section("recently_added", "Recently Added", false),
+        section("because_you_watched", "Because You Watched", false),
+    ]});
+    // The server sends Recommended for You with no items, and does not send Because You Watched.
+    let mut recommended = section("recommended", "Recommended for You", false);
+    recommended["items"] = serde_json::json!([]);
+    recommended["total_count"] = 0.into();
+    let mut recent = section("recently_added", "Recently Added", false);
+    recent["items"] = serde_json::json!([item("Heat")]);
+    recent["total_count"] = 1.into();
+    let sections = serde_json::json!({"sections": [recommended, recent]});
+    let (http, _) = http(move |req| match req.path.as_str() {
+        "home/layout" => json(200, layout.to_string()),
+        "home/sections?image_size=small" => json(200, sections.to_string()),
+        _ => reply(404, "text/plain", String::new()),
+    });
+    let client = signed_in(http, "acc");
+    client.set_profile(Some("p-owner".into()));
+    let home = block_on(client.home(|_| Rung::Small)).unwrap();
+    assert_eq!(home.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Recently Added"]);
+}
+
 fn profile(id: &str, has_pin: bool) -> wire::Profile {
     let mut profile: serde_json::Value =
         serde_json::from_str::<serde_json::Value>(&fixture("list_profiles_ok.json")).unwrap()["items"][0].clone();
