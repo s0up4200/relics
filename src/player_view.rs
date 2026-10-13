@@ -10,8 +10,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-    StatefulInteractiveElement as _, Styled, Subscription, Task, Window, canvas, div, px, relative,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, canvas, div, px, relative,
 };
 use gpui_omarchy::{ActiveTheme as _, IconName, icon};
 
@@ -59,6 +59,10 @@ pub struct PlayerView {
     scrolled: f32,
     /// The bounds of the seek bar in the last frame, for a click on it.
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The bounds of the volume bar, from its last paint.
+    volume_bar: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The left button went down on the volume bar and is still down.
+    volume_drag: bool,
     /// The mouse is over the seek bar, this many pixels from its left edge.
     hover: Option<f32>,
     /// The view made the window fullscreen, so it leaves fullscreen when it closes.
@@ -139,6 +143,8 @@ impl PlayerView {
             mouse: None,
             scrolled: 0.0,
             bar: Rc::default(),
+            volume_bar: Rc::default(),
+            volume_drag: false,
             hover: None,
             fullscreen: false,
             picker: None,
@@ -340,6 +346,11 @@ impl PlayerView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // A drag that started on the volume bar keeps setting the volume, also outside the bar.
+        self.volume_drag &= event.dragging();
+        if self.volume_drag {
+            self.set_volume(event.position.x, cx);
+        }
         if self.mouse.replace(event.position) != Some(event.position) {
             self.wake(cx);
         }
@@ -387,6 +398,23 @@ impl PlayerView {
         };
         let x = f32::from(event.position().x - bounds.origin.x);
         self.step(Input::SetPosition(seek_target(x, f32::from(bounds.size.width), duration)), cx);
+    }
+
+    /// A press on the volume bar sets the volume to the press point, and a drag from there follows the mouse.
+    fn press_volume(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        self.wake(cx);
+        self.volume_drag = true;
+        self.set_volume(event.position.x, cx);
+    }
+
+    /// Sets the volume from 0 % to 100 %, by the point `x` of the volume bar.
+    fn set_volume(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let (Some(bounds), Some((volume, _))) = (self.volume_bar.get(), self.player.read(cx).volume()) else {
+            return;
+        };
+        let x = f32::from(x - bounds.origin.x);
+        self.add_volume(seek_target(x, f32::from(bounds.size.width), 100.0) - volume, cx);
     }
 
     fn hover_bar(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -468,10 +496,37 @@ impl PlayerView {
                 None => (IconName::Volume2, String::new()),
             },
         );
+        let level = match player.volume() {
+            Some((volume, false)) => (volume / 100.0).clamp(0.0, 1.0) as f32,
+            _ => 0.0,
+        };
+        let volume_bounds = self.volume_bar.clone();
+        let volume_bar =
+            div()
+                .id("volume-bar")
+                .clickable()
+                .relative()
+                .w(px(80.))
+                .h(px(16.))
+                .flex()
+                .items_center()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::press_volume))
+                // The wheel changes the volume only over the volume bar, so that it can scroll a picker.
+                .on_scroll_wheel(cx.listener(Self::scroll))
+                .child(
+                    canvas(move |bounds, _, _| volume_bounds.set(Some(bounds)), |_, _, _, _| ()).absolute().size_full(),
+                )
+                .child(
+                    div().relative().h(px(4.)).w_full().rounded_full().bg(t.inset).child(
+                        div().absolute().top_0().left_0().h_full().w(relative(level)).rounded_full().bg(t.accent),
+                    ),
+                );
         let delay = player.sub_delay().filter(|delay| delay.abs() >= DELAY_STEP / 2.0).map(delay_label);
         let full = if window.is_fullscreen() { IconName::Minimize } else { IconName::Maximize };
         let shade = t.background.opacity(0.8);
+        // A click in a bar does not reach the video under it, so it does not pause.
         let top = div()
+            .id("top-bar")
             .absolute()
             .top_0()
             .left_0()
@@ -482,6 +537,7 @@ impl PlayerView {
             .items_center()
             .gap(px(12.))
             .bg(shade)
+            .on_click(|_, _, cx| cx.stop_propagation())
             .child(self.button("player-back", IconName::ChevronLeft, cx, |this, _, cx| this.back(cx)))
             .child(
                 div()
@@ -548,9 +604,11 @@ impl PlayerView {
             .child(self.button("player-quality", IconName::Gauge, cx, |this, _, cx| this.toggle(List::Quality, cx)))
             .child(self.button("player-info", IconName::Info, cx, |this, _, cx| this.toggle_info(cx)))
             .child(self.button("player-mute", mute.0, cx, |this, _, cx| this.toggle_mute(cx)))
+            .child(volume_bar)
             .child(div().w(px(48.)).text_color(t.secondary).child(mute.1))
             .child(self.button("player-fullscreen", full, cx, |this, window, _| this.toggle_fullscreen(window)));
         let bottom = div()
+            .id("bottom-bar")
             .absolute()
             .bottom_0()
             .left_0()
@@ -562,6 +620,7 @@ impl PlayerView {
             .flex_col()
             .gap(px(4.))
             .bg(shade)
+            .on_click(|_, _, cx| cx.stop_propagation())
             .child(seek)
             .child(row);
         [top.into_any_element(), bottom.into_any_element()]
@@ -612,6 +671,8 @@ impl PlayerView {
         div()
             .id("picker")
             .absolute()
+            // A click on a row does not reach the video under it, so it does not pause.
+            .on_click(|_, _, cx| cx.stop_propagation())
             .right(px(16.))
             .bottom(px(96.))
             .w(px(360.))
@@ -666,7 +727,7 @@ impl PlayerView {
                 .flex()
                 .gap(px(12.))
                 .child(div().w(px(110.)).flex_none().text_color(t.secondary).child(label))
-                .child(div().flex_1().text_color(t.bright).child(value))
+                .child(div().flex_1().min_w_0().text_color(t.bright).child(value))
         });
         div()
             .id("playback-info")
@@ -702,6 +763,7 @@ impl PlayerView {
             .text_color(t.bright)
             .child(label)
             .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
                 this.wake(cx);
                 this.step(Input::Action, cx);
             }))
@@ -806,7 +868,6 @@ impl Render for PlayerView {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_scroll_wheel(cx.listener(Self::scroll))
             .size_full()
             .relative()
             .text_color(t.foreground)
@@ -845,16 +906,18 @@ pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Row)> {
 /// Quality ladder when the plan offers more than one. A pick of a version sends its file id, a pick of a step its
 /// label.
 pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, quality: &str) -> Vec<(Pick, Row)> {
+    let ladder = &plan.available_qualities;
+    // The Version tag tells a version from a ladder step, so it shows only when the list has both.
+    let tags = if ladder.len() > 1 { vec!["Version"] } else { Vec::new() };
     let versions = versions.iter().filter(|_| versions.len() > 1).map(|version| {
         let row = Row {
             label: detail::version_row(version),
             detail: version.edition_raw.clone().unwrap_or_default(),
-            tags: vec!["Version"],
+            tags: tags.clone(),
             current: *version.file_id == *plan.effective_media_file_id,
         };
         (Pick::Version(version.file_id.to_string()), row)
     });
-    let ladder = &plan.available_qualities;
     let steps = ladder.iter().filter(|_| ladder.len() > 1).map(|step| {
         let row = Row {
             label: step_name(step),
@@ -1043,6 +1106,7 @@ mod tests {
             {"label": "720p-low", "display_name": "720p Low", "bitrate_kbps": 800, "preserves_source": false},
         ]});
         let rows = quality_rows(&[version("42", "2160p"), version("43", "1080p")], &plan(ladder), "1080p-medium");
+        assert_eq!(rows[0].1.tags, ["Version"]);
         let rows: Vec<_> = rows
             .iter()
             .map(|(pick, row)| (pick.clone(), row.label.as_str(), row.detail.as_str(), row.current))
@@ -1059,6 +1123,9 @@ mod tests {
                 (Pick::Quality("720p-low".into()), "720p Low", "800 kbps", false),
             ]
         );
+        // Without ladder steps, a row needs no Version tag.
+        let versions = quality_rows(&[version("42", "2160p"), version("43", "1080p")], &plan(json!({})), "original");
+        assert!(versions.iter().all(|(_, row)| row.tags.is_empty()));
         // One version and one step give no choice.
         assert!(quality_rows(&[version("42", "1080p")], &plan(json!({})), "original").is_empty());
     }
