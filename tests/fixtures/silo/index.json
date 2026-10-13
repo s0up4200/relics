@@ -159,6 +159,81 @@
       "body_file": "cancel_request_ok.json"
     },
     {
+      "name": "complete_oauth_login_code_required",
+      "operation_id": "completeOAuthLogin",
+      "scenario": "A completion without its code is a validation failure naming the member.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/auth/oauth/complete",
+        "body": "{}"
+      },
+      "expected_status": 422,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "complete_oauth_login_code_required.json"
+    },
+    {
+      "name": "complete_oauth_login_invalid_grant",
+      "operation_id": "completeOAuthLogin",
+      "scenario": "A native code redeemed without its code verifier is refused and stays redeemable.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/auth/oauth/complete",
+        "body": "{\"code\":\"n4tive\"}"
+      },
+      "expected_status": 400,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "complete_oauth_login_invalid_grant.json"
+    },
+    {
+      "name": "complete_oauth_login_native_ok",
+      "operation_id": "completeOAuthLogin",
+      "scenario": "A native app redeems the code the app redirect carried with its PKCE code verifier.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/auth/oauth/complete",
+        "body": "{\"code\":\"n4tive\",\"code_verifier\":\"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk\"}"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/OAuthCompletion",
+      "body_file": "complete_oauth_login_native_ok.json"
+    },
+    {
+      "name": "complete_oauth_login_ok",
+      "operation_id": "completeOAuthLogin",
+      "scenario": "The SPA redeems the one-time code the OAuth callback redirected it with.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/auth/oauth/complete",
+        "headers": {
+          "Cookie": "silo_oauth_complete=browser-binding"
+        },
+        "body": "{\"code\":\"c0de\"}"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/OAuthCompletion",
+      "body_file": "complete_oauth_login_ok.json"
+    },
+    {
       "name": "create_request_ok",
       "operation_id": "createRequest",
       "scenario": "A new request is created; an uncertain response must not be automatically retried.",
@@ -709,6 +784,23 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/Section",
       "body_file": "get_library_section_items_ok.json"
+    },
+    {
+      "name": "get_oauth_handshake_capabilities_ok",
+      "operation_id": "getOAuthHandshakeCapabilities",
+      "scenario": "An app discovers that the server hands OAuth sign-in off to native apps and links identities.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/auth/oauth/capabilities"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "private, no-cache",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/OAuthHandshakeCapabilitiesOutputBody",
+      "body_file": "get_oauth_handshake_capabilities_ok.json"
     },
     {
       "name": "get_person_authentication_required",
@@ -2344,6 +2436,42 @@
       "response_media_type": "application/problem+json",
       "schema": "#/components/schemas/Problem",
       "body_file": "set_rating_profile_header_required.json"
+    },
+    {
+      "name": "sign_in_with_network_identity_off_overlay",
+      "operation_id": "signInWithNetworkIdentity",
+      "scenario": "A request that did not come through the provider's network has no device owner to sign in.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/auth/network/7/sign-in",
+        "body": "{}"
+      },
+      "expected_status": 403,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "sign_in_with_network_identity_off_overlay.json"
+    },
+    {
+      "name": "sign_in_with_network_identity_ok",
+      "operation_id": "signInWithNetworkIdentity",
+      "scenario": "A TV on the server's Tailscale network signs its owner in with no password: the body is an empty JSON object.",
+      "request": {
+        "method": "POST",
+        "path": "/api/v2/auth/network/5/sign-in",
+        "body": "{}"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/TokenPair",
+      "body_file": "sign_in_with_network_identity_ok.json"
     },
     {
       "name": "start_device_login_ok",

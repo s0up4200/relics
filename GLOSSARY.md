@@ -15,6 +15,14 @@ The app window where the user browses the Silo library and starts playback. Its 
 A user's sign-in on one Server. An Account holds the tokens and owns zero or more Profiles. One Server can have several Accounts in the app.
 _Avoid_: user, login
 
+**Browser sign-in**:
+Sign-in through the page of a provider in the system browser. The browser gives the app the result, and the app gets the tokens of the Account.
+_Avoid_: OAuth login, SSO
+
+**Network sign-in**:
+Sign-in with no password, where the Server knows the person from the network that the request comes from, for example Tailscale.
+_Avoid_: Tailscale login, auto-login
+
 **Profile**:
 A household member inside an Account. Progress, watched state, favorites and the Home layout belong to the Profile. A Profile can have a PIN and content limits.
 _Avoid_: user, household member

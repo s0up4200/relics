@@ -3,8 +3,10 @@ Type=Application
 Name=Silo
 GenericName=Media Player
 Comment=Watch the library of your Silo server
-Exec=silo-omarchy
+Exec=silo-omarchy %u
 Icon=multimedia-video-player
 Terminal=false
 Categories=AudioVideo;Video;Player;
+# Browser sign-in returns to the app through the link scheme of the official Silo apps (ADR 0004).
+MimeType=x-scheme-handler/org.siloserver.silo;
 StartupWMClass=silo-omarchy

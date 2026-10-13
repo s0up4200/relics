@@ -1341,6 +1341,118 @@ pub struct CollectionUserLibrary {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub page: ::std::option::Option<PageInfo>,
 }
+#[doc = "`CompleteOAuthLoginInputBody`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct CompleteOAuthLoginInputBody {
+    #[doc = "Completion code from the callback redirect; single use"]
+    pub code: CompleteOAuthLoginInputBodyCode,
+    #[doc = "PKCE code verifier of the challenge a native start sent (RFC 7636: 43 to 128 unreserved characters). Required for a code from startNativeOAuthLogin, refused for a web code; either mismatch is 400 invalid_grant and leaves the code redeemable"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub code_verifier: ::std::option::Option<CompleteOAuthLoginInputBodyCodeVerifier>,
+}
+#[doc = "Completion code from the callback redirect; single use"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct CompleteOAuthLoginInputBodyCode(::std::string::String);
+impl ::std::ops::Deref for CompleteOAuthLoginInputBodyCode {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<CompleteOAuthLoginInputBodyCode> for ::std::string::String {
+    fn from(value: CompleteOAuthLoginInputBodyCode) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for CompleteOAuthLoginInputBodyCode {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() > 128usize {
+            return Err("longer than 128 characters".into());
+        }
+        if value.chars().count() < 1usize {
+            return Err("shorter than 1 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for CompleteOAuthLoginInputBodyCode {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CompleteOAuthLoginInputBodyCode {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for CompleteOAuthLoginInputBodyCode {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
+#[doc = "PKCE code verifier of the challenge a native start sent (RFC 7636: 43 to 128 unreserved characters). Required for a code from startNativeOAuthLogin, refused for a web code; either mismatch is 400 invalid_grant and leaves the code redeemable"]
+#[derive(:: serde :: Serialize, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct CompleteOAuthLoginInputBodyCodeVerifier(::std::string::String);
+impl ::std::ops::Deref for CompleteOAuthLoginInputBodyCodeVerifier {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<CompleteOAuthLoginInputBodyCodeVerifier> for ::std::string::String {
+    fn from(value: CompleteOAuthLoginInputBodyCodeVerifier) -> Self {
+        value.0
+    }
+}
+impl ::std::str::FromStr for CompleteOAuthLoginInputBodyCodeVerifier {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        if value.chars().count() > 128usize {
+            return Err("longer than 128 characters".into());
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+impl ::std::convert::TryFrom<&str> for CompleteOAuthLoginInputBodyCodeVerifier {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for CompleteOAuthLoginInputBodyCodeVerifier {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl<'de> ::serde::Deserialize<'de> for CompleteOAuthLoginInputBodyCodeVerifier {
+    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+    where
+        D: ::serde::Deserializer<'de>,
+    {
+        ::std::string::String::deserialize(deserializer)?
+            .parse()
+            .map_err(|e: self::error::ConversionError| {
+                <D::Error as ::serde::de::Error>::custom(e.to_string())
+            })
+    }
+}
 #[doc = "`CreateShuffleRequest`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct CreateShuffleRequest {
@@ -2898,6 +3010,66 @@ pub struct NativeEmbeddedSubtitleCapabilityV3 {
     pub container: ::std::string::String,
     pub font_attachments: bool,
     pub track_identity: ::std::string::String,
+}
+#[doc = "`NetworkSignInInputBody`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+#[serde(transparent)]
+pub struct NetworkSignInInputBody(
+    pub ::serde_json::Map<::std::string::String, ::serde_json::Value>,
+);
+impl ::std::ops::Deref for NetworkSignInInputBody {
+    type Target = ::serde_json::Map<::std::string::String, ::serde_json::Value>;
+    fn deref(&self) -> &::serde_json::Map<::std::string::String, ::serde_json::Value> {
+        &self.0
+    }
+}
+impl ::std::convert::From<NetworkSignInInputBody>
+    for ::serde_json::Map<::std::string::String, ::serde_json::Value>
+{
+    fn from(value: NetworkSignInInputBody) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::serde_json::Map<::std::string::String, ::serde_json::Value>>
+    for NetworkSignInInputBody
+{
+    fn from(value: ::serde_json::Map<::std::string::String, ::serde_json::Value>) -> Self {
+        Self(value)
+    }
+}
+#[doc = "`OAuthCompletion`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct OAuthCompletion {
+    #[doc = "Bearer access token"]
+    pub access_token: ::std::string::String,
+    #[doc = "Access token lifetime in seconds"]
+    pub expires_in: i64,
+    #[doc = "Site-relative path the login started from; / when none was given"]
+    pub next: ::std::string::String,
+    #[doc = "Refresh token for POST /auth/refresh"]
+    pub refresh_token: ::std::string::String,
+    #[doc = "The account the tokens authenticate"]
+    pub user: Account,
+}
+#[doc = "`OAuthHandshakeCapabilitiesOutputBody`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct OAuthHandshakeCapabilitiesOutputBody {
+    #[doc = "Whether the current principal may use the capability"]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub allowed: ::std::option::Option<bool>,
+    pub available: bool,
+    #[doc = "Whether createAccountIdentityLinkTicket issues link tickets: the web starts a linking flow with startAccountIdentityLink, an app passes the ticket as link_ticket to startNativeOAuthLogin and confirms the link with completeAccountIdentityLink"]
+    pub linking: bool,
+    #[doc = "Whether startNativeOAuthLogin serves the phone and desktop apps: the flow ends on org.siloserver.silo:/auth/callback with a one-time code bound to the app's PKCE S256 challenge, redeemed with completeOAuthLogin and its code_verifier"]
+    pub native: bool,
+    #[doc = "Whether getProviderLogout answers the provider end-session URL for web sign-out"]
+    pub provider_logout: bool,
+    #[doc = "Opaque revision of this document"]
+    pub revision: ::std::string::String,
+    #[doc = "Whether startOAuthLogin, initOAuthLogin and startNativeOAuthLogin accept prompt=select_account, which asks the provider to let the person choose another provider account (a Switch account sign-in)"]
+    pub select_account: bool,
+    #[doc = "Support and configuration state, not health"]
+    pub state: ::std::string::String,
 }
 #[doc = "`OutputContextV3`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]

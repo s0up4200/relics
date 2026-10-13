@@ -21,4 +21,10 @@ This skill installs the app from source for one user, until the AUR package exis
    install -Dm0644 data/silo-omarchy.desktop "$HOME/.local/share/applications/silo-omarchy.desktop"
    ```
 
+   Then update the desktop database. The browser reads it to find the app for the `org.siloserver.silo:` return link of Browser sign-in:
+
+   ```sh
+   update-desktop-database "$HOME/.local/share/applications"
+   ```
+
 3. Report to the user: the version from `Cargo.toml`, and whether each file was new or replaced. Tell the user that Silo shows in the launcher (Super + Space), and that a running copy of the app keeps the old version until it restarts.

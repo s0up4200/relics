@@ -10,6 +10,9 @@ getDeviceLoginCapability
 startDeviceLogin
 pollDeviceLogin
 cancelDeviceLogin
+getOAuthHandshakeCapabilities
+completeOAuthLogin
+signInWithNetworkIdentity
 getCurrentUser
 listProfiles
 verifyProfilePIN
