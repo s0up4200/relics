@@ -12,6 +12,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub mod types;
+// scripts/gen-api-types.py generates wire.rs, so rustfmt leaves it as it is.
+#[rustfmt::skip]
 pub mod wire;
 
 pub use gpui::http_client::Url;
@@ -544,7 +546,9 @@ impl Client {
                 let Some(item) = item else {
                     return Err(Error::Problem(problem));
                 };
-                return self.start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0))).await;
+                return self
+                    .start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0)))
+                    .await;
             }
             result => result?,
         };

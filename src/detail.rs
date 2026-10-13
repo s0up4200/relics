@@ -99,7 +99,11 @@ impl Detail {
         let viewport = window.viewport_size().width.to_f64() as f32;
         let width = viewport - crate::pages::sidebar_width(viewport, true);
         cx.on_release(|this, cx| {
-            let thumbs = this.thumbs.drain(..).chain(this.episode_thumbs.drain(..)).chain(this.season_thumbs.drain(..))
+            let thumbs = this
+                .thumbs
+                .drain(..)
+                .chain(this.episode_thumbs.drain(..))
+                .chain(this.season_thumbs.drain(..))
                 .chain(this.similar_thumbs.drain(..));
             for thumb in thumbs.flatten() {
                 cx.drop_image(thumb, None);
@@ -153,8 +157,7 @@ impl Detail {
                 Vec::new()
             });
             this.update(cx, |this, cx| {
-                let thumbs =
-                    items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
+                let thumbs = items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
                 for old in std::mem::replace(&mut this.similar_thumbs, thumbs).into_iter().flatten() {
                     cx.drop_image(old, None);
                 }

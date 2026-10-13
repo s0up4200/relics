@@ -132,10 +132,7 @@ fn an_unknown_enum_value_decodes() {
     body["playback_plan"]["stream"]["protocol"] = json!("hls");
     let decision: wire::PlaybackDecision = serde_json::from_value(body).unwrap();
     let plan = decision.playback_plan.unwrap();
-    assert_eq!(
-        types::Delivery::from(plan.delivery),
-        types::Delivery::Unknown("delivery_from_a_newer_server".into())
-    );
+    assert_eq!(types::Delivery::from(plan.delivery), types::Delivery::Unknown("delivery_from_a_newer_server".into()));
     assert_eq!(types::StreamProtocol::from(plan.stream.protocol), types::StreamProtocol::Hls);
 }
 
