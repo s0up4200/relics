@@ -241,7 +241,7 @@ impl Detail {
                         let number = this.wanted_season.take().or(chosen).or(item.play_season_number);
                         this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
                         this.seasons = seasons;
-                        this.version = this.version.min(versions.len().saturating_sub(1));
+                        this.version = kept_version(&this.versions, this.version, &versions);
                         this.versions = versions;
                         this.item = Some(item);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
@@ -1199,6 +1199,12 @@ impl Render for Detail {
     }
 }
 
+/// The place in `versions` of the file that `old[chosen]` plays. The first version when that file is gone.
+pub fn kept_version(old: &[wire::FileVersion], chosen: usize, versions: &[wire::FileVersion]) -> usize {
+    let file = old.get(chosen).map(|version| &version.file_id);
+    versions.iter().position(|version| Some(&version.file_id) == file).unwrap_or(0)
+}
+
 /// The Item that Enter on a card opens, and the season to show: a season opens its series. An episode opens its own
 /// page, with More Episodes.
 pub fn target(item: &wire::CatalogItem) -> (String, Option<i64>) {
@@ -1944,6 +1950,16 @@ mod tests {
             json!({"interlaced": false, "dv_bl_compat_id_present": false, "dv_config_present": false});
         track_fields.as_object_mut().unwrap().extend(track.as_object().unwrap().clone());
         video_range(&version(json!({"hdr": hdr, "video_tracks": [track_fields]})))
+    }
+
+    #[test]
+    fn a_reload_keeps_the_chosen_version_by_its_file() {
+        let versions = |ids: &[&str]| ids.iter().map(|id| version(json!({"file_id": id}))).collect::<Vec<_>>();
+        let old = versions(&["1", "2"]);
+        assert_eq!(kept_version(&old, 1, &versions(&["3", "1", "2"])), 2, "a new version comes first");
+        assert_eq!(kept_version(&old, 1, &versions(&["2", "1"])), 0, "the order changed");
+        assert_eq!(kept_version(&old, 1, &versions(&["1", "3"])), 0, "the chosen file is gone");
+        assert_eq!(kept_version(&[], 0, &versions(&["1", "2"])), 0, "the first load");
     }
 
     #[test]
