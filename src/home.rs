@@ -76,6 +76,25 @@ pub enum Focus {
     },
 }
 
+/// The focus after a reload from `old` to `new` sections. A focused card moves with its section and Item, and "View
+/// all" with its section. When the Item is gone, the focus keeps its place in the row.
+pub fn kept_focus(focus: Focus, old: &[HomeSection], new: &[HomeSection]) -> Focus {
+    let Focus::Card { row, col } = focus else {
+        return focus;
+    };
+    let Some(section) = old.get(row) else {
+        return focus;
+    };
+    let Some(row) = new.iter().position(|s| s.id == section.id) else {
+        return focus;
+    };
+    let col = match section.items.get(col) {
+        Some(item) => new[row].items.iter().position(|i| i.content_id == item.content_id).unwrap_or(col),
+        None => new[row].items.len(),
+    };
+    Focus::Card { row, col }
+}
+
 /// Moves the focus for an arrow or hjkl key. `rows` holds the number of cards in each row.
 pub fn move_focus(focus: Focus, key: Key, rows: &[usize]) -> Focus {
     let first_card_in = |mut range: Box<dyn Iterator<Item = usize>>, col: usize| {
@@ -170,6 +189,11 @@ impl Home {
                         }
                         // A reload at a larger rung keeps the scroll positions and the focus.
                         this.row_scrolls.resize_with(sections.len(), ScrollHandle::new);
+                        let focus = kept_focus(this.focus, &this.sections, &sections);
+                        if let (Focus::Card { row, col }, true) = (focus, focus != this.focus) {
+                            cards(&sections[row]).reveal(&this.row_scrolls[row], col);
+                        }
+                        this.focus = focus;
                         this.sections = sections;
                         this.status = None;
                         this.failed = false;
@@ -536,7 +560,8 @@ pub(crate) fn card_badge(item: &wire::CatalogItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Focus, card_badge, move_focus, rung, short_line};
+    use super::{Focus, card_badge, kept_focus, move_focus, rung, short_line};
+    use crate::api::HomeSection;
     use crate::api::wire;
     use crate::artwork::Rung;
     use crate::keys::Key;
@@ -546,6 +571,25 @@ mod tests {
         let mut item = json!({"content_id": "x", "type": "movie", "title": "x", "genres": [], "keywords": [], "status": "available", "year": 2022});
         item.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         serde_json::from_value(item).unwrap()
+    }
+
+    #[test]
+    fn a_reload_keeps_the_focus_on_the_same_card_or_view_all() {
+        let section = |id: &str, items: &[&str]| HomeSection {
+            id: id.into(),
+            section_type: id.into(),
+            title: id.into(),
+            featured: false,
+            items: items.iter().map(|item| card(json!({"content_id": item}))).collect(),
+            view_all: true,
+        };
+        let old = [section("continue", &["a", "b", "c"]), section("new", &["x"])];
+        let new = [section("featured", &[]), section("continue", &["c", "a"]), section("new", &["x"])];
+        let at = |row, col| Focus::Card { row, col };
+        assert_eq!(kept_focus(at(0, 2), &old, &new), at(1, 0), "the played Item moved to the front");
+        assert_eq!(kept_focus(at(0, 1), &old, &new), at(1, 1), "a gone Item keeps its place");
+        assert_eq!(kept_focus(at(1, 1), &old, &new), at(2, 1), "View all");
+        assert_eq!(kept_focus(Focus::Outside, &old, &new), Focus::Outside);
     }
 
     #[test]
