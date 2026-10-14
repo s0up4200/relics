@@ -238,6 +238,7 @@ impl Detail {
                             cx.drop_image(old, None);
                         }
                         let reload = this.item.is_some();
+                        let listed = this.listed_season();
                         let old_actions = this.item.as_ref().map(|old| actions(old, &this.seasons)).unwrap_or_default();
                         this.focus = kept_focus(
                             this.focus,
@@ -254,7 +255,8 @@ impl Detail {
                         this.item = Some(item);
                         this.focus = this.rows().clamp(this.focus);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        this.load_episodes(!reload, cx);
+                        // The old episodes stay until the new ones come, unless the season changed or is gone.
+                        this.load_episodes(!reload || this.listed_season() != listed, cx);
                     }
                     // The page keeps what it shows, with no error.
                     Err(err) if this.item.is_some() => eprintln!("relics: cannot reload {}: {err}", this.id),
@@ -275,15 +277,15 @@ impl Detail {
     /// Loads the episodes of the chosen season, or of the season of an episode. With `clear`, the old episodes go
     /// at once. Otherwise they show until the new ones come.
     fn load_episodes(&mut self, clear: bool, cx: &mut Context<Self>) {
-        let Some((id, season)) = self.listed_season() else {
-            return;
-        };
         if clear {
             for old in self.episode_thumbs.drain(..).flatten() {
                 cx.drop_image(old, None);
             }
             self.episodes.clear();
         }
+        let Some((id, season)) = self.listed_season() else {
+            return;
+        };
         let (client, image_size) = (self.client.clone(), self.episode_size);
         self._episodes = cx.spawn(async move |this, cx| {
             let result = client.season_episodes(&id, season, image_size).await;
