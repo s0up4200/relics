@@ -29,4 +29,5 @@ pub mod settings_page;
 pub mod sideways;
 pub mod sign_in;
 pub mod state;
+pub mod theme;
 pub mod video;
