@@ -385,6 +385,9 @@ impl Pages {
                 this.update(cx, |this, cx| {
                     // A removed or changed Library opens fresh next time.
                     this.library_pages.retain(|_, page| listed(&page.read(cx).library, &libraries));
+                    this.back.retain(
+                        |page| !matches!(page, Page::Library(page) if !listed(&page.read(cx).library, &libraries)),
+                    );
                     let removed = matches!(&this.page, Page::Library(page)
                         if !libraries.iter().any(|library| library.id == page.read(cx).library.id));
                     this.libraries = libraries;
