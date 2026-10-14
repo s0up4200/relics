@@ -187,8 +187,14 @@ impl Home {
                         for old in std::mem::replace(&mut this.thumbs, thumbs).into_iter().flatten().flatten() {
                             cx.drop_image(old, None);
                         }
-                        // A reload at a larger rung keeps the scroll positions and the focus.
-                        this.row_scrolls.resize_with(sections.len(), ScrollHandle::new);
+                        // A reload keeps the scroll position of each section and the focus.
+                        this.row_scrolls = sections
+                            .iter()
+                            .map(|section| {
+                                let old = this.sections.iter().position(|s| s.id == section.id);
+                                old.and_then(|i| this.row_scrolls.get(i).cloned()).unwrap_or_else(ScrollHandle::new)
+                            })
+                            .collect();
                         let focus = kept_focus(this.focus, &this.sections, &sections);
                         if let (Focus::Card { row, col }, true) = (focus, focus != this.focus) {
                             cards(&sections[row]).reveal(&this.row_scrolls[row], col);
