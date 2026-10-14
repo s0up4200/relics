@@ -157,16 +157,7 @@ impl LibraryWindow {
             cx.notify();
         });
         // The Server has the new position after the stop report, so the pages reload.
-        let stopped = cx.subscribe(&player, |this, _, _: &Stopped, cx| {
-            // The pages also wait behind a picker or the PIN entry. Parked pages reload when they come back.
-            let pages = match &this.screen {
-                Screen::Pages(pages) => Some(pages.clone()),
-                _ => this.menu_back.clone().or_else(|| this.pin_wait.as_ref().map(|wait| wait.pages.clone())),
-            };
-            if let Some(pages) = pages {
-                pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
-            }
-        });
+        let stopped = cx.subscribe(&player, |this, _, _: &Stopped, cx| this.refresh_pages(cx));
         let player_events = cx.subscribe(&player, |this, _, PlaybackError(text), cx| {
             this.player_error = Some(text.clone());
             cx.notify();
@@ -762,8 +753,20 @@ impl LibraryWindow {
         }
     }
 
+    /// Reloads all pages. The pages also wait behind a picker or the PIN entry. Parked pages reload when they come
+    /// back.
+    fn refresh_pages(&mut self, cx: &mut Context<Self>) {
+        let pages = match &self.screen {
+            Screen::Pages(pages) => Some(pages.clone()),
+            _ => self.menu_back.clone().or_else(|| self.pin_wait.as_ref().map(|wait| wait.pages.clone())),
+        };
+        if let Some(pages) = pages {
+            pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+        }
+    }
+
     /// Probes `system/info` with the retry delays until the Server answers. Then it sends the kept progress,
-    /// and opens the Account again when the Server did not answer at launch.
+    /// reloads the pages, and opens the Account again when the Server did not answer at launch.
     fn probe_until_online(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -782,7 +785,7 @@ impl LibraryWindow {
                 }
                 attempt = attempt.saturating_add(1);
             }
-            cx.background_spawn({
+            let sync = cx.background_spawn({
                 let client = client.clone();
                 async move {
                     client
@@ -791,8 +794,7 @@ impl LibraryWindow {
                         .inspect_err(|err| eprintln!("relics: progress sync failed: {err}"))
                         .ok()
                 }
-            })
-            .detach();
+            });
             this.update_in(cx, |this, window, cx| {
                 this.offline = false;
                 // This task ends here, so it must not drop itself.
@@ -805,6 +807,10 @@ impl LibraryWindow {
                 cx.notify();
             })
             .ok();
+            // The pages reload after the Server has the positions of the stop reports that failed offline.
+            if sync.await.is_some() {
+                this.update(cx, |this, cx| this.refresh_pages(cx)).ok();
+            }
         }));
     }
 
