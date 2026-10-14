@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement as _,
     Styled, Subscription, Task, Window, div, px,
 };
@@ -67,11 +67,22 @@ const MENU: [(MenuChoice, &str); 3] = [
     (MenuChoice::SignOut, "Sign out"),
 ];
 
-/// The list has `library` with no change.
-fn listed(library: &wire::UserLibrary, libraries: &[wire::UserLibrary]) -> bool {
-    // wire::UserLibrary has no PartialEq, so the JSON of each field decides.
-    let json = serde_json::to_value(library).ok();
-    libraries.iter().any(|other| serde_json::to_value(other).ok() == json)
+/// The new state of `library` in the list. `None` when the Library is gone, or has another type: the page of a
+/// Library builds its grid for the type.
+fn relisted<'a>(library: &wire::UserLibrary, libraries: &'a [wire::UserLibrary]) -> Option<&'a wire::UserLibrary> {
+    libraries.iter().find(|other| other.id == library.id && other.type_ == library.type_)
+}
+
+/// Gives the Library page the new state of its Library, for example a new name. False when the page cannot stay.
+fn relist(page: &Entity<LibraryPage>, libraries: &[wire::UserLibrary], cx: &mut App) -> bool {
+    let Some(library) = relisted(&page.read(cx).library, libraries).cloned() else {
+        return false;
+    };
+    page.update(cx, |page, cx| {
+        page.library = library;
+        cx.notify();
+    });
+    true
 }
 
 /// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
@@ -383,13 +394,10 @@ impl Pages {
         self._libraries = cx.spawn(async move |this, cx| match client.libraries().await {
             Ok(libraries) => {
                 this.update(cx, |this, cx| {
-                    // A removed or changed Library opens fresh next time.
-                    this.library_pages.retain(|_, page| listed(&page.read(cx).library, &libraries));
-                    this.back.retain(
-                        |page| !matches!(page, Page::Library(page) if !listed(&page.read(cx).library, &libraries)),
-                    );
-                    let removed = matches!(&this.page, Page::Library(page)
-                        if !libraries.iter().any(|library| library.id == page.read(cx).library.id));
+                    // A removed Library, or one with another type, opens fresh next time.
+                    this.library_pages.retain(|_, page| relist(page, &libraries, cx));
+                    this.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
+                    let removed = matches!(&this.page, Page::Library(page) if !relist(page, &libraries, cx));
                     this.libraries = libraries;
                     // The list can be shorter now.
                     this.sidebar = this.sidebar.map(|row| row.min(this.settings_row()));
@@ -914,7 +922,7 @@ impl Render for Pages {
 mod tests {
     use std::time::Duration;
 
-    use super::{Refresh, Throttle, listed, shortcut, sidebar_width};
+    use super::{Refresh, Throttle, relisted, shortcut, sidebar_width};
     use crate::api::wire;
 
     fn library(id: &str, kind: &str) -> wire::UserLibrary {
@@ -963,14 +971,16 @@ mod tests {
     }
 
     #[test]
-    fn a_cached_library_page_stays_only_while_its_library_is_unchanged_in_the_list() {
+    fn a_library_page_stays_while_its_library_is_in_the_list_with_the_same_type() {
         let movies = library("12", "movies");
         let renamed: wire::UserLibrary =
             serde_json::from_value(serde_json::json!({"id": "12", "name": "Films", "type": "movies", "sort_order": 0}))
                 .unwrap();
-        assert!(listed(&movies, &[library("7", "shows"), movies.clone()]));
-        assert!(!listed(&movies, &[renamed]), "a renamed Library");
-        assert!(!listed(&movies, &[library("7", "shows")]), "a removed Library");
+        let name = |list: &[wire::UserLibrary]| relisted(&movies, list).map(|library| library.name.clone());
+        assert_eq!(name(&[library("7", "shows"), movies.clone()]), Some(movies.name.clone()));
+        assert_eq!(name(&[renamed]), Some("Films".into()), "a renamed Library");
+        assert_eq!(name(&[library("12", "shows")]), None, "another type");
+        assert_eq!(name(&[library("7", "shows")]), None, "a removed Library");
     }
 
     #[test]
