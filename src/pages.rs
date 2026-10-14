@@ -85,6 +85,16 @@ fn relist(page: &Entity<LibraryPage>, libraries: &[wire::UserLibrary], cx: &mut 
     true
 }
 
+/// The sidebar row after the Library list changes from `old` to `new`: the row of the same Library, or the same row
+/// below the Libraries. Home when the Library is gone.
+fn kept_row(row: usize, old: &[wire::UserLibrary], new: &[wire::UserLibrary]) -> usize {
+    match row.checked_sub(1).map(|i| old.get(i)) {
+        Some(Some(library)) => new.iter().position(|l| l.id == library.id).map_or(0, |i| i + 1),
+        Some(None) => row - old.len() + new.len(),
+        None => 0,
+    }
+}
+
 /// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refresh {
@@ -398,9 +408,8 @@ impl Pages {
                     this.library_pages.retain(|_, page| relist(page, &libraries, cx));
                     this.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
                     let removed = matches!(&this.page, Page::Library(page) if !relist(page, &libraries, cx));
+                    this.sidebar = this.sidebar.map(|row| kept_row(row, &this.libraries, &libraries));
                     this.libraries = libraries;
-                    // The list can be shorter now.
-                    this.sidebar = this.sidebar.map(|row| row.min(this.settings_row()));
                     if removed {
                         this.back.clear();
                         this.show(Page::Home(this.home.clone()), cx);
@@ -922,7 +931,7 @@ impl Render for Pages {
 mod tests {
     use std::time::Duration;
 
-    use super::{Refresh, Throttle, relisted, shortcut, sidebar_width};
+    use super::{Refresh, Throttle, kept_row, relisted, shortcut, sidebar_width};
     use crate::api::wire;
 
     fn library(id: &str, kind: &str) -> wire::UserLibrary {
@@ -968,6 +977,17 @@ mod tests {
             "the event does not name the series of an episode, so each Item change reaches each Detail page"
         );
         assert!(!Refresh::Libraries { library: Some("7".into()) }.reaches_detail("movie:m", None));
+    }
+
+    #[test]
+    fn the_sidebar_focus_stays_on_its_library_or_row_when_the_library_list_changes() {
+        let old = [library("films", "movies"), library("shows", "series")];
+        let new = [library("kids", "movies"), library("films", "movies"), library("shows", "series")];
+        assert_eq!(kept_row(0, &old, &new), 0, "Home");
+        assert_eq!(kept_row(2, &old, &new), 3, "the same Library");
+        assert_eq!(kept_row(3, &old, &new), 4, "Search, below the Libraries");
+        assert_eq!(kept_row(1, &new, &old), 0, "a removed Library goes to Home");
+        assert_eq!(kept_row(4, &new, &old), 3, "Search when the list gets shorter");
     }
 
     #[test]
