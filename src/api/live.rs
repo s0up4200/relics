@@ -246,7 +246,8 @@ async fn listen(
         // tungstenite answers each ping while it reads.
         let message = match select(socket.next(), Timer::after(SILENCE)).await {
             Either::Left((Some(Ok(message)), _)) => message,
-            Either::Left(_) if opened.elapsed() + Duration::from_secs(1) >= lifetime => return Close::Planned,
+            // The margin covers the time of the upgrade answer and a clock that is a few seconds behind the Server.
+            Either::Left(_) if opened.elapsed() + Duration::from_secs(5) >= lifetime => return Close::Planned,
             _ => return Close::Lost,
         };
         match message {
