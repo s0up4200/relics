@@ -158,10 +158,10 @@ impl LibraryWindow {
         });
         // The Server has the new position after the stop report, so the pages reload.
         let stopped = cx.subscribe(&player, |this, _, _: &Stopped, cx| {
-            // The pages also wait behind a picker.
+            // The pages also wait behind a picker or the PIN entry. Parked pages reload when they come back.
             let pages = match &this.screen {
                 Screen::Pages(pages) => Some(pages.clone()),
-                _ => this.menu_back.clone(),
+                _ => this.menu_back.clone().or_else(|| this.pin_wait.as_ref().map(|wait| wait.pages.clone())),
             };
             if let Some(pages) = pages {
                 pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
@@ -427,7 +427,11 @@ impl LibraryWindow {
             .detach();
             this.update_in(cx, |this, window, cx| {
                 let pages = match this.parked.take() {
-                    Some((id, pages)) if id == *profile.id => pages,
+                    // The pages missed the changes, and a stop report, while the sign-in showed.
+                    Some((id, pages)) if id == *profile.id => {
+                        pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+                        pages
+                    }
                     _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
                 };
                 this.show_pages(client, pages, window, cx);
