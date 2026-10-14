@@ -43,6 +43,10 @@ async-tungstenite = { version = "=0.35.0", default-features = false, features = 
 futures-rustls = { version = "=0.26.0", default-features = false }
 http_client_tls = { package = "gpui-pre-http-client-tls", version = "=0.3.7" }
 async-io = "2.6.0"
+# The TCP stream of the events socket, and the NO_PROXY rules of reqwest (hyper-util's Matcher) for the tunnel through
+# the proxy of the HTTP client. client-proxy adds only base64 0.23 to the lock.
+async-net = "=2.0.0"
+hyper-util = { version = "=0.1.21", default-features = false, features = ["client-proxy"] }
 
 [dev-dependencies]
 http_client = { package = "gpui-pre-http-client", version = "=0.3.7", features = ["test-support"] }

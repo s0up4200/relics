@@ -6,17 +6,20 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use anyhow::Context as _;
 use async_io::Timer;
+use async_net::TcpStream;
 use async_tungstenite::WebSocketStream;
-use async_tungstenite::smol::{ConnectStream, connect_async_with_tls_connector};
+use async_tungstenite::smol::{ConnectStream, client_async_tls_with_connector};
 use async_tungstenite::tungstenite::client::IntoClientRequest as _;
 use async_tungstenite::tungstenite::http::HeaderValue;
 use async_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use async_tungstenite::tungstenite::{Message, Utf8Bytes};
 use futures::future::{Either, select};
 use futures::stream::BoxStream;
-use futures::{FutureExt as _, StreamExt as _, channel::mpsc};
-use gpui::http_client::Method;
+use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _, StreamExt as _, channel::mpsc};
+use gpui::http_client::{Method, Url, read_no_proxy_from_env};
+use hyper_util::client::proxy::matcher::Matcher;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -172,6 +175,7 @@ async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStre
     // The client refreshes the access token after a 401.
     let ticket: Ticket = client.call_with_retries(Method::POST, "events/ws-ticket", None).await?;
     let mut url = client.server.url.join("api/v2/events/ws")?;
+    let stream = open(client, &url).await?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme).map_err(|()| anyhow::anyhow!("no WebSocket URL for {url}"))?;
     let mut request = url.as_str().into_client_request()?;
@@ -179,11 +183,49 @@ async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStre
     let protocols = HeaderValue::from_str(&format!("silo.events.v2, silo.ticket.{}", ticket.ticket))?;
     request.headers_mut().insert("Sec-WebSocket-Protocol", protocols);
     let tls = futures_rustls::TlsConnector::from(Arc::new(http_client_tls::tls_config()));
-    let (socket, _) = connect_async_with_tls_connector(request, Some(tls)).await?;
+    let (socket, _) = client_async_tls_with_connector(request, stream, Some(tls)).await?;
     let token_left =
         token_expiry(&client.tokens().access_token).and_then(|exp| exp.duration_since(SystemTime::now()).ok());
     let lifetime = Duration::from_secs(ticket.max_connection_seconds);
     Ok((socket, token_left.map_or(lifetime, |left| left.min(lifetime))))
+}
+
+/// Opens the TCP connection to the host of `url`. The connection goes through the proxy of the HTTP client, with the
+/// same NO_PROXY rules, so that the socket reaches the Server where the API requests do.
+async fn open(client: &Client, url: &Url) -> anyhow::Result<TcpStream> {
+    let host = url.host_str().context("no host in the Server URL")?;
+    let port = url.port_or_known_default().context("no port in the Server URL")?;
+    let proxy = client.http.proxy().and_then(|proxy| {
+        let no = read_no_proxy_from_env().unwrap_or_default();
+        Matcher::builder().all(proxy.to_string()).no(no).build().intercept(&url.as_str().parse().ok()?)
+    });
+    let Some(proxy) = proxy else {
+        return Ok(TcpStream::connect((host, port)).await?);
+    };
+    // A tunnel through an HTTP proxy: CONNECT, then the socket talks to the Server as if no proxy were there.
+    let uri = proxy.uri();
+    anyhow::ensure!(uri.scheme_str() == Some("http"), "the events socket supports only an http:// proxy, not {uri}");
+    let mut stream =
+        TcpStream::connect((uri.host().context("no host in the proxy URL")?, uri.port_u16().unwrap_or(80))).await?;
+    // The Display of a host puts an IPv6 address in brackets.
+    let target = format!("{}:{port}", url.host().context("no host in the Server URL")?);
+    let mut head = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+    if let Some(auth) = proxy.basic_auth() {
+        head += &format!("Proxy-Authorization: {}\r\n", auth.to_str()?);
+    }
+    stream.write_all(format!("{head}\r\n").as_bytes()).await?;
+    // One byte at a time, so that no byte of the Server is read past the end of the proxy answer.
+    let mut answer = Vec::new();
+    let mut byte = [0];
+    while !answer.ends_with(b"\r\n\r\n") {
+        anyhow::ensure!(answer.len() < 8192, "the proxy answer is too long");
+        stream.read_exact(&mut byte).await?;
+        answer.push(byte[0]);
+    }
+    let answer = String::from_utf8_lossy(&answer);
+    let status = answer.lines().next().unwrap_or_default();
+    anyhow::ensure!(status.split_whitespace().nth(1) == Some("200"), "the proxy refused the tunnel: {status}");
+    Ok(stream)
 }
 
 /// Subscribes, and sends the changes until the socket closes. A close frame from the Server is a planned close,
