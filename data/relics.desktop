@@ -4,7 +4,7 @@ Name=Relics
 GenericName=Media Player
 Comment=Unofficial Silo client for Linux. Follows your Omarchy theme.
 Exec=relics %u
-Icon=multimedia-video-player
+Icon=relics
 Terminal=false
 Categories=AudioVideo;Video;Player;
 # Browser sign-in returns to the app through the link scheme of the official Silo apps (ADR 0004).

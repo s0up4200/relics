@@ -36,4 +36,5 @@ package() {
   install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
   install -Dm0644 -t "$pkgdir/usr/share/omarchy/default/hypr/apps/" data/relics.lua
   install -Dm0644 -t "$pkgdir/usr/share/applications/" data/relics.desktop
+  install -Dm0644 -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/" data/relics.svg
 }
