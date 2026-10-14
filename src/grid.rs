@@ -257,9 +257,9 @@ impl Grid {
                         this.error = None;
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
-                    // The grid keeps what it shows, with no error. The Library window shows Offline or the sign-in
-                    // screen.
-                    Err(err) if !this.paging.items.is_empty() => eprintln!("relics: cannot reload the grid: {err}"),
+                    // A grid that loaded keeps what it shows, also "No titles.", with no error. The Library window
+                    // shows Offline or the sign-in screen.
+                    Err(err) if this.paging.loaded() => eprintln!("relics: cannot reload the grid: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
                 }
                 cx.notify();
@@ -564,6 +564,17 @@ mod tests {
                 serde_json::from_value(item).unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn an_empty_result_counts_as_loaded() {
+        let mut paging = crate::browse::Paging::default();
+        assert!(!paging.loaded(), "no page came");
+        paging.add(Vec::new(), Some(0), None);
+        assert!(paging.loaded(), "an empty last page");
+        let mut paging = crate::browse::Paging::default();
+        paging.add(items(&["a"]), Some(2), Some(wire::PageInfo { has_more: true, next_cursor: Some("c".into()) }));
+        assert!(paging.loaded(), "a first page with more to come");
     }
 
     #[test]
