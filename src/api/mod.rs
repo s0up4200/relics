@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
+pub mod live;
 pub mod types;
 // scripts/gen-api-types.py generates wire.rs, so rustfmt leaves it as it is.
 #[rustfmt::skip]

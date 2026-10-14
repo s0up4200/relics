@@ -54,6 +54,8 @@ pub struct Detail {
     focus: Focus,
     /// The page has the keyboard focus, so the focused control shows the focus ring.
     pub active: bool,
+    /// A refresh came while the page did not show. The page reloads when it shows again.
+    stale: bool,
     columns: usize,
     /// The error of the last request, shown with Retry.
     error: Option<String>,
@@ -127,6 +129,7 @@ impl Detail {
             episodes: Vec::new(),
             focus: Focus::Action(0),
             active: false,
+            stale: false,
             columns: 1,
             error: None,
             notice: None,
@@ -156,20 +159,42 @@ impl Detail {
         detail
     }
 
-    /// Loads More Like This. A failure leaves the row out: the page works without it.
+    /// The Item of the page, and the series of an episode.
+    pub fn shows(&self) -> (&str, Option<&str>) {
+        (&self.id, self.item.as_ref().and_then(|item| item.series_id.as_deref()))
+    }
+
+    /// Reloads the page now when it shows. Otherwise the page reloads when it shows again.
+    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
+        self.stale = true;
+        if shows {
+            self.shown(cx);
+        }
+    }
+
+    /// The page shows again.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.stale) {
+            self.load(cx);
+        }
+    }
+
+    /// Loads More Like This. A failure leaves the row out, or keeps the row of the last load: the page works without
+    /// it.
     fn load_similar(&mut self, cx: &mut Context<Self>) {
         let (client, id) = (self.client.clone(), self.id.clone());
         self._similar = cx.spawn(async move |this, cx| {
-            let items = client.similar(&id).await.unwrap_or_else(|err| {
-                eprintln!("relics: cannot read the Items like {id}: {err}");
-                Vec::new()
-            });
+            let items = match client.similar(&id).await {
+                Ok(items) => items,
+                Err(err) => return eprintln!("relics: cannot read the Items like {id}: {err}"),
+            };
             this.update(cx, |this, cx| {
                 let thumbs = items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
                 for old in std::mem::replace(&mut this.similar_thumbs, thumbs).into_iter().flatten() {
                     cx.drop_image(old, None);
                 }
                 this.similar = items;
+                this.focus = this.rows().clamp(this.focus);
                 cx.notify();
             })
             .ok();
@@ -177,7 +202,7 @@ impl Detail {
     }
 
     /// Loads the Item, the seasons of a series, the episodes of the chosen season or of the season of an episode,
-    /// and More Like This.
+    /// and More Like This. A reload keeps the chosen season and what the page shows.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.load_similar(cx);
@@ -212,15 +237,32 @@ impl Detail {
                         for old in std::mem::replace(&mut this.season_thumbs, posters).into_iter().flatten() {
                             cx.drop_image(old, None);
                         }
-                        let number = this.wanted_season.take().or(item.play_season_number);
+                        let reload = this.item.is_some();
+                        let listed = this.listed_season();
+                        let old_actions = this.item.as_ref().map(|old| actions(old, &this.seasons)).unwrap_or_default();
+                        if let Some(Mark::Season(i)) = this.menu {
+                            this.menu = kept(&this.seasons, i, &seasons, |s| s.season_number).map(Mark::Season);
+                        }
+                        this.focus = kept_focus(
+                            this.focus,
+                            (&old_actions, &actions(&item, &seasons)),
+                            (&this.versions, &versions),
+                            (&this.seasons, &seasons),
+                        );
+                        let chosen = this.seasons.get(this.season).map(|s| s.season_number);
+                        let number = this.wanted_season.take().or(chosen).or(item.play_season_number);
                         this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
                         this.seasons = seasons;
-                        this.version = this.version.min(versions.len().saturating_sub(1));
+                        this.version = kept_version(&this.versions, this.version, &versions);
                         this.versions = versions;
                         this.item = Some(item);
+                        this.focus = this.rows().clamp(this.focus);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        this.load_episodes(cx);
+                        // The old episodes stay until the new ones come, unless the season changed or is gone.
+                        this.load_episodes(!reload || this.listed_season() != listed, cx);
                     }
+                    // The page keeps what it shows, with no error.
+                    Err(err) if this.item.is_some() => eprintln!("relics: cannot reload {}: {err}", this.id),
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
                 }
@@ -235,27 +277,47 @@ impl Detail {
         episode_list(self.item.as_ref()?, self.seasons.get(self.season).map(|s| s.season_number))
     }
 
-    /// Loads the episodes of the chosen season, or of the season of an episode.
-    fn load_episodes(&mut self, cx: &mut Context<Self>) {
+    /// Loads the episodes of the chosen season, or of the season of an episode. With `clear`, the old episodes go
+    /// at once. Otherwise they show until the new ones come.
+    fn load_episodes(&mut self, clear: bool, cx: &mut Context<Self>) {
+        if clear {
+            for old in self.episode_thumbs.drain(..).flatten() {
+                cx.drop_image(old, None);
+            }
+            self.episodes.clear();
+            // The focus can be on an episode that is gone.
+            self.focus = self.rows().clamp(self.focus);
+        }
         let Some((id, season)) = self.listed_season() else {
+            // A load of a season that is gone must not fill the row again.
+            self._episodes = Task::ready(());
             return;
         };
-        for old in self.episode_thumbs.drain(..).flatten() {
-            cx.drop_image(old, None);
-        }
-        self.episodes.clear();
         let (client, image_size) = (self.client.clone(), self.episode_size);
         self._episodes = cx.spawn(async move |this, cx| {
             let result = client.season_episodes(&id, season, image_size).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(episodes) => {
-                        this.episode_thumbs = episodes
+                        let thumbs = episodes
                             .iter()
                             .map(|e| e.still_thumbhash.as_deref().and_then(artwork::thumbhash))
                             .collect();
+                        for old in std::mem::replace(&mut this.episode_thumbs, thumbs).into_iter().flatten() {
+                            cx.drop_image(old, None);
+                        }
+                        if let Focus::Episode(i) = this.focus {
+                            let kept = kept(&this.episodes, i, &episodes, |episode| episode.content_id.clone());
+                            this.focus = Focus::Episode(kept.unwrap_or(i));
+                        }
+                        // The menu of a card goes with its episode, and closes when the episode is gone.
+                        if let Some(Mark::Episode(i)) = this.menu {
+                            this.menu = kept(&this.episodes, i, &episodes, |e| e.content_id.clone()).map(Mark::Episode);
+                        }
                         this.episodes = episodes;
+                        this.focus = this.rows().clamp(this.focus);
                     }
+                    Err(err) if !this.episodes.is_empty() => eprintln!("relics: cannot reload the episodes: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
                 }
                 cx.notify();
@@ -572,7 +634,7 @@ impl Detail {
         self.focus = Focus::Season(index);
         if index != self.season {
             self.season = index;
-            self.load_episodes(cx);
+            self.load_episodes(true, cx);
         }
         cx.notify();
     }
@@ -1164,6 +1226,38 @@ impl Render for Detail {
     }
 }
 
+/// The place in `versions` of the file that `old[chosen]` plays. The first version when that file is gone.
+pub fn kept_version(old: &[wire::FileVersion], chosen: usize, versions: &[wire::FileVersion]) -> usize {
+    kept(old, chosen, versions, |version| version.file_id.clone()).unwrap_or(0)
+}
+
+/// The place in `new` of `old[index]`, matched by `key`. `None` when it is gone.
+fn kept<T, K: PartialEq>(old: &[T], index: usize, new: &[T], key: impl Fn(&T) -> K) -> Option<usize> {
+    let wanted = key(old.get(index)?);
+    new.iter().position(|item| key(item) == wanted)
+}
+
+/// The focus after a reload with new actions, versions and seasons. A focused button or pill moves with its action,
+/// file or season number, so that Enter does what the focus showed before.
+pub fn kept_focus(
+    focus: Focus,
+    actions: (&[Action], &[Action]),
+    versions: (&[wire::FileVersion], &[wire::FileVersion]),
+    seasons: (&[wire::Season], &[wire::Season]),
+) -> Focus {
+    // Play becomes Resume when the Item gets a position. It is the same button.
+    let action = |action: &Action| match action {
+        Action::Play { .. } => Action::Play { resume: false },
+        action => *action,
+    };
+    match focus {
+        Focus::Action(i) => Focus::Action(kept(actions.0, i, actions.1, action).unwrap_or(0)),
+        Focus::Version(i) => Focus::Version(kept_version(versions.0, i, versions.1)),
+        Focus::Season(i) => Focus::Season(kept(seasons.0, i, seasons.1, |season| season.season_number).unwrap_or(0)),
+        focus => focus,
+    }
+}
+
 /// The Item that Enter on a card opens, and the season to show: a season opens its series. An episode opens its own
 /// page, with More Episodes.
 pub fn target(item: &wire::CatalogItem) -> (String, Option<i64>) {
@@ -1542,6 +1636,15 @@ pub struct Rows {
 }
 
 impl Rows {
+    /// `focus`, moved back into its row when the row got shorter, or to the first button when the row is gone.
+    pub fn clamp(&self, focus: Focus) -> Focus {
+        let (row, index) = focus.place();
+        match self.len(row) {
+            0 => Focus::Action(0),
+            len => Focus::at(row, index.min(len - 1)),
+        }
+    }
+
     fn len(&self, row: usize) -> usize {
         let Rows { actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar, .. } = *self;
         [actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar][row]
@@ -1862,6 +1965,10 @@ mod tests {
             columns: 4,
         };
         assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
+        let shorter = Rows { cast: 3, ..movie };
+        assert_eq!(shorter.clamp(Focus::Cast(5)), Focus::Cast(2), "the cast row got shorter");
+        assert_eq!(shorter.clamp(Focus::Cast(1)), Focus::Cast(1));
+        assert_eq!(shorter.clamp(Focus::Similar(4)), Focus::Action(0), "the row is gone");
         let loading = Rows { episodes: 0, ..rows };
         assert_eq!(loading.step(Focus::Season(0), Key::Down), Step::Stay);
         let shuffle = Rows { shuffle: 1, ..rows };
@@ -1909,6 +2016,40 @@ mod tests {
             json!({"interlaced": false, "dv_bl_compat_id_present": false, "dv_config_present": false});
         track_fields.as_object_mut().unwrap().extend(track.as_object().unwrap().clone());
         video_range(&version(json!({"hdr": hdr, "video_tracks": [track_fields]})))
+    }
+
+    #[test]
+    fn a_reload_moves_the_focus_of_a_version_or_season_pill_with_its_file_or_season() {
+        let versions = |ids: &[&str]| ids.iter().map(|id| version(json!({"file_id": id}))).collect::<Vec<_>>();
+        let seasons = |numbers: &[i64]| numbers.iter().map(|n| season(json!({"season_number": n}))).collect::<Vec<_>>();
+        let (old_versions, new_versions) = (versions(&["a", "b", "c"]), versions(&["a", "c"]));
+        let (old_seasons, new_seasons) = (seasons(&[1, 2, 3]), seasons(&[2, 3]));
+        let old_actions = [Action::Play { resume: false }, Action::Watchlist, Action::Favorite];
+        let new_actions = [Action::Play { resume: true }, Action::StartOver, Action::Watchlist, Action::Favorite];
+        let keep = |focus| {
+            kept_focus(
+                focus,
+                (&old_actions, &new_actions),
+                (&old_versions, &new_versions),
+                (&old_seasons, &new_seasons),
+            )
+        };
+        assert_eq!(keep(Focus::Action(1)), Focus::Action(2), "Start Over came before Watchlist");
+        assert_eq!(keep(Focus::Action(0)), Focus::Action(0), "Play became Resume");
+        assert_eq!(keep(Focus::Version(2)), Focus::Version(1), "c moved up one place");
+        assert_eq!(keep(Focus::Version(1)), Focus::Version(0), "b is gone");
+        assert_eq!(keep(Focus::Season(2)), Focus::Season(1), "season 3 moved up one place");
+        assert_eq!(keep(Focus::Cast(4)), Focus::Cast(4));
+    }
+
+    #[test]
+    fn a_reload_keeps_the_chosen_version_by_its_file() {
+        let versions = |ids: &[&str]| ids.iter().map(|id| version(json!({"file_id": id}))).collect::<Vec<_>>();
+        let old = versions(&["1", "2"]);
+        assert_eq!(kept_version(&old, 1, &versions(&["3", "1", "2"])), 2, "a new version comes first");
+        assert_eq!(kept_version(&old, 1, &versions(&["2", "1"])), 0, "the order changed");
+        assert_eq!(kept_version(&old, 1, &versions(&["1", "3"])), 0, "the chosen file is gone");
+        assert_eq!(kept_version(&[], 0, &versions(&["1", "2"])), 0, "the first load");
     }
 
     #[test]

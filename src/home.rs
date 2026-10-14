@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription,
-    Task, Window, div, list, prelude::FluentBuilder as _, px,
+    ListOffset, ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled,
+    Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, Theme, button};
 
@@ -48,6 +48,8 @@ pub struct Home {
     focus: Focus,
     /// The page has the keyboard focus, so the focused card shows the focus ring.
     pub active: bool,
+    /// A refresh came while the page did not show. The page reloads when it shows again.
+    stale: bool,
     /// The page list: one item for each section, and the status line as the last item.
     page: ListState,
     row_scrolls: Vec<ScrollHandle>,
@@ -72,6 +74,38 @@ pub enum Focus {
         row: usize,
         col: usize,
     },
+}
+
+/// The focus after a reload from `old` to `new` sections. A focused card moves with its section and Item, and "View
+/// all" with its section. When the Item is gone, the focus keeps its place in the row.
+pub fn kept_focus(focus: Focus, old: &[HomeSection], new: &[HomeSection]) -> Focus {
+    let Focus::Card { row, col } = focus else {
+        return focus;
+    };
+    let Some(section) = old.get(row) else {
+        return focus;
+    };
+    let Some(row) = new.iter().position(|s| s.id == section.id) else {
+        return focus;
+    };
+    let col = match section.items.get(col) {
+        Some(item) => new[row].items.iter().position(|i| i.content_id == item.content_id).unwrap_or(col),
+        None => new[row].items.len(),
+    };
+    Focus::Card { row, col }
+}
+
+/// The scroll position of the page after a reload of its sections from `old` to `new`. The section at the top of
+/// the view stays there, also when a section above it comes or goes. When that section goes, the section that takes
+/// its place shows from its start.
+pub fn kept_top(top: ListOffset, old: &[HomeSection], new: &[HomeSection]) -> ListOffset {
+    let Some(section) = old.get(top.item_ix) else {
+        return top;
+    };
+    match new.iter().position(|s| s.id == section.id) {
+        Some(item_ix) => ListOffset { item_ix, ..top },
+        None => ListOffset { offset_in_item: px(0.), ..top },
+    }
 }
 
 /// Moves the focus for an arrow or hjkl key. `rows` holds the number of cards in each row.
@@ -121,6 +155,7 @@ impl Home {
             failed: false,
             focus: Focus::Outside,
             active: false,
+            stale: false,
             // The overdraw measures the rows near the viewport, so that the focus can scroll to them.
             page: ListState::new(1, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
@@ -129,6 +164,21 @@ impl Home {
         };
         home.load(cx);
         home
+    }
+
+    /// Reloads the sections now when the page shows. Otherwise the page reloads when it shows again.
+    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
+        self.stale = true;
+        if shows {
+            self.shown(cx);
+        }
+    }
+
+    /// The page shows again.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.stale) {
+            self.load(cx);
+        }
     }
 
     /// Loads the Home sections, with the artwork URLs of each section in the rung for its cards.
@@ -150,8 +200,21 @@ impl Home {
                         for old in std::mem::replace(&mut this.thumbs, thumbs).into_iter().flatten().flatten() {
                             cx.drop_image(old, None);
                         }
-                        // A reload at a larger rung keeps the scroll positions and the focus.
-                        this.row_scrolls.resize_with(sections.len(), ScrollHandle::new);
+                        // A reload keeps the scroll position of each section and the focus.
+                        this.row_scrolls = sections
+                            .iter()
+                            .map(|section| {
+                                let old = this.sections.iter().position(|s| s.id == section.id);
+                                old.and_then(|i| this.row_scrolls.get(i).cloned()).unwrap_or_else(ScrollHandle::new)
+                            })
+                            .collect();
+                        let focus = kept_focus(this.focus, &this.sections, &sections);
+                        let old_top = this.page.logical_scroll_top();
+                        let top = kept_top(old_top, &this.sections, &sections);
+                        if let (Focus::Card { row, col }, true) = (focus, focus != this.focus) {
+                            cards(&sections[row]).reveal(&this.row_scrolls[row], col);
+                        }
+                        this.focus = focus;
                         this.sections = sections;
                         this.status = None;
                         this.failed = false;
@@ -164,15 +227,19 @@ impl Home {
                             this.focus = move_focus(Focus::Outside, Key::Right, &rows);
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        // A reload with the same number of sections keeps the scroll position.
                         let count = this.sections.len() + 1;
-                        if this.page.item_count() == count {
+                        if this.page.item_count() == count
+                            && (top.item_ix, top.offset_in_item) == (old_top.item_ix, old_top.offset_in_item)
+                        {
                             this.page.remeasure();
                         } else {
                             this.page.reset(count);
+                            this.page.scroll_to(top);
                         }
                     }
-                    // The page keeps what it shows. The Library window shows Offline or the sign-in screen.
+                    // The page keeps what it shows, with no error. The Library window shows Offline or the sign-in
+                    // screen.
+                    Err(err) if !this.sections.is_empty() => eprintln!("relics: cannot reload the rows: {err}"),
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;
@@ -516,16 +583,52 @@ pub(crate) fn card_badge(item: &wire::CatalogItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Focus, card_badge, move_focus, rung, short_line};
+    use super::{Focus, card_badge, kept_focus, kept_top, move_focus, rung, short_line};
+    use crate::api::HomeSection;
     use crate::api::wire;
     use crate::artwork::Rung;
     use crate::keys::Key;
+    use gpui::{ListOffset, px};
     use serde_json::json;
 
     fn card(fields: serde_json::Value) -> wire::CatalogItem {
         let mut item = json!({"content_id": "x", "type": "movie", "title": "x", "genres": [], "keywords": [], "status": "available", "year": 2022});
         item.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         serde_json::from_value(item).unwrap()
+    }
+
+    fn section(id: &str, items: &[&str]) -> HomeSection {
+        HomeSection {
+            id: id.into(),
+            section_type: id.into(),
+            title: id.into(),
+            featured: false,
+            items: items.iter().map(|item| card(json!({"content_id": item}))).collect(),
+            view_all: true,
+        }
+    }
+
+    #[test]
+    fn a_reload_keeps_the_focus_on_the_same_card_or_view_all() {
+        let old = [section("continue", &["a", "b", "c"]), section("new", &["x"])];
+        let new = [section("featured", &[]), section("continue", &["c", "a"]), section("new", &["x"])];
+        let at = |row, col| Focus::Card { row, col };
+        assert_eq!(kept_focus(at(0, 2), &old, &new), at(1, 0), "the played Item moved to the front");
+        assert_eq!(kept_focus(at(0, 1), &old, &new), at(1, 1), "a gone Item keeps its place");
+        assert_eq!(kept_focus(at(1, 1), &old, &new), at(2, 1), "View all");
+        assert_eq!(kept_focus(Focus::Outside, &old, &new), Focus::Outside);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_top_section_in_view_when_a_section_above_it_comes_or_goes() {
+        let old = [section("continue", &["a"]), section("new", &["x"]), section("top", &["y"])];
+        let new = [section("new", &["x"]), section("added", &["z"]), section("top", &["y"])];
+        let top = |at: ListOffset| (at.item_ix, at.offset_in_item);
+        let at = |item_ix, offset: f32| ListOffset { item_ix, offset_in_item: px(offset) };
+        assert_eq!(top(kept_top(at(1, 40.), &old, &new)), top(at(0, 40.)), "Continue Watching went");
+        assert_eq!(top(kept_top(at(2, 10.), &old, &new)), top(at(2, 10.)), "the same place");
+        assert_eq!(top(kept_top(at(0, 40.), &old, &new)), top(at(0, 0.)), "a gone section");
+        assert_eq!(top(kept_top(at(3, 5.), &old, &new)), top(at(3, 5.)), "the status line");
     }
 
     #[test]

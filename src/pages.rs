@@ -6,15 +6,18 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement as _,
     Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, IconName, icon, keycap};
 
+use crate::api::live::LiveChange;
 use crate::api::{Client, wire};
 use crate::browse;
 use crate::click::Clickable as _;
@@ -63,6 +66,110 @@ const MENU: [(MenuChoice, &str); 3] = [
     (MenuChoice::SwitchServer, "Switch server"),
     (MenuChoice::SignOut, "Sign out"),
 ];
+
+/// The new state of `library` in the list. `None` when the Library is gone, or has another type: the page of a
+/// Library builds its grid for the type.
+fn relisted<'a>(library: &wire::UserLibrary, libraries: &'a [wire::UserLibrary]) -> Option<&'a wire::UserLibrary> {
+    libraries.iter().find(|other| other.id == library.id && other.type_ == library.type_)
+}
+
+/// Gives the Library page the new state of its Library, for example a new name. False when the page cannot stay.
+fn relist(page: &Entity<LibraryPage>, libraries: &[wire::UserLibrary], cx: &mut App) -> bool {
+    let Some(library) = relisted(&page.read(cx).library, libraries).cloned() else {
+        return false;
+    };
+    page.update(cx, |page, cx| {
+        page.library = library;
+        cx.notify();
+    });
+    true
+}
+
+/// The sidebar row after the Library list changes from `old` to `new`: the row of the same Library, or the same row
+/// below the Libraries. Home when the Library is gone.
+fn kept_row(row: usize, old: &[wire::UserLibrary], new: &[wire::UserLibrary]) -> usize {
+    match row.checked_sub(1).map(|i| old.get(i)) {
+        Some(Some(library)) => new.iter().position(|l| l.id == library.id).map_or(0, |i| i + 1),
+        Some(None) => row - old.len() + new.len(),
+        None => 0,
+    }
+}
+
+/// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refresh {
+    /// The Library list, Home, each Recommended tab that the user opened, and each Detail page.
+    All,
+    /// Home, each opened Recommended tab, and the Detail page of the Item, of the series, or of an episode of the
+    /// series.
+    Item { item: Option<String>, series: Option<String> },
+    /// Home, the Recommended tab of the Library, and each Detail page. A `library` of `None` is each opened
+    /// Recommended tab. An `item` of `None` is no Detail page.
+    Library { library: Option<String>, item: Option<String> },
+    /// The Library list, Home, and the Recommended tab of the Library. A `library` of `None` is each opened
+    /// Recommended tab.
+    Libraries { library: Option<String> },
+}
+
+impl Refresh {
+    /// The refresh reloads the Recommended tab of the Library `id`.
+    pub fn reaches_library(&self, id: &str) -> bool {
+        match self {
+            Refresh::Library { library: Some(library), .. } | Refresh::Libraries { library: Some(library) } => {
+                library == id
+            }
+            _ => true,
+        }
+    }
+
+    /// The refresh reloads the Detail page of the Item `page`. `page_series` is the series of an episode page.
+    pub fn reaches_detail(&self, page: &str, page_series: Option<&str>) -> bool {
+        match self {
+            Refresh::All => true,
+            // The event of an episode does not name its series, so each Item change reaches each Detail page.
+            Refresh::Library { item, .. } => item.is_some(),
+            Refresh::Libraries { .. } => false,
+            Refresh::Item { item, series } => {
+                item.as_deref() == Some(page) || series.as_deref().is_some_and(|s| s == page || Some(s) == page_series)
+            }
+        }
+    }
+}
+
+/// Lets the first refresh through at once and opens a window of `period`. The window holds the refreshes that
+/// come in it, and lets them through together at its end. A window that held refreshes opens the next window.
+pub struct Throttle {
+    pub period: Duration,
+    open: bool,
+    held: Vec<Refresh>,
+    /// The timer of the open window.
+    window: Task<()>,
+}
+
+impl Throttle {
+    pub fn new(period: Duration) -> Self {
+        Self { period, open: false, held: Vec::new(), window: Task::ready(()) }
+    }
+
+    /// Returns true when `refresh` runs now and a window opens. Otherwise the open window holds it.
+    pub fn push(&mut self, refresh: Refresh) -> bool {
+        if !self.open {
+            self.open = true;
+            return true;
+        }
+        if !self.held.contains(&refresh) {
+            self.held.push(refresh);
+        }
+        false
+    }
+
+    /// The end of the window: the refreshes to run now. The next window stays open when there are any.
+    pub fn tick(&mut self) -> Vec<Refresh> {
+        let held = std::mem::take(&mut self.held);
+        self.open = !held.is_empty();
+        held
+    }
+}
 
 #[derive(Clone)]
 pub enum Page {
@@ -114,6 +221,16 @@ impl Page {
         }
     }
 
+    /// The page shows again. A page that became stale while it did not show reloads.
+    fn shown(&self, cx: &mut gpui::App) {
+        match self {
+            Page::Home(home) => home.update(cx, |home, cx| home.shown(cx)),
+            Page::Library(page) => page.update(cx, |page, cx| page.shown(cx)),
+            Page::Detail(page) => page.update(cx, |page, cx| page.shown(cx)),
+            _ => {}
+        }
+    }
+
     fn into_any_element(self) -> AnyElement {
         match self {
             Page::Home(home) => home.into_any_element(),
@@ -149,6 +266,12 @@ pub struct Pages {
     /// Each Server and Account pair, and the Active server, for the Accounts section of the Settings page.
     pub pairs: (Vec<Pair>, Option<(String, String)>),
     focus_handle: FocusHandle,
+    /// The window of the progress events of the Live updates: 30 seconds.
+    progress: Throttle,
+    /// The window of the catalog events of the Live updates: 2 seconds.
+    catalog: Throttle,
+    /// The Live updates of the Profile. The socket lives as long as the pages.
+    _live: Task<()>,
     _libraries: Task<()>,
     _events: Vec<Subscription>,
 }
@@ -175,14 +298,100 @@ impl Pages {
             menu: None,
             pairs: (Vec::new(), None),
             focus_handle: cx.focus_handle(),
+            progress: Throttle::new(Duration::from_secs(30)),
+            catalog: Throttle::new(Duration::from_secs(2)),
+            _live: Task::ready(()),
             _libraries: Task::ready(()),
             _events: Vec::new(),
         };
         pages.listen(&home, window, cx);
         pages.page.set_active(true, cx);
         pages.load_libraries(cx);
+        pages.listen_live(cx);
         pages.focus(window, cx);
         pages
+    }
+
+    fn listen_live(&mut self, cx: &mut Context<Self>) {
+        let mut changes = self.client.live_updates();
+        self._live = cx.spawn(async move |this, cx| {
+            while let Some(change) = changes.next().await {
+                if this.update(cx, |this, cx| this.live(change, cx)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn live(&mut self, change: LiveChange, cx: &mut Context<Self>) {
+        match change {
+            LiveChange::Resync => self.refresh(&Refresh::All, cx),
+            LiveChange::UserState { item, series, progress: false } => {
+                self.refresh(&Refresh::Item { item, series }, cx)
+            }
+            LiveChange::UserState { item, series, progress: true } => {
+                self.throttled(|this| &mut this.progress, Refresh::Item { item, series }, cx)
+            }
+            LiveChange::Catalog { library, item } => {
+                self.throttled(|this| &mut this.catalog, Refresh::Library { library, item }, cx)
+            }
+            LiveChange::Libraries { library } => {
+                self.throttled(|this| &mut this.catalog, Refresh::Libraries { library }, cx)
+            }
+        }
+    }
+
+    /// Runs `refresh` through the window that `window` picks.
+    fn throttled(&mut self, window: fn(&mut Self) -> &mut Throttle, refresh: Refresh, cx: &mut Context<Self>) {
+        if !window(self).push(refresh.clone()) {
+            return;
+        }
+        self.refresh(&refresh, cx);
+        let period = window(self).period;
+        window(self).window = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(period).await;
+                let open = this.update(cx, |this, cx| {
+                    let held = window(this).tick();
+                    for refresh in &held {
+                        this.refresh(refresh, cx);
+                    }
+                    !held.is_empty()
+                });
+                if !matches!(open, Ok(true)) {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Reloads the pages that `refresh` reaches. A page that shows reloads now, and keeps its scroll position and
+    /// focus. A page that does not show becomes stale, and reloads one time when it shows again.
+    pub fn refresh(&mut self, refresh: &Refresh, cx: &mut Context<Self>) {
+        if matches!(refresh, Refresh::All | Refresh::Libraries { .. }) {
+            self.load_libraries(cx);
+        }
+        let home = matches!(&self.page, Page::Home(home) if *home == self.home);
+        self.home.update(cx, |page, cx| page.refresh(home, cx));
+        for page in self.library_pages.values() {
+            let shows = matches!(&self.page, Page::Library(p) if p == page);
+            page.update(cx, |page, cx| {
+                if refresh.reaches_library(&page.library.id.to_string()) {
+                    page.refresh(shows, cx);
+                }
+            });
+        }
+        for page in std::iter::once(&self.page).chain(&self.back) {
+            if let Page::Detail(detail) = page {
+                let shows = matches!(&self.page, Page::Detail(p) if p == detail);
+                detail.update(cx, |detail, cx| {
+                    let (id, series) = detail.shows();
+                    if refresh.reaches_detail(id, series) {
+                        detail.refresh(shows, cx);
+                    }
+                });
+            }
+        }
     }
 
     /// Gives the keyboard focus to the pages, for example when they come back after the PIN entry.
@@ -195,7 +404,16 @@ impl Pages {
         self._libraries = cx.spawn(async move |this, cx| match client.libraries().await {
             Ok(libraries) => {
                 this.update(cx, |this, cx| {
+                    // A removed Library, or one with another type, opens fresh next time.
+                    this.library_pages.retain(|_, page| relist(page, &libraries, cx));
+                    this.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
+                    let removed = matches!(&this.page, Page::Library(page) if !relist(page, &libraries, cx));
+                    this.sidebar = this.sidebar.map(|row| kept_row(row, &this.libraries, &libraries));
                     this.libraries = libraries;
+                    if removed {
+                        this.back.clear();
+                        this.show(Page::Home(this.home.clone()), cx);
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -322,6 +540,7 @@ impl Pages {
     fn show(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page.set_active(false, cx);
         page.set_active(self.sidebar.is_none(), cx);
+        page.shown(cx);
         self.page = page;
         cx.notify();
     }
@@ -710,7 +929,9 @@ impl Render for Pages {
 
 #[cfg(test)]
 mod tests {
-    use super::{shortcut, sidebar_width};
+    use std::time::Duration;
+
+    use super::{Refresh, Throttle, kept_row, relisted, shortcut, sidebar_width};
     use crate::api::wire;
 
     fn library(id: &str, kind: &str) -> wire::UserLibrary {
@@ -732,5 +953,83 @@ mod tests {
         assert_eq!(sidebar_width(1400., false), 240.);
         assert_eq!(sidebar_width(960., false), 64.);
         assert_eq!(sidebar_width(1400., true), 64.);
+    }
+
+    #[test]
+    fn an_item_change_reaches_its_detail_page_and_the_detail_page_of_its_series() {
+        let episode = Refresh::Item { item: Some("episode:e1".into()), series: Some("series:s".into()) };
+        assert!(episode.reaches_detail("episode:e1", Some("series:s")));
+        assert!(episode.reaches_detail("series:s", None), "the page of the series");
+        assert!(episode.reaches_detail("episode:e2", Some("series:s")), "another episode of the series");
+        assert!(!episode.reaches_detail("movie:m", None));
+        let movie = Refresh::Item { item: Some("movie:m".into()), series: None };
+        assert!(movie.reaches_detail("movie:m", None));
+        assert!(!movie.reaches_detail("episode:e1", None), "no series matches no series");
+        assert!(Refresh::All.reaches_detail("movie:m", None));
+        let library = |library: Option<&str>, item: Option<&str>| Refresh::Library {
+            library: library.map(Into::into),
+            item: item.map(Into::into),
+        };
+        assert!(!library(None, None).reaches_detail("movie:m", None));
+        assert!(library(Some("7"), Some("movie:m")).reaches_detail("movie:m", None), "a catalog change of the Item");
+        assert!(
+            library(Some("7"), Some("episode:e1")).reaches_detail("series:s", None),
+            "the event does not name the series of an episode, so each Item change reaches each Detail page"
+        );
+        assert!(!Refresh::Libraries { library: Some("7".into()) }.reaches_detail("movie:m", None));
+    }
+
+    #[test]
+    fn the_sidebar_focus_stays_on_its_library_or_row_when_the_library_list_changes() {
+        let old = [library("films", "movies"), library("shows", "series")];
+        let new = [library("kids", "movies"), library("films", "movies"), library("shows", "series")];
+        assert_eq!(kept_row(0, &old, &new), 0, "Home");
+        assert_eq!(kept_row(2, &old, &new), 3, "the same Library");
+        assert_eq!(kept_row(3, &old, &new), 4, "Search, below the Libraries");
+        assert_eq!(kept_row(1, &new, &old), 0, "a removed Library goes to Home");
+        assert_eq!(kept_row(4, &new, &old), 3, "Search when the list gets shorter");
+    }
+
+    #[test]
+    fn a_library_page_stays_while_its_library_is_in_the_list_with_the_same_type() {
+        let movies = library("12", "movies");
+        let renamed: wire::UserLibrary =
+            serde_json::from_value(serde_json::json!({"id": "12", "name": "Films", "type": "movies", "sort_order": 0}))
+                .unwrap();
+        let name = |list: &[wire::UserLibrary]| relisted(&movies, list).map(|library| library.name.clone());
+        assert_eq!(name(&[library("7", "shows"), movies.clone()]), Some(movies.name.clone()));
+        assert_eq!(name(&[renamed]), Some("Films".into()), "a renamed Library");
+        assert_eq!(name(&[library("12", "shows")]), None, "another type");
+        assert_eq!(name(&[library("7", "shows")]), None, "a removed Library");
+    }
+
+    #[test]
+    fn a_library_change_reaches_only_the_recommended_tab_of_its_library() {
+        let library = |id: Option<&str>| Refresh::Library { library: id.map(Into::into), item: None };
+        assert!(library(Some("7")).reaches_library("7"));
+        assert!(!library(Some("7")).reaches_library("8"));
+        assert!(library(None).reaches_library("8"), "no Library reaches each tab");
+        let libraries = |id: Option<&str>| Refresh::Libraries { library: id.map(Into::into) };
+        assert!(libraries(Some("7")).reaches_library("7"));
+        assert!(!libraries(Some("7")).reaches_library("8"));
+        assert!(libraries(None).reaches_library("8"));
+        assert!(Refresh::All.reaches_library("8"));
+        assert!(Refresh::Item { item: None, series: None }.reaches_library("8"));
+    }
+
+    #[test]
+    fn a_burst_runs_one_refresh_now_and_one_at_the_end_of_each_window() {
+        let mut throttle = Throttle::new(Duration::from_secs(30));
+        let a = Refresh::Library { library: Some("1".into()), item: None };
+        let b = Refresh::Library { library: Some("2".into()), item: None };
+        assert!(throttle.push(a.clone()), "the first refresh runs now");
+        assert!(!throttle.push(a.clone()));
+        assert!(!throttle.push(b.clone()));
+        assert!(!throttle.push(a.clone()));
+        assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one refresh of each target");
+        assert!(!throttle.push(a.clone()), "the trailing refresh opened the next window");
+        assert_eq!(throttle.tick(), std::slice::from_ref(&a));
+        assert_eq!(throttle.tick(), [], "a quiet window closes");
+        assert!(throttle.push(a), "the next refresh runs now");
     }
 }

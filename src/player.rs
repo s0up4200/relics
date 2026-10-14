@@ -158,6 +158,9 @@ pub struct PlayerClosed;
 /// The Player view closed: playback ended, or the video cannot show.
 pub struct ViewClosed;
 
+/// A stop report completed, or failed. The Server has the position now, so the pages can reload.
+pub struct Stopped;
+
 pub struct Controller {
     client: Option<Arc<Client>>,
     session: Option<Session>,
@@ -218,6 +221,7 @@ pub struct Controller {
 impl EventEmitter<PlaybackError> for Controller {}
 impl EventEmitter<PlayerClosed> for Controller {}
 impl EventEmitter<ViewClosed> for Controller {}
+impl EventEmitter<Stopped> for Controller {}
 
 impl Controller {
     pub fn new(video: Option<Rc<Surface>>, cx: &mut Context<Self>) -> Self {
@@ -600,10 +604,14 @@ impl Controller {
                 })
                 .detach(),
             Command::Stop { session_id, sample } => {
-                let stop = cx.background_spawn(async move {
+                let report = cx.background_spawn(async move {
                     if let Err(err) = client.stop_playback(&session_id, sample.as_ref()).await {
                         eprintln!("relics: stop report failed: {err}");
                     }
+                });
+                let stop = cx.spawn(async move |this, cx| {
+                    report.await;
+                    this.update(cx, |_, cx| cx.emit(Stopped)).ok();
                 });
                 if let Some(older) = self.stopping.replace(stop) {
                     older.detach();

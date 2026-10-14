@@ -1,9 +1,15 @@
-# Only the mpv adapter (src/mpv.rs) may hold a libmpv handle.
+# Only the mpv adapter (src/mpv.rs) may hold a libmpv handle. Only the live module (src/api/live.rs) may use the
+# events socket.
 disallowed-types = [
     { path = "libmpv2::Mpv", reason = "only the mpv adapter in src/mpv.rs may use libmpv" },
+    { path = "async_tungstenite::WebSocketStream", reason = "use Client::live_updates for the events socket" },
+    { path = "async_tungstenite::tungstenite::Message", reason = "use Client::live_updates for the events socket" },
 ]
 
 # Only the Artwork cache (src/artwork.rs) may make an image element, so that each image loads through the cache.
 disallowed-methods = [
     { path = "gpui::img", reason = "load artwork through src/artwork.rs so it goes through the cache" },
+    { path = "async_tungstenite::smol::connect_async", reason = "use Client::live_updates for the events socket" },
+    { path = "async_tungstenite::smol::connect_async_with_tls_connector", reason = "use Client::live_updates for the events socket" },
+    { path = "async_tungstenite::client_async", reason = "use Client::live_updates for the events socket" },
 ]

@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Log, fixture, json};
+use common::{Log, fixture, json, jwt};
 use futures::executor::block_on;
 use relics::api::{Client, Decision, types};
 use relics::playback::{Operation, Replan, Sample};
@@ -199,13 +199,6 @@ fn progress_and_stop_send_the_installation_id_and_the_sample() {
     assert_eq!((&stop["sequence"], &stop["position"], &stop["is_paused"]), (&json!(4), &json!(120.5), &json!(true)));
     let paths: Vec<String> = seen.lock().unwrap().iter().map(|s| format!("{} {}", s.method, s.path)).collect();
     assert!(!paths.iter().any(|p| p.contains("watched")), "the app never marks an Item watched: {paths:?}");
-}
-
-/// A JWT whose payload has this `exp`. The signature is not checked.
-fn jwt(exp: u64) -> String {
-    use base64::Engine as _;
-    let part = |json: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.to_string());
-    format!("{}.{}.sig", part(json!({ "alg": "HS256" })), part(json!({ "sub": "u1", "exp": exp })))
 }
 
 #[test]

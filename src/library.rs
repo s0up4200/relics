@@ -19,8 +19,8 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 use crate::accounts::{AccountChoice, AccountPicker};
 use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
 use crate::home;
-use crate::pages::{MenuChoice, Pages};
-use crate::player::{Controller, PlaybackError, PlayerClosed, ViewClosed};
+use crate::pages::{MenuChoice, Pages, Refresh};
+use crate::player::{Controller, PlaybackError, PlayerClosed, Stopped, ViewClosed};
 use crate::player_view::PlayerView;
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
@@ -60,6 +60,7 @@ pub struct LibraryWindow {
     player_error: Option<String>,
     _player: Subscription,
     _player_closed: Subscription,
+    _stopped: Subscription,
     /// The Player view. It shows in place of the screen while the controller plays in it, so Back returns to
     /// the page where playback started. `None` when the window has no video surface.
     player_view: Option<Entity<PlayerView>>,
@@ -155,6 +156,8 @@ impl LibraryWindow {
             }
             cx.notify();
         });
+        // The Server has the new position after the stop report, so the pages reload.
+        let stopped = cx.subscribe(&player, |this, _, _: &Stopped, cx| this.refresh_pages(cx));
         let player_events = cx.subscribe(&player, |this, _, PlaybackError(text), cx| {
             this.player_error = Some(text.clone());
             cx.notify();
@@ -192,6 +195,7 @@ impl LibraryWindow {
             player_error: None,
             _player: player_events,
             _player_closed: player_closed,
+            _stopped: stopped,
             player_view,
             _view_closed: view_closed,
             client: None,
@@ -414,7 +418,11 @@ impl LibraryWindow {
             .detach();
             this.update_in(cx, |this, window, cx| {
                 let pages = match this.parked.take() {
-                    Some((id, pages)) if id == *profile.id => pages,
+                    // The pages missed the changes, and a stop report, while the sign-in showed.
+                    Some((id, pages)) if id == *profile.id => {
+                        pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+                        pages
+                    }
                     _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
                 };
                 this.show_pages(client, pages, window, cx);
@@ -745,8 +753,20 @@ impl LibraryWindow {
         }
     }
 
+    /// Reloads all pages. The pages also wait behind a picker or the PIN entry. Parked pages reload when they come
+    /// back.
+    fn refresh_pages(&mut self, cx: &mut Context<Self>) {
+        let pages = match &self.screen {
+            Screen::Pages(pages) => Some(pages.clone()),
+            _ => self.menu_back.clone().or_else(|| self.pin_wait.as_ref().map(|wait| wait.pages.clone())),
+        };
+        if let Some(pages) = pages {
+            pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+        }
+    }
+
     /// Probes `system/info` with the retry delays until the Server answers. Then it sends the kept progress,
-    /// and opens the Account again when the Server did not answer at launch.
+    /// reloads the pages, and opens the Account again when the Server did not answer at launch.
     fn probe_until_online(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -765,7 +785,7 @@ impl LibraryWindow {
                 }
                 attempt = attempt.saturating_add(1);
             }
-            cx.background_spawn({
+            let sync = cx.background_spawn({
                 let client = client.clone();
                 async move {
                     client
@@ -774,8 +794,7 @@ impl LibraryWindow {
                         .inspect_err(|err| eprintln!("relics: progress sync failed: {err}"))
                         .ok()
                 }
-            })
-            .detach();
+            });
             this.update_in(cx, |this, window, cx| {
                 this.offline = false;
                 // This task ends here, so it must not drop itself.
@@ -788,6 +807,10 @@ impl LibraryWindow {
                 cx.notify();
             })
             .ok();
+            // The pages reload after the Server has the positions of the stop reports that failed offline.
+            if sync.await.is_some() {
+                this.update(cx, |this, cx| this.refresh_pages(cx)).ok();
+            }
         }));
     }
 
