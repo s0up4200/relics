@@ -282,6 +282,8 @@ impl Detail {
                 cx.drop_image(old, None);
             }
             self.episodes.clear();
+            // The focus can be on an episode that is gone.
+            self.focus = self.rows().clamp(self.focus);
         }
         let Some((id, season)) = self.listed_season() else {
             return;
