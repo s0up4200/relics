@@ -4,7 +4,7 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_io::Timer;
 use async_tungstenite::WebSocketStream;
@@ -20,7 +20,7 @@ use gpui::http_client::Method;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::Client;
+use super::{Client, token_expiry};
 use crate::library::retry_delay;
 
 /// A change that the Server tells about.
@@ -69,6 +69,8 @@ const SUBSCRIBE: &str = r#"{"type":"subscribe","channels":["catalog","user_state
 #[derive(Deserialize)]
 struct Ticket {
     ticket: String,
+    /// The Server ends the socket after this long, or when the access token expires, with no close frame.
+    max_connection_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -143,11 +145,11 @@ async fn run(client: Arc<Client>, changes: mpsc::UnboundedSender<LiveChange>) {
     while client.auth.lock().unwrap().profile_id.as_deref() == Some(profile.as_str()) && !changes.is_closed() {
         let started = Instant::now();
         let close = match connect(&client).await {
-            Ok(socket) => {
+            Ok((socket, lifetime)) => {
                 if std::mem::take(&mut missed) {
                     changes.unbounded_send(LiveChange::Resync).ok();
                 }
-                listen(socket, &profile, &changes).await
+                listen(socket, lifetime, &profile, &changes).await
             }
             Err(err) => {
                 eprintln!("relics: the events socket cannot connect: {err}");
@@ -164,8 +166,9 @@ async fn run(client: Arc<Client>, changes: mpsc::UnboundedSender<LiveChange>) {
     }
 }
 
-/// Mints a ticket and opens the socket with it.
-async fn connect(client: &Client) -> anyhow::Result<WebSocketStream<ConnectStream>> {
+/// Mints a ticket and opens the socket with it. Also gives the connection time of the socket: the time of the ticket,
+/// or less when the access token expires sooner.
+async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStream>, Duration)> {
     // The client refreshes the access token after a 401.
     let ticket: Ticket = client.call_with_retries(Method::POST, "events/ws-ticket", None).await?;
     let mut url = client.server.url.join("api/v2/events/ws")?;
@@ -177,23 +180,29 @@ async fn connect(client: &Client) -> anyhow::Result<WebSocketStream<ConnectStrea
     request.headers_mut().insert("Sec-WebSocket-Protocol", protocols);
     let tls = futures_rustls::TlsConnector::from(Arc::new(http_client_tls::tls_config()));
     let (socket, _) = connect_async_with_tls_connector(request, Some(tls)).await?;
-    Ok(socket)
+    let token_left =
+        token_expiry(&client.tokens().access_token).and_then(|exp| exp.duration_since(SystemTime::now()).ok());
+    let lifetime = Duration::from_secs(ticket.max_connection_seconds);
+    Ok((socket, token_left.map_or(lifetime, |left| left.min(lifetime))))
 }
 
 /// Subscribes, and sends the changes until the socket closes. A close frame from the Server is a planned close,
-/// unless the access changed.
+/// unless the access changed. A drop at the end of the connection time `lifetime` is also a planned close.
 async fn listen(
     mut socket: WebSocketStream<ConnectStream>,
+    lifetime: Duration,
     profile: &str,
     changes: &mpsc::UnboundedSender<LiveChange>,
 ) -> Close {
     if socket.send(Message::Text(Utf8Bytes::from_static(SUBSCRIBE))).await.is_err() {
         return Close::Lost;
     }
+    let opened = Instant::now();
     loop {
         // tungstenite answers each ping while it reads.
         let message = match select(socket.next(), Timer::after(SILENCE)).await {
             Either::Left((Some(Ok(message)), _)) => message,
+            Either::Left(_) if opened.elapsed() + Duration::from_secs(1) >= lifetime => return Close::Planned,
             _ => return Close::Lost,
         };
         match message {

@@ -101,3 +101,11 @@ pub fn fake(reply: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> (Client, 
     client.set_profile(Some("p-owner".into()));
     (client, seen)
 }
+
+/// A JWT whose payload has this `exp`. The signature is not checked.
+pub fn jwt(exp: u64) -> String {
+    use base64::Engine as _;
+    let part = |json: serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.to_string());
+    let (header, payload) = (serde_json::json!({ "alg": "HS256" }), serde_json::json!({ "sub": "u1", "exp": exp }));
+    format!("{}.{}.sig", part(header), part(payload))
+}
