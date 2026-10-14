@@ -53,6 +53,9 @@ pub enum Frame {
 /// The Server pings each 20 seconds. After this long with no frame, the connection is dead.
 const SILENCE: Duration = Duration::from_secs(60);
 
+/// The ticket lives 30 seconds, so a connect that takes longer cannot open the socket.
+const HANDSHAKE: Duration = Duration::from_secs(30);
+
 /// A socket that closes sooner than this after the ticket request counts as a failure, so that the next connect
 /// waits the retry delay.
 const STEADY: Duration = Duration::from_secs(10);
@@ -149,7 +152,12 @@ async fn run(client: Arc<Client>, changes: mpsc::UnboundedSender<LiveChange>) {
     let mut failures = 0;
     while client.auth.lock().unwrap().profile_id.as_deref() == Some(profile.as_str()) && !changes.is_closed() {
         let started = Instant::now();
-        let close = match connect(&client).await {
+        // A Server or a proxy can accept the TCP connection and then never answer.
+        let connected = match select(connect(&client).boxed(), Timer::after(HANDSHAKE)).await {
+            Either::Left((connected, _)) => connected,
+            Either::Right(_) => Err(anyhow::anyhow!("no answer in {} s", HANDSHAKE.as_secs())),
+        };
+        let close = match connected {
             Ok((socket, lifetime)) => {
                 if std::mem::take(&mut missed) {
                     changes.unbounded_send(LiveChange::Resync).ok();
