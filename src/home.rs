@@ -48,6 +48,8 @@ pub struct Home {
     focus: Focus,
     /// The page has the keyboard focus, so the focused card shows the focus ring.
     pub active: bool,
+    /// A refresh came while the page did not show. The page reloads when it shows again.
+    stale: bool,
     /// The page list: one item for each section, and the status line as the last item.
     page: ListState,
     row_scrolls: Vec<ScrollHandle>,
@@ -121,6 +123,7 @@ impl Home {
             failed: false,
             focus: Focus::Outside,
             active: false,
+            stale: false,
             // The overdraw measures the rows near the viewport, so that the focus can scroll to them.
             page: ListState::new(1, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
@@ -129,6 +132,21 @@ impl Home {
         };
         home.load(cx);
         home
+    }
+
+    /// Reloads the sections now when the page shows. Otherwise the page reloads when it shows again.
+    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
+        self.stale = true;
+        if shows {
+            self.shown(cx);
+        }
+    }
+
+    /// The page shows again.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.stale) {
+            self.load(cx);
+        }
     }
 
     /// Loads the Home sections, with the artwork URLs of each section in the rung for its cards.
@@ -172,7 +190,9 @@ impl Home {
                             this.page.reset(count);
                         }
                     }
-                    // The page keeps what it shows. The Library window shows Offline or the sign-in screen.
+                    // The page keeps what it shows, with no error. The Library window shows Offline or the sign-in
+                    // screen.
+                    Err(err) if !this.sections.is_empty() => eprintln!("relics: cannot reload the rows: {err}"),
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;

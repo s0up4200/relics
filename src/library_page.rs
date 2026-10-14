@@ -182,8 +182,24 @@ impl LibraryPage {
         self.sync(cx);
     }
 
+    /// Reloads the Recommended tab, when the user opened it. `shows` is true when the page shows.
+    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
+        let shows = shows && self.tab == Tab::Recommended;
+        if let Some(home) = &self.recommended {
+            home.update(cx, |home, cx| home.refresh(shows, cx));
+        }
+    }
+
+    /// The page shows again.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        if let Some(home) = self.recommended.as_ref().filter(|_| self.tab == Tab::Recommended) {
+            home.update(cx, |home, cx| home.shown(cx));
+        }
+    }
+
     fn open_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
+        self.shown(cx);
         if tab == Tab::Recommended && self.recommended.is_none() {
             let rows = Rows::Library(self.library.id.to_string());
             let home = cx.new(|cx| Home::new(self.client.clone(), rows, window, cx));

@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
@@ -15,6 +17,7 @@ use gpui::{
 };
 use gpui_omarchy::{ActiveTheme, IconName, icon, keycap};
 
+use crate::api::live::LiveChange;
 use crate::api::{Client, wire};
 use crate::browse;
 use crate::click::Clickable as _;
@@ -63,6 +66,74 @@ const MENU: [(MenuChoice, &str); 3] = [
     (MenuChoice::SwitchServer, "Switch server"),
     (MenuChoice::SignOut, "Sign out"),
 ];
+
+/// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refresh {
+    /// Home, each Recommended tab that the user opened, and each Detail page.
+    All,
+    /// Home, each opened Recommended tab, and the Detail page of the Item, of the series, or of an episode of the
+    /// series.
+    Item { item: Option<String>, series: Option<String> },
+    /// Home, and the Recommended tab of the Library. `None` is each opened Recommended tab.
+    Library(Option<String>),
+}
+
+impl Refresh {
+    /// The refresh reloads the Recommended tab of the Library `id`.
+    pub fn reaches_library(&self, id: &str) -> bool {
+        match self {
+            Refresh::Library(Some(library)) => library == id,
+            _ => true,
+        }
+    }
+
+    /// The refresh reloads the Detail page of the Item `page`. `page_series` is the series of an episode page.
+    pub fn reaches_detail(&self, page: &str, page_series: Option<&str>) -> bool {
+        match self {
+            Refresh::All => true,
+            Refresh::Library(_) => false,
+            Refresh::Item { item, series } => {
+                item.as_deref() == Some(page) || series.as_deref().is_some_and(|s| s == page || Some(s) == page_series)
+            }
+        }
+    }
+}
+
+/// Lets the first refresh through at once and opens a window of `period`. The window holds the refreshes that
+/// come in it, and lets them through together at its end. A window that held refreshes opens the next window.
+pub struct Throttle {
+    pub period: Duration,
+    open: bool,
+    held: Vec<Refresh>,
+    /// The timer of the open window.
+    window: Task<()>,
+}
+
+impl Throttle {
+    pub fn new(period: Duration) -> Self {
+        Self { period, open: false, held: Vec::new(), window: Task::ready(()) }
+    }
+
+    /// Returns true when `refresh` runs now and a window opens. Otherwise the open window holds it.
+    pub fn push(&mut self, refresh: Refresh) -> bool {
+        if !self.open {
+            self.open = true;
+            return true;
+        }
+        if !self.held.contains(&refresh) {
+            self.held.push(refresh);
+        }
+        false
+    }
+
+    /// The end of the window: the refreshes to run now. The next window stays open when there are any.
+    pub fn tick(&mut self) -> Vec<Refresh> {
+        let held = std::mem::take(&mut self.held);
+        self.open = !held.is_empty();
+        held
+    }
+}
 
 #[derive(Clone)]
 pub enum Page {
@@ -114,6 +185,16 @@ impl Page {
         }
     }
 
+    /// The page shows again. A page that became stale while it did not show reloads.
+    fn shown(&self, cx: &mut gpui::App) {
+        match self {
+            Page::Home(home) => home.update(cx, |home, cx| home.shown(cx)),
+            Page::Library(page) => page.update(cx, |page, cx| page.shown(cx)),
+            Page::Detail(page) => page.update(cx, |page, cx| page.shown(cx)),
+            _ => {}
+        }
+    }
+
     fn into_any_element(self) -> AnyElement {
         match self {
             Page::Home(home) => home.into_any_element(),
@@ -149,6 +230,12 @@ pub struct Pages {
     /// Each Server and Account pair, and the Active server, for the Accounts section of the Settings page.
     pub pairs: (Vec<Pair>, Option<(String, String)>),
     focus_handle: FocusHandle,
+    /// The window of the progress events of the Live updates: 30 seconds.
+    progress: Throttle,
+    /// The window of the catalog events of the Live updates: 2 seconds.
+    catalog: Throttle,
+    /// The Live updates of the Profile. The socket lives as long as the pages.
+    _live: Task<()>,
     _libraries: Task<()>,
     _events: Vec<Subscription>,
 }
@@ -175,14 +262,92 @@ impl Pages {
             menu: None,
             pairs: (Vec::new(), None),
             focus_handle: cx.focus_handle(),
+            progress: Throttle::new(Duration::from_secs(30)),
+            catalog: Throttle::new(Duration::from_secs(2)),
+            _live: Task::ready(()),
             _libraries: Task::ready(()),
             _events: Vec::new(),
         };
         pages.listen(&home, window, cx);
         pages.page.set_active(true, cx);
         pages.load_libraries(cx);
+        pages.listen_live(cx);
         pages.focus(window, cx);
         pages
+    }
+
+    fn listen_live(&mut self, cx: &mut Context<Self>) {
+        let mut changes = self.client.live_updates();
+        self._live = cx.spawn(async move |this, cx| {
+            while let Some(change) = changes.next().await {
+                if this.update(cx, |this, cx| this.live(change, cx)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn live(&mut self, change: LiveChange, cx: &mut Context<Self>) {
+        match change {
+            LiveChange::Resync => self.refresh(&Refresh::All, cx),
+            LiveChange::UserState { item, series, progress: false } => {
+                self.refresh(&Refresh::Item { item, series }, cx)
+            }
+            LiveChange::UserState { item, series, progress: true } => {
+                self.throttled(|this| &mut this.progress, Refresh::Item { item, series }, cx)
+            }
+            LiveChange::Catalog { library } => self.throttled(|this| &mut this.catalog, Refresh::Library(library), cx),
+        }
+    }
+
+    /// Runs `refresh` through the window that `window` picks.
+    fn throttled(&mut self, window: fn(&mut Self) -> &mut Throttle, refresh: Refresh, cx: &mut Context<Self>) {
+        if !window(self).push(refresh.clone()) {
+            return;
+        }
+        self.refresh(&refresh, cx);
+        let period = window(self).period;
+        window(self).window = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(period).await;
+                let open = this.update(cx, |this, cx| {
+                    let held = window(this).tick();
+                    for refresh in &held {
+                        this.refresh(refresh, cx);
+                    }
+                    !held.is_empty()
+                });
+                if !matches!(open, Ok(true)) {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Reloads the pages that `refresh` reaches. A page that shows reloads now, and keeps its scroll position and
+    /// focus. A page that does not show becomes stale, and reloads one time when it shows again.
+    pub fn refresh(&mut self, refresh: &Refresh, cx: &mut Context<Self>) {
+        let home = matches!(&self.page, Page::Home(home) if *home == self.home);
+        self.home.update(cx, |page, cx| page.refresh(home, cx));
+        for page in self.library_pages.values() {
+            let shows = matches!(&self.page, Page::Library(p) if p == page);
+            page.update(cx, |page, cx| {
+                if refresh.reaches_library(&page.library.id.to_string()) {
+                    page.refresh(shows, cx);
+                }
+            });
+        }
+        for page in std::iter::once(&self.page).chain(&self.back) {
+            if let Page::Detail(detail) = page {
+                let shows = matches!(&self.page, Page::Detail(p) if p == detail);
+                detail.update(cx, |detail, cx| {
+                    let (id, series) = detail.shows();
+                    if refresh.reaches_detail(id, series) {
+                        detail.refresh(shows, cx);
+                    }
+                });
+            }
+        }
     }
 
     /// Gives the keyboard focus to the pages, for example when they come back after the PIN entry.
@@ -322,6 +487,7 @@ impl Pages {
     fn show(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page.set_active(false, cx);
         page.set_active(self.sidebar.is_none(), cx);
+        page.shown(cx);
         self.page = page;
         cx.notify();
     }
@@ -710,7 +876,9 @@ impl Render for Pages {
 
 #[cfg(test)]
 mod tests {
-    use super::{shortcut, sidebar_width};
+    use std::time::Duration;
+
+    use super::{Refresh, Throttle, shortcut, sidebar_width};
     use crate::api::wire;
 
     fn library(id: &str, kind: &str) -> wire::UserLibrary {
@@ -732,5 +900,44 @@ mod tests {
         assert_eq!(sidebar_width(1400., false), 240.);
         assert_eq!(sidebar_width(960., false), 64.);
         assert_eq!(sidebar_width(1400., true), 64.);
+    }
+
+    #[test]
+    fn an_item_change_reaches_its_detail_page_and_the_detail_page_of_its_series() {
+        let episode = Refresh::Item { item: Some("episode:e1".into()), series: Some("series:s".into()) };
+        assert!(episode.reaches_detail("episode:e1", Some("series:s")));
+        assert!(episode.reaches_detail("series:s", None), "the page of the series");
+        assert!(episode.reaches_detail("episode:e2", Some("series:s")), "another episode of the series");
+        assert!(!episode.reaches_detail("movie:m", None));
+        let movie = Refresh::Item { item: Some("movie:m".into()), series: None };
+        assert!(movie.reaches_detail("movie:m", None));
+        assert!(!movie.reaches_detail("episode:e1", None), "no series matches no series");
+        assert!(Refresh::All.reaches_detail("movie:m", None));
+        assert!(!Refresh::Library(None).reaches_detail("movie:m", None));
+    }
+
+    #[test]
+    fn a_library_change_reaches_only_the_recommended_tab_of_its_library() {
+        assert!(Refresh::Library(Some("7".into())).reaches_library("7"));
+        assert!(!Refresh::Library(Some("7".into())).reaches_library("8"));
+        assert!(Refresh::Library(None).reaches_library("8"), "no Library reaches each tab");
+        assert!(Refresh::All.reaches_library("8"));
+        assert!(Refresh::Item { item: None, series: None }.reaches_library("8"));
+    }
+
+    #[test]
+    fn a_burst_runs_one_refresh_now_and_one_at_the_end_of_each_window() {
+        let mut throttle = Throttle::new(Duration::from_secs(30));
+        let a = Refresh::Library(Some("1".into()));
+        let b = Refresh::Library(Some("2".into()));
+        assert!(throttle.push(a.clone()), "the first refresh runs now");
+        assert!(!throttle.push(a.clone()));
+        assert!(!throttle.push(b.clone()));
+        assert!(!throttle.push(a.clone()));
+        assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one refresh of each target");
+        assert!(!throttle.push(a.clone()), "the trailing refresh opened the next window");
+        assert_eq!(throttle.tick(), std::slice::from_ref(&a));
+        assert_eq!(throttle.tick(), [], "a quiet window closes");
+        assert!(throttle.push(a), "the next refresh runs now");
     }
 }

@@ -1,0 +1,3 @@
+# Live updates use the v2 events socket
+
+Live updates use the Silo v2 events socket (`/api/v2/events/ws`). The app mints a single-use ticket that lives for 30 seconds, and it connects again each time the Server closes the socket, at most 5 minutes after it opens. The v1 bridge socket accepts the access token directly and needs no ticket. But the Server describes v1 as frozen, it never sends `access_changed`, and the Server can remove it. We accepted the ticket and the reconnect loop to follow the contract that the Server maintains. Clippy entries in `clippy.toml` (`disallowed-types` and `disallowed-methods`) keep the socket library inside the `live` module of the API client.

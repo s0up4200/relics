@@ -19,8 +19,8 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 use crate::accounts::{AccountChoice, AccountPicker};
 use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
 use crate::home;
-use crate::pages::{MenuChoice, Pages};
-use crate::player::{Controller, PlaybackError, PlayerClosed, ViewClosed};
+use crate::pages::{MenuChoice, Pages, Refresh};
+use crate::player::{Controller, PlaybackError, PlayerClosed, Stopped, ViewClosed};
 use crate::player_view::PlayerView;
 use crate::profiles::{PickerEvent, ProfilePicker};
 use crate::secrets;
@@ -60,6 +60,7 @@ pub struct LibraryWindow {
     player_error: Option<String>,
     _player: Subscription,
     _player_closed: Subscription,
+    _stopped: Subscription,
     /// The Player view. It shows in place of the screen while the controller plays in it, so Back returns to
     /// the page where playback started. `None` when the window has no video surface.
     player_view: Option<Entity<PlayerView>>,
@@ -155,6 +156,12 @@ impl LibraryWindow {
             }
             cx.notify();
         });
+        // The Server has the new position after the stop report, so the pages reload.
+        let stopped = cx.subscribe(&player, |this, _, _: &Stopped, cx| {
+            if let Screen::Pages(pages) = &this.screen {
+                pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+            }
+        });
         let player_events = cx.subscribe(&player, |this, _, PlaybackError(text), cx| {
             this.player_error = Some(text.clone());
             cx.notify();
@@ -192,6 +199,7 @@ impl LibraryWindow {
             player_error: None,
             _player: player_events,
             _player_closed: player_closed,
+            _stopped: stopped,
             player_view,
             _view_closed: view_closed,
             client: None,

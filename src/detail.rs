@@ -54,6 +54,8 @@ pub struct Detail {
     focus: Focus,
     /// The page has the keyboard focus, so the focused control shows the focus ring.
     pub active: bool,
+    /// A refresh came while the page did not show. The page reloads when it shows again.
+    stale: bool,
     columns: usize,
     /// The error of the last request, shown with Retry.
     error: Option<String>,
@@ -127,6 +129,7 @@ impl Detail {
             episodes: Vec::new(),
             focus: Focus::Action(0),
             active: false,
+            stale: false,
             columns: 1,
             error: None,
             notice: None,
@@ -156,14 +159,35 @@ impl Detail {
         detail
     }
 
-    /// Loads More Like This. A failure leaves the row out: the page works without it.
+    /// The Item of the page, and the series of an episode.
+    pub fn shows(&self) -> (&str, Option<&str>) {
+        (&self.id, self.item.as_ref().and_then(|item| item.series_id.as_deref()))
+    }
+
+    /// Reloads the page now when it shows. Otherwise the page reloads when it shows again.
+    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
+        self.stale = true;
+        if shows {
+            self.shown(cx);
+        }
+    }
+
+    /// The page shows again.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.stale) {
+            self.load(cx);
+        }
+    }
+
+    /// Loads More Like This. A failure leaves the row out, or keeps the row of the last load: the page works without
+    /// it.
     fn load_similar(&mut self, cx: &mut Context<Self>) {
         let (client, id) = (self.client.clone(), self.id.clone());
         self._similar = cx.spawn(async move |this, cx| {
-            let items = client.similar(&id).await.unwrap_or_else(|err| {
-                eprintln!("relics: cannot read the Items like {id}: {err}");
-                Vec::new()
-            });
+            let items = match client.similar(&id).await {
+                Ok(items) => items,
+                Err(err) => return eprintln!("relics: cannot read the Items like {id}: {err}"),
+            };
             this.update(cx, |this, cx| {
                 let thumbs = items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
                 for old in std::mem::replace(&mut this.similar_thumbs, thumbs).into_iter().flatten() {
@@ -177,7 +201,7 @@ impl Detail {
     }
 
     /// Loads the Item, the seasons of a series, the episodes of the chosen season or of the season of an episode,
-    /// and More Like This.
+    /// and More Like This. A reload keeps the chosen season and what the page shows.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.load_similar(cx);
@@ -212,15 +236,19 @@ impl Detail {
                         for old in std::mem::replace(&mut this.season_thumbs, posters).into_iter().flatten() {
                             cx.drop_image(old, None);
                         }
-                        let number = this.wanted_season.take().or(item.play_season_number);
+                        let reload = this.item.is_some();
+                        let chosen = this.seasons.get(this.season).map(|s| s.season_number);
+                        let number = this.wanted_season.take().or(chosen).or(item.play_season_number);
                         this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
                         this.seasons = seasons;
                         this.version = this.version.min(versions.len().saturating_sub(1));
                         this.versions = versions;
                         this.item = Some(item);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        this.load_episodes(cx);
+                        this.load_episodes(!reload, cx);
                     }
+                    // The page keeps what it shows, with no error.
+                    Err(err) if this.item.is_some() => eprintln!("relics: cannot reload {}: {err}", this.id),
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
                 }
@@ -235,27 +263,34 @@ impl Detail {
         episode_list(self.item.as_ref()?, self.seasons.get(self.season).map(|s| s.season_number))
     }
 
-    /// Loads the episodes of the chosen season, or of the season of an episode.
-    fn load_episodes(&mut self, cx: &mut Context<Self>) {
+    /// Loads the episodes of the chosen season, or of the season of an episode. With `clear`, the old episodes go
+    /// at once. Otherwise they show until the new ones come.
+    fn load_episodes(&mut self, clear: bool, cx: &mut Context<Self>) {
         let Some((id, season)) = self.listed_season() else {
             return;
         };
-        for old in self.episode_thumbs.drain(..).flatten() {
-            cx.drop_image(old, None);
+        if clear {
+            for old in self.episode_thumbs.drain(..).flatten() {
+                cx.drop_image(old, None);
+            }
+            self.episodes.clear();
         }
-        self.episodes.clear();
         let (client, image_size) = (self.client.clone(), self.episode_size);
         self._episodes = cx.spawn(async move |this, cx| {
             let result = client.season_episodes(&id, season, image_size).await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(episodes) => {
-                        this.episode_thumbs = episodes
+                        let thumbs = episodes
                             .iter()
                             .map(|e| e.still_thumbhash.as_deref().and_then(artwork::thumbhash))
                             .collect();
+                        for old in std::mem::replace(&mut this.episode_thumbs, thumbs).into_iter().flatten() {
+                            cx.drop_image(old, None);
+                        }
                         this.episodes = episodes;
                     }
+                    Err(err) if !this.episodes.is_empty() => eprintln!("relics: cannot reload the episodes: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
                 }
                 cx.notify();
@@ -572,7 +607,7 @@ impl Detail {
         self.focus = Focus::Season(index);
         if index != self.season {
             self.season = index;
-            self.load_episodes(cx);
+            self.load_episodes(true, cx);
         }
         cx.notify();
     }

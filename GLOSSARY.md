@@ -145,6 +145,10 @@ _Avoid_: passout prompt, idle check
 The app state when the active Server does not answer, or answers 503. The app keeps its tokens and retries. It never signs the user out.
 _Avoid_: disconnected, down
 
+**Live updates**:
+The Server tells the app about changes to the state of the Profile and to the Libraries, so that open pages show them without a restart. A page out of view waits until it shows again.
+_Avoid_: realtime, push, sync
+
 **Track picker**:
 The list in the Player view where the user picks the audio track or the subtitle track.
 _Avoid_: track menu, cycle
