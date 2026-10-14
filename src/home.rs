@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled, Subscription,
-    Task, Window, div, list, prelude::FluentBuilder as _, px,
+    ListOffset, ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled,
+    Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, Theme, button};
 
@@ -93,6 +93,19 @@ pub fn kept_focus(focus: Focus, old: &[HomeSection], new: &[HomeSection]) -> Foc
         None => new[row].items.len(),
     };
     Focus::Card { row, col }
+}
+
+/// The scroll position of the page after a reload of its sections from `old` to `new`. The section at the top of
+/// the view stays there, also when a section above it comes or goes. When that section goes, the section that takes
+/// its place shows from its start.
+pub fn kept_top(top: ListOffset, old: &[HomeSection], new: &[HomeSection]) -> ListOffset {
+    let Some(section) = old.get(top.item_ix) else {
+        return top;
+    };
+    match new.iter().position(|s| s.id == section.id) {
+        Some(item_ix) => ListOffset { item_ix, ..top },
+        None => ListOffset { offset_in_item: px(0.), ..top },
+    }
 }
 
 /// Moves the focus for an arrow or hjkl key. `rows` holds the number of cards in each row.
@@ -196,6 +209,8 @@ impl Home {
                             })
                             .collect();
                         let focus = kept_focus(this.focus, &this.sections, &sections);
+                        let old_top = this.page.logical_scroll_top();
+                        let top = kept_top(old_top, &this.sections, &sections);
                         if let (Focus::Card { row, col }, true) = (focus, focus != this.focus) {
                             cards(&sections[row]).reveal(&this.row_scrolls[row], col);
                         }
@@ -212,12 +227,14 @@ impl Home {
                             this.focus = move_focus(Focus::Outside, Key::Right, &rows);
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        // A reload with the same number of sections keeps the scroll position.
                         let count = this.sections.len() + 1;
-                        if this.page.item_count() == count {
+                        if this.page.item_count() == count
+                            && (top.item_ix, top.offset_in_item) == (old_top.item_ix, old_top.offset_in_item)
+                        {
                             this.page.remeasure();
                         } else {
                             this.page.reset(count);
+                            this.page.scroll_to(top);
                         }
                     }
                     // The page keeps what it shows, with no error. The Library window shows Offline or the sign-in
@@ -566,11 +583,12 @@ pub(crate) fn card_badge(item: &wire::CatalogItem) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Focus, card_badge, kept_focus, move_focus, rung, short_line};
+    use super::{Focus, card_badge, kept_focus, kept_top, move_focus, rung, short_line};
     use crate::api::HomeSection;
     use crate::api::wire;
     use crate::artwork::Rung;
     use crate::keys::Key;
+    use gpui::{ListOffset, px};
     use serde_json::json;
 
     fn card(fields: serde_json::Value) -> wire::CatalogItem {
@@ -579,16 +597,19 @@ mod tests {
         serde_json::from_value(item).unwrap()
     }
 
-    #[test]
-    fn a_reload_keeps_the_focus_on_the_same_card_or_view_all() {
-        let section = |id: &str, items: &[&str]| HomeSection {
+    fn section(id: &str, items: &[&str]) -> HomeSection {
+        HomeSection {
             id: id.into(),
             section_type: id.into(),
             title: id.into(),
             featured: false,
             items: items.iter().map(|item| card(json!({"content_id": item}))).collect(),
             view_all: true,
-        };
+        }
+    }
+
+    #[test]
+    fn a_reload_keeps_the_focus_on_the_same_card_or_view_all() {
         let old = [section("continue", &["a", "b", "c"]), section("new", &["x"])];
         let new = [section("featured", &[]), section("continue", &["c", "a"]), section("new", &["x"])];
         let at = |row, col| Focus::Card { row, col };
@@ -596,6 +617,18 @@ mod tests {
         assert_eq!(kept_focus(at(0, 1), &old, &new), at(1, 1), "a gone Item keeps its place");
         assert_eq!(kept_focus(at(1, 1), &old, &new), at(2, 1), "View all");
         assert_eq!(kept_focus(Focus::Outside, &old, &new), Focus::Outside);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_top_section_in_view_when_a_section_above_it_comes_or_goes() {
+        let old = [section("continue", &["a"]), section("new", &["x"]), section("top", &["y"])];
+        let new = [section("new", &["x"]), section("added", &["z"]), section("top", &["y"])];
+        let top = |at: ListOffset| (at.item_ix, at.offset_in_item);
+        let at = |item_ix, offset: f32| ListOffset { item_ix, offset_in_item: px(offset) };
+        assert_eq!(top(kept_top(at(1, 40.), &old, &new)), top(at(0, 40.)), "Continue Watching went");
+        assert_eq!(top(kept_top(at(2, 10.), &old, &new)), top(at(2, 10.)), "the same place");
+        assert_eq!(top(kept_top(at(0, 40.), &old, &new)), top(at(0, 0.)), "a gone section");
+        assert_eq!(top(kept_top(at(3, 5.), &old, &new)), top(at(3, 5.)), "the status line");
     }
 
     #[test]
