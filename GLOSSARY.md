@@ -1,5 +1,8 @@
 # Glossary
 
+**Build identity**:
+The version and source commit recorded when Relics was built, with a marker for local changes.
+
 **Server**:
 A Silo server that the user added. The app knows a Server by the stable id that the server reports, not by its URL.
 _Avoid_: host, instance

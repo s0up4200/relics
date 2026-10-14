@@ -28,6 +28,12 @@ build() {
 check() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable
+  local identity
+  identity=$(target/release/relics --version) || return 1
+  if [[ "$identity" == *'(unknown)' ]]; then
+    echo 'The package has no source commit.' >&2
+    return 1
+  fi
   cargo test --frozen
 }
 

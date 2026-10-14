@@ -433,13 +433,7 @@ impl Render for SettingsPage {
                 div().pt(px(12.)).text_color(if failed { t.danger } else { t.secondary }).child(text)
             }))
             .child(div().flex_1())
-            .child(
-                div()
-                    .pt(px(24.))
-                    .text_size(px(12.))
-                    .text_color(t.secondary)
-                    .child(concat!("Relics ", env!("CARGO_PKG_VERSION"))),
-            )
+            .child(div().pt(px(24.)).text_size(px(12.)).text_color(t.secondary).child(crate::BUILD_IDENTITY))
     }
 }
 

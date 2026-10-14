@@ -57,6 +57,10 @@ cargo build --release
 
 The app needs a Wayland desktop to show video.
 
+Run `relics --version` to show the version and source commit without opening a window.
+Settings and the startup log show the same build identity. `-dirty` means that tracked files had local changes at build time.
+If the source has no commit metadata, the build shows `unknown` and emits a build warning. Release packages require a known commit.
+
 ## Release
 
 The maintainer steps are in [docs/release.md](docs/release.md).

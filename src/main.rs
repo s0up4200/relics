@@ -60,6 +60,11 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--version") {
+        println!("{}", relics::BUILD_IDENTITY);
+        return;
+    }
+    eprintln!("{}", relics::BUILD_IDENTITY);
     // The browser starts a second process with the return link of a Browser sign-in. It gives the link to the
     // running app and quits. When no app waits, the sign-in secret was only in the closed window.
     let link = std::env::args().nth(1).filter(|arg| arg.starts_with(handoff::SCHEME));
