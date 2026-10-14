@@ -289,6 +289,8 @@ impl Detail {
             self.focus = self.rows().clamp(self.focus);
         }
         let Some((id, season)) = self.listed_season() else {
+            // A load of a season that is gone must not fill the row again.
+            self._episodes = Task::ready(());
             return;
         };
         let (client, image_size) = (self.client.clone(), self.episode_size);
