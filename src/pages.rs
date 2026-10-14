@@ -75,15 +75,16 @@ pub enum Refresh {
     /// Home, each opened Recommended tab, and the Detail page of the Item, of the series, or of an episode of the
     /// series.
     Item { item: Option<String>, series: Option<String> },
-    /// Home, and the Recommended tab of the Library. `None` is each opened Recommended tab.
-    Library(Option<String>),
+    /// Home, the Recommended tab of the Library, and the Detail page of the Item. A `library` of `None` is each opened
+    /// Recommended tab. An `item` of `None` is no Detail page.
+    Library { library: Option<String>, item: Option<String> },
 }
 
 impl Refresh {
     /// The refresh reloads the Recommended tab of the Library `id`.
     pub fn reaches_library(&self, id: &str) -> bool {
         match self {
-            Refresh::Library(Some(library)) => library == id,
+            Refresh::Library { library: Some(library), .. } => library == id,
             _ => true,
         }
     }
@@ -92,7 +93,7 @@ impl Refresh {
     pub fn reaches_detail(&self, page: &str, page_series: Option<&str>) -> bool {
         match self {
             Refresh::All => true,
-            Refresh::Library(_) => false,
+            Refresh::Library { item, .. } => item.as_deref() == Some(page),
             Refresh::Item { item, series } => {
                 item.as_deref() == Some(page) || series.as_deref().is_some_and(|s| s == page || Some(s) == page_series)
             }
@@ -296,7 +297,9 @@ impl Pages {
             LiveChange::UserState { item, series, progress: true } => {
                 self.throttled(|this| &mut this.progress, Refresh::Item { item, series }, cx)
             }
-            LiveChange::Catalog { library } => self.throttled(|this| &mut this.catalog, Refresh::Library(library), cx),
+            LiveChange::Catalog { library, item } => {
+                self.throttled(|this| &mut this.catalog, Refresh::Library { library, item }, cx)
+            }
         }
     }
 
@@ -913,14 +916,21 @@ mod tests {
         assert!(movie.reaches_detail("movie:m", None));
         assert!(!movie.reaches_detail("episode:e1", None), "no series matches no series");
         assert!(Refresh::All.reaches_detail("movie:m", None));
-        assert!(!Refresh::Library(None).reaches_detail("movie:m", None));
+        let library = |library: Option<&str>, item: Option<&str>| Refresh::Library {
+            library: library.map(Into::into),
+            item: item.map(Into::into),
+        };
+        assert!(!library(None, None).reaches_detail("movie:m", None));
+        assert!(library(Some("7"), Some("movie:m")).reaches_detail("movie:m", None), "a catalog change of the Item");
+        assert!(!library(Some("7"), Some("movie:m")).reaches_detail("movie:n", None));
     }
 
     #[test]
     fn a_library_change_reaches_only_the_recommended_tab_of_its_library() {
-        assert!(Refresh::Library(Some("7".into())).reaches_library("7"));
-        assert!(!Refresh::Library(Some("7".into())).reaches_library("8"));
-        assert!(Refresh::Library(None).reaches_library("8"), "no Library reaches each tab");
+        let library = |id: Option<&str>| Refresh::Library { library: id.map(Into::into), item: None };
+        assert!(library(Some("7")).reaches_library("7"));
+        assert!(!library(Some("7")).reaches_library("8"));
+        assert!(library(None).reaches_library("8"), "no Library reaches each tab");
         assert!(Refresh::All.reaches_library("8"));
         assert!(Refresh::Item { item: None, series: None }.reaches_library("8"));
     }
@@ -928,8 +938,8 @@ mod tests {
     #[test]
     fn a_burst_runs_one_refresh_now_and_one_at_the_end_of_each_window() {
         let mut throttle = Throttle::new(Duration::from_secs(30));
-        let a = Refresh::Library(Some("1".into()));
-        let b = Refresh::Library(Some("2".into()));
+        let a = Refresh::Library { library: Some("1".into()), item: None };
+        let b = Refresh::Library { library: Some("2".into()), item: None };
         assert!(throttle.push(a.clone()), "the first refresh runs now");
         assert!(!throttle.push(a.clone()));
         assert!(!throttle.push(b.clone()));

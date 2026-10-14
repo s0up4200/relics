@@ -31,8 +31,8 @@ pub enum LiveChange {
     /// The state of the Profile changed for an Item or a series: a favorite, the watchlist, the watched state, the
     /// history, a Home dismissal, or the progress.
     UserState { item: Option<String>, series: Option<String>, progress: bool },
-    /// An Item or a Library changed. `None` is no Library.
-    Catalog { library: Option<String> },
+    /// An Item or a Library changed. `None` is no Library, or no Item for a change of the whole Library.
+    Catalog { library: Option<String>, item: Option<String> },
 }
 
 /// One text frame of the socket.
@@ -100,15 +100,12 @@ pub fn decode(text: &str, profile_id: &str) -> Frame {
             };
             LiveChange::UserState { item: id("content_id"), series: id("series_id"), progress }
         }
-        (
-            "event",
-            "catalog",
-            "catalog.item.changed"
-            | "metadata.updated"
-            | "library.item_added"
-            | "catalog.library.changed"
-            | "library.changed",
-        ) => LiveChange::Catalog { library: id("library_id") },
+        ("event", "catalog", "catalog.item.changed" | "metadata.updated" | "library.item_added") => {
+            LiveChange::Catalog { library: id("library_id"), item: id("content_id") }
+        }
+        ("event", "catalog", "catalog.library.changed" | "library.changed") => {
+            LiveChange::Catalog { library: id("library_id"), item: None }
+        }
         _ => return Frame::Other,
     };
     Frame::Change(change)
@@ -259,11 +256,16 @@ mod tests {
     #[test]
     fn a_catalog_event_names_its_library_and_0_is_no_library() {
         let added = event("catalog", "library.item_added", serde_json::json!({"library_id": 7, "content_id": "x"}));
-        assert_eq!(decode(&added, "p1"), Frame::Change(LiveChange::Catalog { library: Some("7".into()) }));
+        let catalog = |library: Option<&str>, item: Option<&str>| {
+            Frame::Change(LiveChange::Catalog { library: library.map(Into::into), item: item.map(Into::into) })
+        };
+        assert_eq!(decode(&added, "p1"), catalog(Some("7"), Some("x")));
         let zero = event("catalog", "catalog.library.changed", serde_json::json!({"library_id": 0}));
-        assert_eq!(decode(&zero, "p1"), Frame::Change(LiveChange::Catalog { library: None }));
+        assert_eq!(decode(&zero, "p1"), catalog(None, None));
         let none = event("catalog", "metadata.updated", serde_json::json!({}));
-        assert_eq!(decode(&none, "p1"), Frame::Change(LiveChange::Catalog { library: None }));
+        assert_eq!(decode(&none, "p1"), catalog(None, None));
+        let library = event("catalog", "library.changed", serde_json::json!({"library_id": 7, "content_id": "x"}));
+        assert_eq!(decode(&library, "p1"), catalog(Some("7"), None), "a Library change names no Item");
         assert_eq!(decode(&event("catalog", "scan.started", serde_json::json!({})), "p1"), Frame::Other);
     }
 }
