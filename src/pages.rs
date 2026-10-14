@@ -67,6 +67,13 @@ const MENU: [(MenuChoice, &str); 3] = [
     (MenuChoice::SignOut, "Sign out"),
 ];
 
+/// The list has `library` with no change.
+fn listed(library: &wire::UserLibrary, libraries: &[wire::UserLibrary]) -> bool {
+    // wire::UserLibrary has no PartialEq, so the JSON of each field decides.
+    let json = serde_json::to_value(library).ok();
+    libraries.iter().any(|other| serde_json::to_value(other).ok() == json)
+}
+
 /// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refresh {
@@ -376,9 +383,17 @@ impl Pages {
         self._libraries = cx.spawn(async move |this, cx| match client.libraries().await {
             Ok(libraries) => {
                 this.update(cx, |this, cx| {
+                    // A removed or changed Library opens fresh next time.
+                    this.library_pages.retain(|_, page| listed(&page.read(cx).library, &libraries));
+                    let removed = matches!(&this.page, Page::Library(page)
+                        if !libraries.iter().any(|library| library.id == page.read(cx).library.id));
                     this.libraries = libraries;
                     // The list can be shorter now.
                     this.sidebar = this.sidebar.map(|row| row.min(this.settings_row()));
+                    if removed {
+                        this.back.clear();
+                        this.show(Page::Home(this.home.clone()), cx);
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -896,7 +911,7 @@ impl Render for Pages {
 mod tests {
     use std::time::Duration;
 
-    use super::{Refresh, Throttle, shortcut, sidebar_width};
+    use super::{Refresh, Throttle, listed, shortcut, sidebar_width};
     use crate::api::wire;
 
     fn library(id: &str, kind: &str) -> wire::UserLibrary {
@@ -942,6 +957,17 @@ mod tests {
             "the event does not name the series of an episode, so each Item change reaches each Detail page"
         );
         assert!(!Refresh::Libraries { library: Some("7".into()) }.reaches_detail("movie:m", None));
+    }
+
+    #[test]
+    fn a_cached_library_page_stays_only_while_its_library_is_unchanged_in_the_list() {
+        let movies = library("12", "movies");
+        let renamed: wire::UserLibrary =
+            serde_json::from_value(serde_json::json!({"id": "12", "name": "Films", "type": "movies", "sort_order": 0}))
+                .unwrap();
+        assert!(listed(&movies, &[library("7", "shows"), movies.clone()]));
+        assert!(!listed(&movies, &[renamed]), "a renamed Library");
+        assert!(!listed(&movies, &[library("7", "shows")]), "a removed Library");
     }
 
     #[test]
