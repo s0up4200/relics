@@ -1,6 +1,10 @@
-# Relics
+<p align="center">
+  <img src="data/relics.svg" alt="Relics icon" width="128">
+</p>
 
-Unofficial Silo client for Linux. Follows your Omarchy theme.
+<h1 align="center">Relics</h1>
+
+<p align="center">Unofficial Silo client for Linux. Follows your Omarchy theme.</p>
 
 Relics is a native media player for a Silo server. The Library window follows the live Omarchy theme. mpv plays the video inside the Library window. The app also works on other Wayland desktops.
 
