@@ -194,6 +194,7 @@ impl Detail {
                     cx.drop_image(old, None);
                 }
                 this.similar = items;
+                this.focus = this.rows().clamp(this.focus);
                 cx.notify();
             })
             .ok();
@@ -237,7 +238,13 @@ impl Detail {
                             cx.drop_image(old, None);
                         }
                         let reload = this.item.is_some();
-                        this.focus = kept_focus(this.focus, (&this.versions, &versions), (&this.seasons, &seasons));
+                        let old_actions = this.item.as_ref().map(|old| actions(old, &this.seasons)).unwrap_or_default();
+                        this.focus = kept_focus(
+                            this.focus,
+                            (&old_actions, &actions(&item, &seasons)),
+                            (&this.versions, &versions),
+                            (&this.seasons, &seasons),
+                        );
                         let chosen = this.seasons.get(this.season).map(|s| s.season_number);
                         let number = this.wanted_season.take().or(chosen).or(item.play_season_number);
                         this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
@@ -245,6 +252,7 @@ impl Detail {
                         this.version = kept_version(&this.versions, this.version, &versions);
                         this.versions = versions;
                         this.item = Some(item);
+                        this.focus = this.rows().clamp(this.focus);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                         this.load_episodes(!reload, cx);
                     }
@@ -289,7 +297,12 @@ impl Detail {
                         for old in std::mem::replace(&mut this.episode_thumbs, thumbs).into_iter().flatten() {
                             cx.drop_image(old, None);
                         }
+                        if let Focus::Episode(i) = this.focus {
+                            let kept = kept(&this.episodes, i, &episodes, |episode| episode.content_id.clone());
+                            this.focus = Focus::Episode(kept.unwrap_or(i));
+                        }
                         this.episodes = episodes;
+                        this.focus = this.rows().clamp(this.focus);
                     }
                     Err(err) if !this.episodes.is_empty() => eprintln!("relics: cannot reload the episodes: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
@@ -1202,23 +1215,32 @@ impl Render for Detail {
 
 /// The place in `versions` of the file that `old[chosen]` plays. The first version when that file is gone.
 pub fn kept_version(old: &[wire::FileVersion], chosen: usize, versions: &[wire::FileVersion]) -> usize {
-    let file = old.get(chosen).map(|version| &version.file_id);
-    versions.iter().position(|version| Some(&version.file_id) == file).unwrap_or(0)
+    kept(old, chosen, versions, |version| version.file_id.clone()).unwrap_or(0)
 }
 
-/// The focus after a reload with new versions and seasons. A focused version or season pill moves with its file or
-/// season number, so that Enter chooses what the focus showed before.
+/// The place in `new` of `old[index]`, matched by `key`. `None` when it is gone.
+fn kept<T, K: PartialEq>(old: &[T], index: usize, new: &[T], key: impl Fn(&T) -> K) -> Option<usize> {
+    let wanted = key(old.get(index)?);
+    new.iter().position(|item| key(item) == wanted)
+}
+
+/// The focus after a reload with new actions, versions and seasons. A focused button or pill moves with its action,
+/// file or season number, so that Enter does what the focus showed before.
 pub fn kept_focus(
     focus: Focus,
+    actions: (&[Action], &[Action]),
     versions: (&[wire::FileVersion], &[wire::FileVersion]),
-    (old, new): (&[wire::Season], &[wire::Season]),
+    seasons: (&[wire::Season], &[wire::Season]),
 ) -> Focus {
+    // Play becomes Resume when the Item gets a position. It is the same button.
+    let action = |action: &Action| match action {
+        Action::Play { .. } => Action::Play { resume: false },
+        action => *action,
+    };
     match focus {
+        Focus::Action(i) => Focus::Action(kept(actions.0, i, actions.1, action).unwrap_or(0)),
         Focus::Version(i) => Focus::Version(kept_version(versions.0, i, versions.1)),
-        Focus::Season(i) => {
-            let number = old.get(i).map(|season| season.season_number);
-            Focus::Season(new.iter().position(|season| Some(season.season_number) == number).unwrap_or(0))
-        }
+        Focus::Season(i) => Focus::Season(kept(seasons.0, i, seasons.1, |season| season.season_number).unwrap_or(0)),
         focus => focus,
     }
 }
@@ -1601,6 +1623,15 @@ pub struct Rows {
 }
 
 impl Rows {
+    /// `focus`, moved back into its row when the row got shorter, or to the first button when the row is gone.
+    pub fn clamp(&self, focus: Focus) -> Focus {
+        let (row, index) = focus.place();
+        match self.len(row) {
+            0 => Focus::Action(0),
+            len => Focus::at(row, index.min(len - 1)),
+        }
+    }
+
     fn len(&self, row: usize) -> usize {
         let Rows { actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar, .. } = *self;
         [actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar][row]
@@ -1921,6 +1952,10 @@ mod tests {
             columns: 4,
         };
         assert_eq!(movie.step(Focus::Action(1), Key::Down), Step::Stay);
+        let shorter = Rows { cast: 3, ..movie };
+        assert_eq!(shorter.clamp(Focus::Cast(5)), Focus::Cast(2), "the cast row got shorter");
+        assert_eq!(shorter.clamp(Focus::Cast(1)), Focus::Cast(1));
+        assert_eq!(shorter.clamp(Focus::Similar(4)), Focus::Action(0), "the row is gone");
         let loading = Rows { episodes: 0, ..rows };
         assert_eq!(loading.step(Focus::Season(0), Key::Down), Step::Stay);
         let shuffle = Rows { shuffle: 1, ..rows };
@@ -1976,7 +2011,18 @@ mod tests {
         let seasons = |numbers: &[i64]| numbers.iter().map(|n| season(json!({"season_number": n}))).collect::<Vec<_>>();
         let (old_versions, new_versions) = (versions(&["a", "b", "c"]), versions(&["a", "c"]));
         let (old_seasons, new_seasons) = (seasons(&[1, 2, 3]), seasons(&[2, 3]));
-        let keep = |focus| kept_focus(focus, (&old_versions, &new_versions), (&old_seasons, &new_seasons));
+        let old_actions = [Action::Play { resume: false }, Action::Watchlist, Action::Favorite];
+        let new_actions = [Action::Play { resume: true }, Action::StartOver, Action::Watchlist, Action::Favorite];
+        let keep = |focus| {
+            kept_focus(
+                focus,
+                (&old_actions, &new_actions),
+                (&old_versions, &new_versions),
+                (&old_seasons, &new_seasons),
+            )
+        };
+        assert_eq!(keep(Focus::Action(1)), Focus::Action(2), "Start Over came before Watchlist");
+        assert_eq!(keep(Focus::Action(0)), Focus::Action(0), "Play became Resume");
         assert_eq!(keep(Focus::Version(2)), Focus::Version(1), "c moved up one place");
         assert_eq!(keep(Focus::Version(1)), Focus::Version(0), "b is gone");
         assert_eq!(keep(Focus::Season(2)), Focus::Season(1), "season 3 moved up one place");
