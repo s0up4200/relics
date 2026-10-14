@@ -152,12 +152,7 @@ async fn run(client: Arc<Client>, changes: mpsc::UnboundedSender<LiveChange>) {
     let mut failures = 0;
     while client.auth.lock().unwrap().profile_id.as_deref() == Some(profile.as_str()) && !changes.is_closed() {
         let started = Instant::now();
-        // A Server or a proxy can accept the TCP connection and then never answer.
-        let connected = match select(connect(&client).boxed(), Timer::after(HANDSHAKE)).await {
-            Either::Left((connected, _)) => connected,
-            Either::Right(_) => Err(anyhow::anyhow!("no answer in {} s", HANDSHAKE.as_secs())),
-        };
-        let close = match connected {
+        let close = match connect(&client).await {
             Ok((socket, lifetime)) => {
                 if std::mem::take(&mut missed) {
                     changes.unbounded_send(LiveChange::Resync).ok();
@@ -182,22 +177,32 @@ async fn run(client: Arc<Client>, changes: mpsc::UnboundedSender<LiveChange>) {
 /// Mints a ticket and opens the socket with it. Also gives the connection time of the socket: the time of the ticket,
 /// or less when the access token expires sooner.
 async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStream>, Duration)> {
-    // The client refreshes the access token after a 401.
+    // The client refreshes the access token after a 401. After a 403 it waits for the user to enter the PIN of the
+    // Profile, for as long as the user takes, so the deadline starts after the ticket.
     let ticket: Ticket = client.call_with_retries(Method::POST, "events/ws-ticket", None).await?;
+    // A Server or a proxy can accept the TCP connection and then never answer.
+    let socket = match select(handshake(client, &ticket.ticket).boxed(), Timer::after(HANDSHAKE)).await {
+        Either::Left((socket, _)) => socket?,
+        Either::Right(_) => anyhow::bail!("no answer in {} s", HANDSHAKE.as_secs()),
+    };
+    let token_left =
+        token_expiry(&client.tokens().access_token).and_then(|exp| exp.duration_since(SystemTime::now()).ok());
+    let lifetime = Duration::from_secs(ticket.max_connection_seconds);
+    Ok((socket, token_left.map_or(lifetime, |left| left.min(lifetime))))
+}
+
+/// Opens the socket with `ticket`.
+async fn handshake(client: &Client, ticket: &str) -> anyhow::Result<WebSocketStream<ConnectStream>> {
     let mut url = client.server.url.join("api/v2/events/ws")?;
     let stream = open(client, &url).await?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme).map_err(|()| anyhow::anyhow!("no WebSocket URL for {url}"))?;
     let mut request = url.as_str().into_client_request()?;
     // The ticket goes in the subprotocols, never in the URL.
-    let protocols = HeaderValue::from_str(&format!("silo.events.v2, silo.ticket.{}", ticket.ticket))?;
+    let protocols = HeaderValue::from_str(&format!("silo.events.v2, silo.ticket.{ticket}"))?;
     request.headers_mut().insert("Sec-WebSocket-Protocol", protocols);
     let tls = futures_rustls::TlsConnector::from(Arc::new(http_client_tls::tls_config()));
-    let (socket, _) = client_async_tls_with_connector(request, stream, Some(tls)).await?;
-    let token_left =
-        token_expiry(&client.tokens().access_token).and_then(|exp| exp.duration_since(SystemTime::now()).ok());
-    let lifetime = Duration::from_secs(ticket.max_connection_seconds);
-    Ok((socket, token_left.map_or(lifetime, |left| left.min(lifetime))))
+    Ok(client_async_tls_with_connector(request, stream, Some(tls)).await?.0)
 }
 
 /// Opens the TCP connection to the host of `url`. The connection goes through the proxy of the HTTP client, with the
