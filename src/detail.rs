@@ -237,6 +237,7 @@ impl Detail {
                             cx.drop_image(old, None);
                         }
                         let reload = this.item.is_some();
+                        this.focus = kept_focus(this.focus, (&this.versions, &versions), (&this.seasons, &seasons));
                         let chosen = this.seasons.get(this.season).map(|s| s.season_number);
                         let number = this.wanted_season.take().or(chosen).or(item.play_season_number);
                         this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
@@ -1205,6 +1206,23 @@ pub fn kept_version(old: &[wire::FileVersion], chosen: usize, versions: &[wire::
     versions.iter().position(|version| Some(&version.file_id) == file).unwrap_or(0)
 }
 
+/// The focus after a reload with new versions and seasons. A focused version or season pill moves with its file or
+/// season number, so that Enter chooses what the focus showed before.
+pub fn kept_focus(
+    focus: Focus,
+    versions: (&[wire::FileVersion], &[wire::FileVersion]),
+    (old, new): (&[wire::Season], &[wire::Season]),
+) -> Focus {
+    match focus {
+        Focus::Version(i) => Focus::Version(kept_version(versions.0, i, versions.1)),
+        Focus::Season(i) => {
+            let number = old.get(i).map(|season| season.season_number);
+            Focus::Season(new.iter().position(|season| Some(season.season_number) == number).unwrap_or(0))
+        }
+        focus => focus,
+    }
+}
+
 /// The Item that Enter on a card opens, and the season to show: a season opens its series. An episode opens its own
 /// page, with More Episodes.
 pub fn target(item: &wire::CatalogItem) -> (String, Option<i64>) {
@@ -1950,6 +1968,19 @@ mod tests {
             json!({"interlaced": false, "dv_bl_compat_id_present": false, "dv_config_present": false});
         track_fields.as_object_mut().unwrap().extend(track.as_object().unwrap().clone());
         video_range(&version(json!({"hdr": hdr, "video_tracks": [track_fields]})))
+    }
+
+    #[test]
+    fn a_reload_moves_the_focus_of_a_version_or_season_pill_with_its_file_or_season() {
+        let versions = |ids: &[&str]| ids.iter().map(|id| version(json!({"file_id": id}))).collect::<Vec<_>>();
+        let seasons = |numbers: &[i64]| numbers.iter().map(|n| season(json!({"season_number": n}))).collect::<Vec<_>>();
+        let (old_versions, new_versions) = (versions(&["a", "b", "c"]), versions(&["a", "c"]));
+        let (old_seasons, new_seasons) = (seasons(&[1, 2, 3]), seasons(&[2, 3]));
+        let keep = |focus| kept_focus(focus, (&old_versions, &new_versions), (&old_seasons, &new_seasons));
+        assert_eq!(keep(Focus::Version(2)), Focus::Version(1), "c moved up one place");
+        assert_eq!(keep(Focus::Version(1)), Focus::Version(0), "b is gone");
+        assert_eq!(keep(Focus::Season(2)), Focus::Season(1), "season 3 moved up one place");
+        assert_eq!(keep(Focus::Cast(4)), Focus::Cast(4));
     }
 
     #[test]
