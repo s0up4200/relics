@@ -70,21 +70,26 @@ const MENU: [(MenuChoice, &str); 3] = [
 /// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refresh {
-    /// Home, each Recommended tab that the user opened, and each Detail page.
+    /// The Library list, Home, each Recommended tab that the user opened, and each Detail page.
     All,
     /// Home, each opened Recommended tab, and the Detail page of the Item, of the series, or of an episode of the
     /// series.
     Item { item: Option<String>, series: Option<String> },
-    /// Home, the Recommended tab of the Library, and the Detail page of the Item. A `library` of `None` is each opened
+    /// Home, the Recommended tab of the Library, and each Detail page. A `library` of `None` is each opened
     /// Recommended tab. An `item` of `None` is no Detail page.
     Library { library: Option<String>, item: Option<String> },
+    /// The Library list, Home, and the Recommended tab of the Library. A `library` of `None` is each opened
+    /// Recommended tab.
+    Libraries { library: Option<String> },
 }
 
 impl Refresh {
     /// The refresh reloads the Recommended tab of the Library `id`.
     pub fn reaches_library(&self, id: &str) -> bool {
         match self {
-            Refresh::Library { library: Some(library), .. } => library == id,
+            Refresh::Library { library: Some(library), .. } | Refresh::Libraries { library: Some(library) } => {
+                library == id
+            }
             _ => true,
         }
     }
@@ -93,7 +98,9 @@ impl Refresh {
     pub fn reaches_detail(&self, page: &str, page_series: Option<&str>) -> bool {
         match self {
             Refresh::All => true,
-            Refresh::Library { item, .. } => item.as_deref() == Some(page),
+            // The event of an episode does not name its series, so each Item change reaches each Detail page.
+            Refresh::Library { item, .. } => item.is_some(),
+            Refresh::Libraries { .. } => false,
             Refresh::Item { item, series } => {
                 item.as_deref() == Some(page) || series.as_deref().is_some_and(|s| s == page || Some(s) == page_series)
             }
@@ -300,6 +307,9 @@ impl Pages {
             LiveChange::Catalog { library, item } => {
                 self.throttled(|this| &mut this.catalog, Refresh::Library { library, item }, cx)
             }
+            LiveChange::Libraries { library } => {
+                self.throttled(|this| &mut this.catalog, Refresh::Libraries { library }, cx)
+            }
         }
     }
 
@@ -330,6 +340,9 @@ impl Pages {
     /// Reloads the pages that `refresh` reaches. A page that shows reloads now, and keeps its scroll position and
     /// focus. A page that does not show becomes stale, and reloads one time when it shows again.
     pub fn refresh(&mut self, refresh: &Refresh, cx: &mut Context<Self>) {
+        if matches!(refresh, Refresh::All | Refresh::Libraries { .. }) {
+            self.load_libraries(cx);
+        }
         let home = matches!(&self.page, Page::Home(home) if *home == self.home);
         self.home.update(cx, |page, cx| page.refresh(home, cx));
         for page in self.library_pages.values() {
@@ -364,6 +377,8 @@ impl Pages {
             Ok(libraries) => {
                 this.update(cx, |this, cx| {
                     this.libraries = libraries;
+                    // The list can be shorter now.
+                    this.sidebar = this.sidebar.map(|row| row.min(this.settings_row()));
                     cx.notify();
                 })
                 .ok();
@@ -922,7 +937,11 @@ mod tests {
         };
         assert!(!library(None, None).reaches_detail("movie:m", None));
         assert!(library(Some("7"), Some("movie:m")).reaches_detail("movie:m", None), "a catalog change of the Item");
-        assert!(!library(Some("7"), Some("movie:m")).reaches_detail("movie:n", None));
+        assert!(
+            library(Some("7"), Some("episode:e1")).reaches_detail("series:s", None),
+            "the event does not name the series of an episode, so each Item change reaches each Detail page"
+        );
+        assert!(!Refresh::Libraries { library: Some("7".into()) }.reaches_detail("movie:m", None));
     }
 
     #[test]
@@ -931,6 +950,10 @@ mod tests {
         assert!(library(Some("7")).reaches_library("7"));
         assert!(!library(Some("7")).reaches_library("8"));
         assert!(library(None).reaches_library("8"), "no Library reaches each tab");
+        let libraries = |id: Option<&str>| Refresh::Libraries { library: id.map(Into::into) };
+        assert!(libraries(Some("7")).reaches_library("7"));
+        assert!(!libraries(Some("7")).reaches_library("8"));
+        assert!(libraries(None).reaches_library("8"));
         assert!(Refresh::All.reaches_library("8"));
         assert!(Refresh::Item { item: None, series: None }.reaches_library("8"));
     }
