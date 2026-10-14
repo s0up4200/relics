@@ -158,7 +158,12 @@ impl LibraryWindow {
         });
         // The Server has the new position after the stop report, so the pages reload.
         let stopped = cx.subscribe(&player, |this, _, _: &Stopped, cx| {
-            if let Screen::Pages(pages) = &this.screen {
+            // The pages also wait behind a picker.
+            let pages = match &this.screen {
+                Screen::Pages(pages) => Some(pages.clone()),
+                _ => this.menu_back.clone(),
+            };
+            if let Some(pages) = pages {
                 pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
             }
         });
