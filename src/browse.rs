@@ -465,6 +465,11 @@ impl Paging {
         (!self.done).then(|| self.next_cursor.clone())
     }
 
+    /// The first page came, also when it was empty.
+    pub fn loaded(&self) -> bool {
+        self.done || self.next_cursor.is_some()
+    }
+
     /// Adds a page. `total` is the number of Items in the whole result, when the server sends it.
     pub fn add(&mut self, items: Vec<wire::CatalogItem>, total: Option<i64>, page: Option<wire::PageInfo>) {
         self.items.extend(items);

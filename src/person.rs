@@ -52,7 +52,7 @@ pub struct PersonPage {
     error: Option<String>,
     /// The open tab of `TABS`.
     tab: usize,
-    grid: Entity<Grid>,
+    pub grid: Entity<Grid>,
     /// The tabs have the keyboard focus, not the grid.
     in_tabs: bool,
     /// The focused tab, while the tabs have the keyboard focus.

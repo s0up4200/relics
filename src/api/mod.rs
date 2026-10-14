@@ -1040,14 +1040,19 @@ impl Client {
         self.call(Method::GET, &format!("library/{library_id}/collections"), None).await
     }
 
-    /// One page of the Items of a collection of a Library. `cursor` is the cursor of the previous page.
+    /// One page of the Items of a collection of a Library. `cursor` is the cursor of the previous page. A `limit` of
+    /// `None` takes the default page size of the Server.
     pub async fn library_collection_items(
         &self,
         library_id: &str,
         collection_id: &str,
         cursor: Option<&str>,
+        limit: Option<u64>,
     ) -> Result<wire::CatalogItemCollection, Error> {
-        let path = with_query(&format!("library/{library_id}/collections/{collection_id}/items"), &cursor_pair(cursor));
+        let limit = limit.map(|limit| limit.to_string());
+        let mut pairs = cursor_pair(cursor);
+        pairs.extend(limit.as_deref().map(|limit| ("limit", limit)));
+        let path = with_query(&format!("library/{library_id}/collections/{collection_id}/items"), &pairs);
         self.call(Method::GET, &path, None).await
     }
 

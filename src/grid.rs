@@ -64,6 +64,43 @@ pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
     }
 }
 
+/// The focus after a reload: the place in `new` of the Item at `focus` in `old`. When the Item is gone, the same
+/// place, but not past the last card.
+fn kept_focus(old: &[wire::CatalogItem], focus: usize, new: &[wire::CatalogItem]) -> usize {
+    old.get(focus)
+        .and_then(|item| new.iter().position(|i| i.content_id == item.content_id))
+        .unwrap_or_else(|| focus.min(new.len().saturating_sub(1)))
+}
+
+/// The placeholder of the poster of `item`, from its thumbhash.
+fn thumb(item: &wire::CatalogItem) -> Option<Arc<RenderImage>> {
+    item.poster_thumbhash.as_deref().and_then(artwork::thumbhash)
+}
+
+/// One page of `source` from `cursor`. A `limit` of `None` takes the page size of the source.
+async fn fetch(
+    client: &Client,
+    source: Source,
+    cursor: Option<String>,
+    limit: Option<u64>,
+    image_size: Rung,
+) -> Result<(Vec<wire::CatalogItem>, Option<i64>, Option<wire::PageInfo>), crate::api::Error> {
+    match source {
+        Source::Query(query) => {
+            let limit = limit.and_then(std::num::NonZeroU64::new).or(query.limit);
+            let query = wire::CatalogQuery { cursor, limit, ..*query };
+            client.query_catalog(&query, image_size).await.map(|p| (p.items, Some(p.total), p.page))
+        }
+        Source::Collection { library_id, id } => client
+            .library_collection_items(&library_id, &id, cursor.as_deref(), limit)
+            .await
+            .map(|p| (p.items, None, p.page)),
+    }
+}
+
+/// The largest page that a reload asks for. The catalog query takes at most 100 Items.
+const RELOAD_PAGE: usize = 100;
+
 /// Where the Items of a grid come from.
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -91,7 +128,10 @@ pub struct Grid {
     columns: usize,
     /// The error of the last load, shown with Retry.
     error: Option<String>,
+    /// The load of the next page or the reload. A reload drops the load of the next page.
     loading: Option<Task<()>>,
+    /// A refresh came while the grid did not show. The grid reloads when it shows again.
+    pub stale: bool,
     image_size: Rung,
     scroll: UniformListScrollHandle,
     artwork: Entity<ArtworkCache>,
@@ -113,6 +153,7 @@ impl Grid {
             columns: 1,
             error: None,
             loading: None,
+            stale: false,
             image_size: Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()),
             scroll: UniformListScrollHandle::new(),
             artwork: artwork::global(cx),
@@ -128,6 +169,7 @@ impl Grid {
         self.paging = Paging::default();
         self.focus = 0;
         self.loading = None;
+        self.stale = false;
         self.scroll.0.borrow().base_handle.set_offset(gpui::Point::default());
         self.load_more(cx);
     }
@@ -159,26 +201,65 @@ impl Grid {
         self.error = None;
         let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
         self.loading = Some(cx.spawn(async move |this, cx| {
-            let result = match source {
-                Source::Query(query) => {
-                    let query = wire::CatalogQuery { cursor, ..*query };
-                    client.query_catalog(&query, image_size).await.map(|p| (p.items, Some(p.total), p.page))
-                }
-                Source::Collection { library_id, id } => client
-                    .library_collection_items(&library_id, &id, cursor.as_deref())
-                    .await
-                    .map(|p| (p.items, None, p.page)),
-            };
+            let result = fetch(&client, source, cursor, None, image_size).await;
             this.update(cx, |this, cx| {
                 this.loading = None;
                 match result {
                     Ok((items, total, page)) => {
-                        this.thumbs
-                            .extend(items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)));
+                        this.thumbs.extend(items.iter().map(thumb));
                         this.paging.add(items, total, page);
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
                     // The Library window shows Offline or the sign-in screen. The grid keeps what it shows.
+                    Err(err) => this.error = Some(err.to_string()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The grid shows again. A stale grid reloads.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.stale) {
+            self.reload(cx);
+        }
+    }
+
+    /// Loads the Items again from the first page, as many as the grid has, in pages of up to 100 Items. The new
+    /// Items replace the old ones when all pages are in, so the scroll position stays. The focus stays on its Item.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        // A grid with less than one page has all its Items, or its first load failed. It reloads one full page.
+        let want = self.paging.items.len().max(crate::browse::PAGE_SIZE as usize);
+        let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
+        self.loading = Some(cx.spawn(async move |this, cx| {
+            let mut paging = Paging::default();
+            let result = async {
+                while paging.items.len() < want
+                    && let Some(cursor) = paging.next_cursor()
+                {
+                    let limit = (want - paging.items.len()).min(RELOAD_PAGE) as u64;
+                    let (items, total, page) = fetch(&client, source.clone(), cursor, Some(limit), image_size).await?;
+                    paging.add(items, total, page);
+                }
+                Ok::<_, crate::api::Error>(())
+            }
+            .await;
+            this.update(cx, |this, cx| {
+                this.loading = None;
+                match result {
+                    Ok(()) => {
+                        this.drop_thumbs(cx);
+                        this.thumbs = paging.items.iter().map(thumb).collect();
+                        this.focus = kept_focus(&this.paging.items, this.focus, &paging.items);
+                        this.paging = paging;
+                        this.error = None;
+                        this.artwork.update(cx, |artwork, _| artwork.retry_failed());
+                    }
+                    // A grid that loaded keeps what it shows, also "No titles.", with no error. The Library window
+                    // shows Offline or the sign-in screen.
+                    Err(err) if this.paging.loaded() => eprintln!("relics: cannot reload the grid: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
                 }
                 cx.notify();
@@ -303,7 +384,7 @@ impl Render for Grid {
 pub struct GridPage {
     client: Arc<Client>,
     title: String,
-    grid: Entity<Grid>,
+    pub grid: Entity<Grid>,
     /// The id of the collection, which a Shuffle shuffles. `None` on a page with no Shuffle.
     collection: Option<String>,
     /// The Shuffle pill has the keyboard focus.
@@ -472,8 +553,38 @@ impl Render for GridPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Move, columns, move_focus, near_end, row_cards};
+    use super::{Move, columns, kept_focus, move_focus, near_end, row_cards};
+    use crate::api::wire;
     use crate::keys::Key;
+
+    fn items(ids: &[&str]) -> Vec<wire::CatalogItem> {
+        ids.iter()
+            .map(|id| {
+                let item = serde_json::json!({"content_id": id, "type": "movie", "title": id, "genres": [], "keywords": [], "status": "available"});
+                serde_json::from_value(item).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_result_counts_as_loaded() {
+        let mut paging = crate::browse::Paging::default();
+        assert!(!paging.loaded(), "no page came");
+        paging.add(Vec::new(), Some(0), None);
+        assert!(paging.loaded(), "an empty last page");
+        let mut paging = crate::browse::Paging::default();
+        paging.add(items(&["a"]), Some(2), Some(wire::PageInfo { has_more: true, next_cursor: Some("c".into()) }));
+        assert!(paging.loaded(), "a first page with more to come");
+    }
+
+    #[test]
+    fn the_focus_stays_on_its_item_after_a_reload() {
+        let old = items(&["a", "b", "c", "d"]);
+        assert_eq!(kept_focus(&old, 2, &items(&["new", "a", "b", "c", "d"])), 3, "the Item moved one place on");
+        assert_eq!(kept_focus(&old, 2, &items(&["a", "b", "d", "e"])), 2, "a gone Item keeps the place");
+        assert_eq!(kept_focus(&old, 3, &items(&["a", "b"])), 1, "a gone Item stops at the last card");
+        assert_eq!(kept_focus(&old, 1, &[]), 0, "an empty grid");
+    }
 
     #[test]
     fn the_directions_move_in_the_grid_and_leave_it_at_the_top_and_the_left() {

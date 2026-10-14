@@ -56,7 +56,7 @@ pub struct LibraryPage {
     recommended: Option<Entity<Home>>,
     /// The collection rows of the Collections tab, made when the tab opens first.
     collections: Option<Entity<Collections>>,
-    grid: Entity<Grid>,
+    pub grid: Entity<Grid>,
     browse: Browse,
     /// The filter values of the Library, for the filter panel.
     facets: Facets,
@@ -194,6 +194,9 @@ impl LibraryPage {
     pub fn shown(&mut self, cx: &mut Context<Self>) {
         if let Some(home) = self.recommended.as_ref().filter(|_| self.tab == Tab::Recommended) {
             home.update(cx, |home, cx| home.shown(cx));
+        }
+        if self.tab == Tab::Library {
+            self.grid.update(cx, |grid, cx| grid.shown(cx));
         }
     }
 

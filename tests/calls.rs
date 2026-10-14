@@ -83,7 +83,7 @@ fn library_and_server_collections_list_their_collections_and_items() {
     let (client, _) = fake(|req| {
         match req.path.as_str() {
         "library/1/collections" => ok("get_library_collections_ok.json"),
-        "library/1/collections/c1/items?cursor=next" => ok("list_similar_ok.json"),
+        "library/1/collections/c1/items?cursor=next&limit=100" => ok("list_similar_ok.json"),
         "collections/server" => json(
             200,
             value!({ "libraries": [{ "library_id": "1", "library_name": "Movies", "total_count": 0, "collections": [] }] })
@@ -94,7 +94,7 @@ fn library_and_server_collections_list_their_collections_and_items() {
     });
     let tab = block_on(client.library_collections("1")).unwrap();
     assert_eq!(tab.collections[0].title, "Oscar Winners");
-    let items = block_on(client.library_collection_items("1", "c1", Some("next"))).unwrap();
+    let items = block_on(client.library_collection_items("1", "c1", Some("next"), Some(100))).unwrap();
     assert_eq!(items.items[0].title, "Heat");
     let server = block_on(client.server_collections()).unwrap();
     assert_eq!(server[0].library_name, "Movies");
