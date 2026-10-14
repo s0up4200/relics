@@ -23,7 +23,7 @@ use crate::browse;
 use crate::click::Clickable as _;
 use crate::collections::{Collections, OpenCollection, Scope};
 use crate::detail::{self, Detail};
-use crate::grid::{GridPage, Source};
+use crate::grid::{Grid, GridPage, Source};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
 use crate::library_page::{LibraryPage, is_shows};
@@ -227,7 +227,23 @@ impl Page {
             Page::Home(home) => home.update(cx, |home, cx| home.shown(cx)),
             Page::Library(page) => page.update(cx, |page, cx| page.shown(cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.shown(cx)),
-            _ => {}
+            _ => {
+                if let Some(grid) = self.grid(cx) {
+                    grid.update(cx, |grid, cx| grid.shown(cx));
+                }
+            }
+        }
+    }
+
+    /// The poster grid of the page: the Library grid, the Search results, the filmography, or the grid of a
+    /// GridPage.
+    fn grid(&self, cx: &gpui::App) -> Option<Entity<Grid>> {
+        match self {
+            Page::Library(page) => Some(page.read(cx).grid.clone()),
+            Page::Search(page) => page.read(cx).titles.clone(),
+            Page::Person(page) => Some(page.read(cx).grid.clone()),
+            Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => Some(page.read(cx).grid.clone()),
+            _ => None,
         }
     }
 
@@ -365,8 +381,8 @@ impl Pages {
         });
     }
 
-    /// Reloads the pages that `refresh` reaches. A page that shows reloads now, and keeps its scroll position and
-    /// focus. A page that does not show becomes stale, and reloads one time when it shows again.
+    /// Reloads the pages that `refresh` reaches, and each grid. A page that shows reloads now, and keeps its scroll
+    /// position and focus. A page that does not show becomes stale, and reloads one time when it shows again.
     pub fn refresh(&mut self, refresh: &Refresh, cx: &mut Context<Self>) {
         if matches!(refresh, Refresh::All | Refresh::Libraries { .. }) {
             self.load_libraries(cx);
@@ -392,6 +408,15 @@ impl Pages {
                 });
             }
         }
+        // A grid cannot tell if a changed Item is in its query, so each refresh reaches each grid. A page can be in the
+        // list more than one time, and a second mark does nothing. The grid that shows reloads now.
+        let kept = self.library_pages.values().cloned().map(Page::Library).chain(self.search.clone().map(Page::Search));
+        let pages = std::iter::once(self.page.clone()).chain(self.back.iter().cloned()).chain(kept);
+        let grids: Vec<_> = pages.filter_map(|page| page.grid(cx)).collect();
+        for grid in grids {
+            grid.update(cx, |grid, _| grid.stale = true);
+        }
+        self.page.shown(cx);
     }
 
     /// Gives the keyboard focus to the pages, for example when they come back after the PIN entry.

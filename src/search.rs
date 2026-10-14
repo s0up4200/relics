@@ -175,7 +175,7 @@ pub struct Search {
     /// "Sending…", or the error of the last request.
     request_note: Option<String>,
     /// The grid of the titles, made at the first search.
-    titles: Option<Entity<Grid>>,
+    pub titles: Option<Entity<Grid>>,
     /// The sort and filters of the titles. They stay while the app runs.
     browse: Browse,
     /// The filter values of the whole catalog, for the filter panel.
