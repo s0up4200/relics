@@ -20,7 +20,8 @@ fn revision() -> Option<String> {
         .and_then(|path| Path::new(path.trim()).canonicalize().ok())
         .is_some_and(|path| path == root);
     if !in_checkout {
-        return short_commit(include_str!(".git-revision")).map(str::to_owned);
+        // Cargo can reuse the build-script executable across source trees, so read the archive commit now.
+        return short_commit(&std::fs::read_to_string(".git-revision").ok()?).map(str::to_owned);
     }
 
     // Watch Git's resolved paths so linked worktrees and commits on the same branch stay current.
