@@ -240,6 +240,9 @@ impl Detail {
                         let reload = this.item.is_some();
                         let listed = this.listed_season();
                         let old_actions = this.item.as_ref().map(|old| actions(old, &this.seasons)).unwrap_or_default();
+                        if let Some(Mark::Season(i)) = this.menu {
+                            this.menu = kept(&this.seasons, i, &seasons, |s| s.season_number).map(Mark::Season);
+                        }
                         this.focus = kept_focus(
                             this.focus,
                             (&old_actions, &actions(&item, &seasons)),
@@ -304,6 +307,10 @@ impl Detail {
                         if let Focus::Episode(i) = this.focus {
                             let kept = kept(&this.episodes, i, &episodes, |episode| episode.content_id.clone());
                             this.focus = Focus::Episode(kept.unwrap_or(i));
+                        }
+                        // The menu of a card goes with its episode, and closes when the episode is gone.
+                        if let Some(Mark::Episode(i)) = this.menu {
+                            this.menu = kept(&this.episodes, i, &episodes, |e| e.content_id.clone()).map(Mark::Episode);
                         }
                         this.episodes = episodes;
                         this.focus = this.rows().clamp(this.focus);
