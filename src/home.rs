@@ -14,6 +14,7 @@ use crate::api::{Client, HomeSection, wire};
 use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::click::Clickable as _;
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::sideways::Row;
 
 /// The user pressed p on a card, or Play on the detail page.
@@ -48,8 +49,7 @@ pub struct Home {
     focus: Focus,
     /// The page has the keyboard focus, so the focused card shows the focus ring.
     pub active: bool,
-    /// A refresh came while the page did not show. The page reloads when it shows again.
-    stale: bool,
+    fresh: Fresh,
     /// The page list: one item for each section, and the status line as the last item.
     page: ListState,
     row_scrolls: Vec<ScrollHandle>,
@@ -108,6 +108,23 @@ pub fn kept_top(top: ListOffset, old: &[HomeSection], new: &[HomeSection]) -> Li
     }
 }
 
+impl Reload for Home {
+    fn deps(&self) -> Vec<Deps> {
+        vec![match &self.rows {
+            Rows::Home => Deps::Every,
+            Rows::Library(id) => Deps::Library(id.clone()),
+        }]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load(cx);
+    }
+}
+
 /// Moves the focus for an arrow or hjkl key. `rows` holds the number of cards in each row.
 pub fn move_focus(focus: Focus, key: Key, rows: &[usize]) -> Focus {
     let first_card_in = |mut range: Box<dyn Iterator<Item = usize>>, col: usize| {
@@ -155,7 +172,7 @@ impl Home {
             failed: false,
             focus: Focus::Outside,
             active: false,
-            stale: false,
+            fresh: Fresh::default(),
             // The overdraw measures the rows near the viewport, so that the focus can scroll to them.
             page: ListState::new(1, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
@@ -166,25 +183,11 @@ impl Home {
         home
     }
 
-    /// Reloads the sections now when the page shows. Otherwise the page reloads when it shows again.
-    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
-        self.stale = true;
-        if shows {
-            self.shown(cx);
-        }
-    }
-
-    /// The page shows again.
-    pub fn shown(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.stale) {
-            self.load(cx);
-        }
-    }
-
     /// Loads the Home sections, with the artwork URLs of each section in the rung for its cards.
     fn load(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let (scale, rows) = (self.scale, self.rows.clone());
+        let ticket = self.fresh.begin();
         self._loading = cx.spawn(async move |this, cx| {
             let size = |entry: &wire::SectionLayoutEntry| rung(&entry.section_type, entry.featured, scale);
             let result = match rows {
@@ -193,6 +196,7 @@ impl Home {
             };
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok(mut sections) => {
                         sections.sort_by_key(|s| !s.featured);
                         let first_load = this.sections.is_empty();
@@ -246,6 +250,9 @@ impl Home {
                         let status = this.sections.len();
                         this.page.remeasure_items(status..status + 1);
                     }
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })

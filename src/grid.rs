@@ -17,6 +17,7 @@ use crate::click::Clickable as _;
 use crate::filter_panel::bar_pill;
 use crate::home::{Open, Play, card};
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::player::start_shuffle;
 
 pub const POSTER_WIDTH: f32 = 150.;
@@ -64,11 +65,11 @@ pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
     }
 }
 
-/// The focus after a reload: the place in `new` of the Item at `focus` in `old`. When the Item is gone, the same
-/// place, but not past the last card.
-fn kept_focus(old: &[wire::CatalogItem], focus: usize, new: &[wire::CatalogItem]) -> usize {
+/// The focus after a reload of a list: the place in `new` of the entry at `focus` in `old`, found by `key`. When the
+/// entry is gone, the same place, but not past the last entry.
+pub fn kept_focus<T, K: PartialEq>(old: &[T], focus: usize, new: &[T], key: impl Fn(&T) -> K) -> usize {
     old.get(focus)
-        .and_then(|item| new.iter().position(|i| i.content_id == item.content_id))
+        .and_then(|entry| new.iter().position(|e| key(e) == key(entry)))
         .unwrap_or_else(|| focus.min(new.len().saturating_sub(1)))
 }
 
@@ -128,10 +129,9 @@ pub struct Grid {
     columns: usize,
     /// The error of the last load, shown with Retry.
     error: Option<String>,
-    /// The load of the next page or the reload. A reload drops the load of the next page.
+    /// The load of the next page or the reload. A reload waits for the load of the next page.
     loading: Option<Task<()>>,
-    /// A refresh came while the grid did not show. The grid reloads when it shows again.
-    pub stale: bool,
+    fresh: Fresh,
     image_size: Rung,
     scroll: UniformListScrollHandle,
     artwork: Entity<ArtworkCache>,
@@ -153,7 +153,7 @@ impl Grid {
             columns: 1,
             error: None,
             loading: None,
-            stale: false,
+            fresh: Fresh::default(),
             image_size: Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()),
             scroll: UniformListScrollHandle::new(),
             artwork: artwork::global(cx),
@@ -169,7 +169,6 @@ impl Grid {
         self.paging = Paging::default();
         self.focus = 0;
         self.loading = None;
-        self.stale = false;
         self.scroll.0.borrow().base_handle.set_offset(gpui::Point::default());
         self.load_more(cx);
     }
@@ -199,12 +198,15 @@ impl Grid {
             return;
         }
         self.error = None;
+        // The first page, also after a failed first load, reads the Items again.
+        let ticket = if self.paging.items.is_empty() { self.fresh.begin() } else { self.fresh.more() };
         let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
         self.loading = Some(cx.spawn(async move |this, cx| {
             let result = fetch(&client, source, cursor, None, image_size).await;
             this.update(cx, |this, cx| {
                 this.loading = None;
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok((items, total, page)) => {
                         this.thumbs.extend(items.iter().map(thumb));
                         this.paging.add(items, total, page);
@@ -213,6 +215,9 @@ impl Grid {
                     // The Library window shows Offline or the sign-in screen. The grid keeps what it shows.
                     Err(err) => this.error = Some(err.to_string()),
                 }
+                if this.fresh.ready() {
+                    this.reload(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -220,18 +225,12 @@ impl Grid {
         cx.notify();
     }
 
-    /// The grid shows again. A stale grid reloads.
-    pub fn shown(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.stale) {
-            self.reload(cx);
-        }
-    }
-
     /// Loads the Items again from the first page, as many as the grid has, in pages of up to 100 Items. The new
     /// Items replace the old ones when all pages are in, so the scroll position stays. The focus stays on its Item.
     fn reload(&mut self, cx: &mut Context<Self>) {
         // A grid with less than one page has all its Items, or its first load failed. It reloads one full page.
         let want = self.paging.items.len().max(crate::browse::PAGE_SIZE as usize);
+        let ticket = self.fresh.begin();
         let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
         self.loading = Some(cx.spawn(async move |this, cx| {
             let mut paging = Paging::default();
@@ -249,10 +248,12 @@ impl Grid {
             this.update(cx, |this, cx| {
                 this.loading = None;
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok(()) => {
                         this.drop_thumbs(cx);
                         this.thumbs = paging.items.iter().map(thumb).collect();
-                        this.focus = kept_focus(&this.paging.items, this.focus, &paging.items);
+                        this.focus =
+                            kept_focus(&this.paging.items, this.focus, &paging.items, |i| i.content_id.clone());
                         this.paging = paging;
                         this.error = None;
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
@@ -261,6 +262,9 @@ impl Grid {
                     // shows Offline or the sign-in screen.
                     Err(err) if this.paging.loaded() => eprintln!("relics: cannot reload the grid: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
+                }
+                if this.fresh.ready() {
+                    this.reload(cx);
                 }
                 cx.notify();
             })
@@ -323,6 +327,20 @@ impl Grid {
                 cx.notify();
             }))
             .child(card(item, url.map(String::from), thumb, (POSTER_WIDTH, POSTER_HEIGHT), focused, cx.omarchy()))
+    }
+}
+
+impl Reload for Grid {
+    fn deps(&self) -> Vec<Deps> {
+        vec![Deps::Every]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.reload(cx);
     }
 }
 
@@ -580,10 +598,11 @@ mod tests {
     #[test]
     fn the_focus_stays_on_its_item_after_a_reload() {
         let old = items(&["a", "b", "c", "d"]);
-        assert_eq!(kept_focus(&old, 2, &items(&["new", "a", "b", "c", "d"])), 3, "the Item moved one place on");
-        assert_eq!(kept_focus(&old, 2, &items(&["a", "b", "d", "e"])), 2, "a gone Item keeps the place");
-        assert_eq!(kept_focus(&old, 3, &items(&["a", "b"])), 1, "a gone Item stops at the last card");
-        assert_eq!(kept_focus(&old, 1, &[]), 0, "an empty grid");
+        let id = |i: &wire::CatalogItem| i.content_id.clone();
+        assert_eq!(kept_focus(&old, 2, &items(&["new", "a", "b", "c", "d"]), id), 3, "the Item moved one place on");
+        assert_eq!(kept_focus(&old, 2, &items(&["a", "b", "d", "e"]), id), 2, "a gone Item keeps the place");
+        assert_eq!(kept_focus(&old, 3, &items(&["a", "b"]), id), 1, "a gone Item stops at the last card");
+        assert_eq!(kept_focus(&old, 1, &[], id), 0, "an empty grid");
     }
 
     #[test]

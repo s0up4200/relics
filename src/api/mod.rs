@@ -2,6 +2,7 @@
 //! app adds no second async runtime, and tests can give it a fake client.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -226,6 +227,9 @@ pub struct Client {
     installation_id: Mutex<String>,
     /// The Server settings of the active Profile.
     server_settings: Mutex<ServerSettings>,
+    /// Counts the starts and ends of the writes of Server settings, so that a read from before a write does not
+    /// replace the written value.
+    settings_writes: AtomicU64,
     /// The `client_features` of the last start request. A replan sends the same list.
     features: Mutex<Vec<&'static str>>,
     on_trouble: Mutex<Box<dyn Fn(Trouble) + Send + Sync>>,
@@ -280,6 +284,7 @@ impl Client {
             on_pin_required: Mutex::new(Box::new(|_| Box::pin(async { None }))),
             installation_id: Mutex::default(),
             server_settings: Mutex::default(),
+            settings_writes: AtomicU64::new(0),
             features: Mutex::default(),
             on_trouble: Mutex::new(Box::new(|_| {})),
             sessions: Mutex::default(),
@@ -367,11 +372,12 @@ impl Client {
     /// Reads the Server settings of the active Profile from the server and keeps them in memory.
     pub async fn load_server_settings(&self) -> Result<(), Error> {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
+        let writes = self.settings_writes.load(Ordering::SeqCst);
         let query = settings::KEYS.map(|key| format!("keys={key}")).join("&");
         let values: wire::EffectiveSettingCollection =
             self.call(Method::GET, &format!("settings/values/effective?{query}"), None).await?;
-        // The user can switch to another Profile while the request runs.
-        if self.auth.lock().unwrap().profile_id == profile_id {
+        // The user can switch to another Profile, or write a setting, while the request runs.
+        if self.auth.lock().unwrap().profile_id == profile_id && self.settings_writes.load(Ordering::SeqCst) == writes {
             *self.server_settings.lock().unwrap() = ServerSettings::from_effective(&values.items);
         }
         Ok(())
@@ -383,11 +389,16 @@ impl Client {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let path = format!("settings/values/{key}?scope=profile");
         let body = serde_json::json!({ "value": value });
-        let _: wire::SettingValue = self.call(Method::PUT, &path, Some(body)).await?;
+        self.settings_writes.fetch_add(1, Ordering::SeqCst);
+        let written = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await;
         if self.auth.lock().unwrap().profile_id == profile_id {
-            self.server_settings.lock().unwrap().set(key, &value);
+            if written.is_ok() {
+                self.server_settings.lock().unwrap().set(key, &value);
+            }
+            // A write of the old Profile must not invalidate the read of the new Profile.
+            self.settings_writes.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(())
+        written.map(|_| ())
     }
 
     pub async fn profiles(&self) -> Result<Vec<wire::Profile>, Error> {

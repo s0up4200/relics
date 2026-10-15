@@ -20,6 +20,7 @@ use crate::click::Clickable as _;
 use crate::grid::Move;
 use crate::home::{Open, Play, badge_label, card, progress, progress_bar};
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::player::{PlayItem, start_shuffle};
 use crate::search::OpenPerson;
 use crate::sideways::Row;
@@ -54,8 +55,7 @@ pub struct Detail {
     focus: Focus,
     /// The page has the keyboard focus, so the focused control shows the focus ring.
     pub active: bool,
-    /// A refresh came while the page did not show. The page reloads when it shows again.
-    stale: bool,
+    fresh: Fresh,
     columns: usize,
     /// The error of the last request, shown with Retry.
     error: Option<String>,
@@ -95,6 +95,21 @@ pub struct Detail {
     _shuffle: Task<()>,
 }
 
+impl Reload for Detail {
+    fn deps(&self) -> Vec<Deps> {
+        let series = self.item.as_ref().and_then(|item| item.series_id.clone());
+        vec![Deps::Item { id: self.id.clone(), series }]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load(cx);
+    }
+}
+
 impl EventEmitter<Play> for Detail {}
 impl EventEmitter<OpenPerson> for Detail {}
 impl EventEmitter<Open> for Detail {}
@@ -129,7 +144,7 @@ impl Detail {
             episodes: Vec::new(),
             focus: Focus::Action(0),
             active: false,
-            stale: false,
+            fresh: Fresh::default(),
             columns: 1,
             error: None,
             notice: None,
@@ -157,26 +172,6 @@ impl Detail {
         };
         detail.load(cx);
         detail
-    }
-
-    /// The Item of the page, and the series of an episode.
-    pub fn shows(&self) -> (&str, Option<&str>) {
-        (&self.id, self.item.as_ref().and_then(|item| item.series_id.as_deref()))
-    }
-
-    /// Reloads the page now when it shows. Otherwise the page reloads when it shows again.
-    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
-        self.stale = true;
-        if shows {
-            self.shown(cx);
-        }
-    }
-
-    /// The page shows again.
-    pub fn shown(&mut self, cx: &mut Context<Self>) {
-        if std::mem::take(&mut self.stale) {
-            self.load(cx);
-        }
     }
 
     /// Loads More Like This. A failure leaves the row out, or keeps the row of the last load: the page works without
@@ -207,6 +202,7 @@ impl Detail {
         self.error = None;
         self.load_similar(cx);
         let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.image_size);
+        let ticket = self.fresh.begin();
         self._loading = cx.spawn(async move |this, cx| {
             let result: Result<_, Error> = async {
                 let item = client.item(&id, image_size).await?;
@@ -220,6 +216,7 @@ impl Detail {
             .await;
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok((item, seasons, versions)) => {
                         let thumbs = [&item.backdrop_thumbhash, &item.poster_thumbhash]
                             .into_iter()
@@ -266,6 +263,9 @@ impl Detail {
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
                 }
+                if this.fresh.ready() {
+                    this.load(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -294,10 +294,12 @@ impl Detail {
             return;
         };
         let (client, image_size) = (self.client.clone(), self.episode_size);
+        let ticket = self.fresh.ticket();
         self._episodes = cx.spawn(async move |this, cx| {
             let result = client.season_episodes(&id, season, image_size).await;
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.accepts(ticket) => {}
                     Ok(episodes) => {
                         let thumbs = episodes
                             .iter()
@@ -319,6 +321,9 @@ impl Detail {
                     }
                     Err(err) if !this.episodes.is_empty() => eprintln!("relics: cannot reload the episodes: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })
@@ -597,6 +602,7 @@ impl Detail {
         cx: &mut Context<Self>,
     ) {
         self.notice = None;
+        self.fresh.write();
         let focused = match self.focus {
             Focus::Action(i) => self.item.as_ref().and_then(|item| actions(item, &self.seasons).get(i).copied()),
             _ => None,
@@ -616,6 +622,9 @@ impl Detail {
                         }
                     }
                     Err(err) => this.notice = Some(format!("Not saved: {err}")),
+                }
+                if this.fresh.written() {
+                    this.load(cx);
                 }
                 cx.notify();
             })

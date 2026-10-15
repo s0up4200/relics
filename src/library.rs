@@ -20,7 +20,8 @@ use crate::accounts::{AccountChoice, AccountPicker};
 use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
 use crate::click::Clickable as _;
 use crate::home;
-use crate::pages::{MenuChoice, Pages, Refresh};
+use crate::pages::freshness::Change;
+use crate::pages::{MenuChoice, Pages};
 use crate::player::{Controller, PlaybackError, PlayerClosed, Stopped, ViewClosed};
 use crate::player_view::PlayerView;
 use crate::profiles::{PickerEvent, ProfilePicker};
@@ -158,7 +159,10 @@ impl LibraryWindow {
                 view.update(cx, |view, _| view.closed(window));
             }
             if let Screen::Pages(pages) = &this.screen {
-                pages.update(cx, |pages, cx| pages.focus(window, cx));
+                pages.update(cx, |pages, cx| {
+                    pages.set_shown(true, cx);
+                    pages.focus(window, cx);
+                });
             }
             cx.notify();
         });
@@ -267,7 +271,7 @@ impl LibraryWindow {
             return;
         };
         let account_id = account.id.clone();
-        self.screen = Screen::Message(format!("Signing in to {}…", server.name));
+        self.set_screen(Screen::Message(format!("Signing in to {}…", server.name)), cx);
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let tokens = secrets::load(&server.id, &account_id).await;
             this.update_in(cx, |this, window, cx| match tokens {
@@ -309,7 +313,7 @@ impl LibraryWindow {
         self._screen = Some(cx.subscribe_in(&view, window, |this, _, event: &SignedIn, window, cx| {
             this.signed_in(event, window, cx);
         }));
-        self.screen = Screen::SignIn(view);
+        self.set_screen(Screen::SignIn(view), cx);
         cx.notify();
     }
 
@@ -359,7 +363,7 @@ impl LibraryWindow {
         self.listen_for_pin(&client, window, cx);
         self.listen_for_trouble(&client, window, cx);
         self.client = Some(client.clone());
-        self.screen = Screen::Message("Loading Profiles…".into());
+        self.set_screen(Screen::Message("Loading Profiles…".into()), cx);
         cx.notify();
         let last = self.state.active().and_then(|(_, account)| account.last_profile.clone());
         let account_id = self.account_id();
@@ -383,11 +387,11 @@ impl LibraryWindow {
                 // The trouble listener shows the sign-in screen and probes the Server.
                 Err(Error::SignedOut) => {}
                 Err(err) if err.is_offline() => {
-                    this.screen = Screen::Unreachable(format!("Can't reach {}", client.server().name));
+                    this.set_screen(Screen::Unreachable(format!("Can't reach {}", client.server().name)), cx);
                     cx.notify();
                 }
                 Err(err) => {
-                    this.screen = Screen::Message(err.to_string());
+                    this.set_screen(Screen::Message(err.to_string()), cx);
                     cx.notify();
                 }
             })
@@ -412,7 +416,7 @@ impl LibraryWindow {
         }
         self.save_state();
         self._screen = None;
-        self.screen = Screen::Message("Loading…".into());
+        self.set_screen(Screen::Message("Loading…".into()), cx);
         cx.notify();
         // Home opens after the Server settings of the Profile come, so that no playback starts with the settings
         // of the Profile before. When the read fails, playback uses the default Server settings.
@@ -433,7 +437,7 @@ impl LibraryWindow {
                 let pages = match this.parked.take() {
                     // The pages missed the changes, and a stop report, while the sign-in showed.
                     Some((id, pages)) if id == *profile.id => {
-                        pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+                        pages.update(cx, |pages, cx| pages.refresh(&[Change::All], cx));
                         pages
                     }
                     _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
@@ -448,11 +452,12 @@ impl LibraryWindow {
         pages.update(cx, |pages, cx| pages.focus(window, cx));
         let play = cx.subscribe_in(&pages, window, {
             let client = client.clone();
-            move |this, _, home::Play(item), window, cx| {
+            move |this, pages, home::Play(item), window, cx| {
                 this.player_error = None;
                 this.player.update(cx, |player, cx| player.play(client.clone(), item.clone(), cx));
                 if let Some(view) = this.player_view.clone().filter(|_| this.player.read(cx).in_view()) {
                     view.update(cx, |view, cx| view.open(window, cx));
+                    pages.update(cx, |pages, cx| pages.set_shown(false, cx));
                 }
                 cx.notify();
             }
@@ -476,8 +481,22 @@ impl LibraryWindow {
         pages.update(cx, |pages, _| pages.release = Some(release));
         self._pages = vec![play, menu, accounts];
         self._screen = None;
-        self.screen = Screen::Pages(pages);
+        self.set_screen(Screen::Pages(pages), cx);
         cx.notify();
+    }
+
+    /// Shows `screen` in place of the screen that shows. Pages that leave the window wait with their reloads until
+    /// they show again.
+    fn set_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if let Screen::Pages(old) = &self.screen
+            && !matches!(&screen, Screen::Pages(new) if new == old)
+        {
+            old.update(cx, |pages, cx| pages.set_shown(false, cx));
+        }
+        if let Screen::Pages(new) = &screen {
+            new.update(cx, |pages, cx| pages.set_shown(true, cx));
+        }
+        self.screen = screen;
     }
 
     /// Shows the Profile picker. With `pin_for`, the PIN entry of that Profile is open.
@@ -491,7 +510,7 @@ impl LibraryWindow {
                 PickerEvent::SignOut => this.sign_out(window, cx),
                 PickerEvent::Back => this.back_to_pages(window, cx),
             }));
-        self.screen = Screen::Profiles(view);
+        self.set_screen(Screen::Profiles(view), cx);
         cx.notify();
     }
 
@@ -549,7 +568,7 @@ impl LibraryWindow {
                 // From the sign-in or the Connect screen: open the Active server again.
                 AccountChoice::Back => this.restore(window, cx),
             }));
-        self.screen = Screen::Accounts(view);
+        self.set_screen(Screen::Accounts(view), cx);
         cx.notify();
     }
 
@@ -561,7 +580,7 @@ impl LibraryWindow {
 
     fn show_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._screen = None;
-        self.screen = Screen::Connect;
+        self.set_screen(Screen::Connect, cx);
         self.url.update(cx, |url, cx| url.focus(window, cx));
         cx.notify();
     }
@@ -584,7 +603,7 @@ impl LibraryWindow {
                 self.state.remove(&pair.server_id, &pair.account_id);
                 self.save_state();
                 self._screen = None;
-                self.screen = Screen::Message("Signing out…".into());
+                self.set_screen(Screen::Message("Signing out…".into()), cx);
                 cx.notify();
                 let key = (pair.server_id.clone(), pair.account_id.clone());
                 self.task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -697,7 +716,7 @@ impl LibraryWindow {
         };
         let left = self.leave_account(true, cx);
         self._screen = None;
-        self.screen = Screen::Message("Signing out…".into());
+        self.set_screen(Screen::Message("Signing out…".into()), cx);
         cx.notify();
         // The sign-in screen waits for the delete, so that the delete cannot remove the tokens of a new sign-in.
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -768,15 +787,19 @@ impl LibraryWindow {
         }
     }
 
-    /// Reloads all pages. The pages also wait behind a picker or the PIN entry. Parked pages reload when they come
-    /// back.
+    /// Reloads all pages: the pages that show now, and the pages behind a picker, the PIN entry or the sign-in
+    /// screen when they show again.
     fn refresh_pages(&mut self, cx: &mut Context<Self>) {
         let pages = match &self.screen {
             Screen::Pages(pages) => Some(pages.clone()),
-            _ => self.menu_back.clone().or_else(|| self.pin_wait.as_ref().map(|wait| wait.pages.clone())),
+            _ => self
+                .menu_back
+                .clone()
+                .or_else(|| self.pin_wait.as_ref().map(|wait| wait.pages.clone()))
+                .or_else(|| self.parked.as_ref().map(|(_, pages)| pages.clone())),
         };
         if let Some(pages) = pages {
-            pages.update(cx, |pages, cx| pages.refresh(&Refresh::All, cx));
+            pages.update(cx, |pages, cx| pages.refresh(&[Change::All], cx));
         }
     }
 
@@ -803,11 +826,10 @@ impl LibraryWindow {
             let sync = cx.background_spawn({
                 let client = client.clone();
                 async move {
-                    client
-                        .sync_progress()
-                        .await
-                        .inspect_err(|err| eprintln!("relics: progress sync failed: {err}"))
-                        .ok()
+                    // A failed sync keeps the positions for the next sync.
+                    if let Err(err) = client.sync_progress().await {
+                        eprintln!("relics: progress sync failed: {err}");
+                    }
                 }
             });
             this.update_in(cx, |this, window, cx| {
@@ -822,10 +844,10 @@ impl LibraryWindow {
                 cx.notify();
             })
             .ok();
-            // The pages reload after the Server has the positions of the stop reports that failed offline.
-            if sync.await.is_some() {
-                this.update(cx, |this, cx| this.refresh_pages(cx)).ok();
-            }
+            // The pages reload after the attempt to give the Server the positions of the stop reports that failed
+            // offline, also when it failed.
+            sync.await;
+            this.update(cx, |this, cx| this.refresh_pages(cx)).ok();
         }));
     }
 
