@@ -500,7 +500,7 @@ impl Panel {
                 .flex_col()
                 .gap(px(6.))
                 .child(div().text_size(px(12.)).text_color(t.secondary).child(section.title))
-                .child(div().flex().flex_wrap().gap(px(8.)).children(pills.collect::<Vec<_>>()))
+                .child(div().flex().flex_wrap().items_center().gap(px(8.)).children(pills.collect::<Vec<_>>()))
         });
         div()
             .p(px(16.))

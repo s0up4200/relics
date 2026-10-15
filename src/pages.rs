@@ -893,6 +893,8 @@ impl Pages {
             .items_center()
             .gap(px(12.))
             .when(rail, |row| row.justify_center())
+            // Keep the editor focused until toggle_menu records the field to restore.
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx)))
             .when(rail, |row| row.text_color(t.bright).child(initial))
             .when(!rail, |row| {
