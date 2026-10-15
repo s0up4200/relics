@@ -10,20 +10,23 @@ use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, StreamExt as _};
 
 use gpui::{
-    AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled, Subscription, Task,
-    Window, div, px,
+    AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
 use crate::accounts::{AccountChoice, AccountPicker};
 use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
+use crate::click::Clickable as _;
 use crate::home;
 use crate::pages::{MenuChoice, Pages, Refresh};
 use crate::player::{Controller, PlaybackError, PlayerClosed, Stopped, ViewClosed};
 use crate::player_view::PlayerView;
 use crate::profiles::{PickerEvent, ProfilePicker};
+use crate::release::ReleaseCheck;
 use crate::secrets;
+use crate::settings::LocalSettings;
 use crate::settings_page::AccountAction;
 use crate::sign_in::{SignIn, SignedIn};
 use crate::state::{Pair, SavedAccount, SavedServer, State};
@@ -92,6 +95,9 @@ pub struct LibraryWindow {
     _pin_requests: Option<Task<()>>,
     /// Gives each Browser sign-in link from the hand-off socket to the sign-in screen.
     _links: Option<Task<()>>,
+    /// The release check. A newer release shows the Release notice at the bottom right.
+    release: Entity<ReleaseCheck>,
+    _release: Subscription,
 }
 
 struct PinWait {
@@ -180,6 +186,11 @@ impl LibraryWindow {
                 false
             }
         });
+        // A debug build (`cargo run`) sends no request to GitHub.
+        let http = (!cfg!(debug_assertions)).then(|| cx.http_client());
+        let enabled = LocalSettings::load(&LocalSettings::dir()).check_releases;
+        let release = cx.new(|cx| ReleaseCheck::new(http, enabled, cx));
+        let release_changed = cx.observe(&release, |_, _, cx| cx.notify());
         let mut this = Self {
             state,
             state_dir,
@@ -224,6 +235,8 @@ impl LibraryWindow {
                     }
                 })
             }),
+            release,
+            _release: release_changed,
         };
         match link {
             Some(link) => this.browser_timed_out(&link, window, cx),
@@ -459,6 +472,8 @@ impl LibraryWindow {
             this.account_action(action, window, cx)
         });
         self.share_pairs(&pages, cx);
+        let release = self.release.clone();
+        pages.update(cx, |pages, _| pages.release = Some(release));
         self._pages = vec![play, menu, accounts];
         self._screen = None;
         self.screen = Screen::Pages(pages);
@@ -873,6 +888,54 @@ impl LibraryWindow {
     }
 }
 
+impl LibraryWindow {
+    /// The Release notice: a pill at the bottom right. A click opens the release page. The × hides it for that
+    /// version only.
+    fn release_notice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let release = self.release.read(cx).release.clone()?;
+        if self.state.hidden_release.as_ref() == Some(&release.version) {
+            return None;
+        }
+        let t = cx.omarchy();
+        let version = release.version.clone();
+        Some(
+            div()
+                .absolute()
+                .bottom(px(24.))
+                .right(px(24.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .pl(px(16.))
+                .pr(px(10.))
+                .py(px(8.))
+                .rounded_full()
+                .bg(t.surface)
+                .child(
+                    div()
+                        .id("release-notice")
+                        .clickable()
+                        .text_color(t.accent)
+                        .on_click(move |_, _, cx| cx.open_url(&release.url))
+                        .child(format!("Relics {} is out", release.version)),
+                )
+                .child(
+                    div()
+                        .id("release-notice-hide")
+                        .clickable()
+                        .px(px(4.))
+                        .text_color(t.secondary)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state.hidden_release = Some(version.clone());
+                            this.save_state();
+                            cx.notify();
+                        }))
+                        .child("×"),
+                ),
+        )
+    }
+}
+
 impl Render for LibraryWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(view) = self.player_view.clone().filter(|_| self.player.read(cx).in_view()) {
@@ -921,6 +984,7 @@ impl Render for LibraryWindow {
                 .text_color(t.warning)
                 .child("Offline, retrying")
         }));
+        let page = page.children(self.release_notice(cx));
         page.children(self.player_error.clone().map(|text| {
             div()
                 .absolute()

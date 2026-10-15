@@ -1,0 +1,14 @@
+{
+  "url": "https://api.github.example.invalid/repos/s0up4200/relics/releases/1",
+  "html_url": "https://github.example.invalid/s0up4200/relics/releases/tag/v99.0.0",
+  "id": 1,
+  "tag_name": "v99.0.0",
+  "target_commitish": "main",
+  "name": "v99.0.0",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-10-01T12:00:00Z",
+  "published_at": "2026-10-01T12:05:00Z",
+  "assets": [],
+  "body": "Release notes"
+}

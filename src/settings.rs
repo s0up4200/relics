@@ -231,11 +231,13 @@ pub fn options(key: &str, current: &Value) -> Vec<(Value, String)> {
 pub struct LocalSettings {
     /// mpv decodes on the GPU (`hwdec=auto-safe`), or on the CPU only (`hwdec=no`).
     pub hardware_decoding: bool,
+    /// The app asks GitHub for a newer release (the Release notice).
+    pub check_releases: bool,
 }
 
 impl Default for LocalSettings {
     fn default() -> Self {
-        Self { hardware_decoding: true }
+        Self { hardware_decoding: true, check_releases: true }
     }
 }
 

@@ -105,3 +105,16 @@ fn remove_drops_the_account_and_a_server_with_no_accounts_left() {
     assert!(state.servers.is_empty());
     assert_eq!(state.active, None);
 }
+
+#[test]
+fn the_hidden_release_survives_a_restart_and_an_old_state_file_has_none() {
+    let dir = empty_dir("hidden-release");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A state file from a build before the Release notice.
+    std::fs::write(dir.join("state.json"), r#"{"device_id":"d","servers":[],"active":null}"#).unwrap();
+    let mut state = State::load(&dir).unwrap();
+    assert_eq!(state.hidden_release, None);
+    state.hidden_release = Some("0.2.0".into());
+    state.save(&dir).unwrap();
+    assert_eq!(State::load(&dir).unwrap().hidden_release.as_deref(), Some("0.2.0"));
+}

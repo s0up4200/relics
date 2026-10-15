@@ -4,20 +4,23 @@
 //!   Each change writes at the `profile` scope at once. A failed write puts the old value back and shows one
 //!   line of error text. The app keeps no queue of failed writes.
 //! - Player: the hardware decoding Local setting.
+//! - Releases: the "Check for new releases" Local setting of the Release notice.
 //! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
 //!
 //! j/k move between the rows. l or Right gives the next value, h or Left the previous one. Enter or a click
 //! on a setting with more than two choices opens the list of its choices below the row. In the list j/k move,
 //! Enter or a click picks the choice, and Escape, Backspace or h closes it. Enter on an On/Off setting toggles it.
 //! On an Account row h/l choose Sign out or Remove, and Enter does it.
+//!
+//! The footer shows the build identity, and a link to the release page when a newer release exists.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Task, Window, div, px,
+    App, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 use serde_json::Value;
@@ -26,6 +29,7 @@ use crate::api::Client;
 use crate::choice_list::{Choice, ChoiceList, Outcome};
 use crate::click::Clickable as _;
 use crate::keys::Key;
+use crate::release::ReleaseCheck;
 use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
 use crate::state::Pair;
 
@@ -50,8 +54,10 @@ pub fn step(options: &[(Value, String)], current: &Value, step: isize) -> Value 
 
 /// The row of the hardware decoding toggle. The eight Server settings come first.
 const HWDEC_ROW: usize = KEYS.len();
+/// The row of the release check toggle.
+const RELEASES_ROW: usize = HWDEC_ROW + 1;
 /// The first Account row.
-const FIRST_PAIR: usize = HWDEC_ROW + 1;
+const FIRST_PAIR: usize = RELEASES_ROW + 1;
 
 pub struct SettingsPage {
     client: Arc<Client>,
@@ -65,6 +71,9 @@ pub struct SettingsPage {
     /// The last failed write, or the last Accounts action.
     message: Option<(String, bool)>,
     local: LocalSettings,
+    /// The release check of the app. `None` when the page has no Library window, as in a test.
+    release: Option<Entity<ReleaseCheck>>,
+    _release: Option<Subscription>,
     row: usize,
     /// On an Account row: 0 is Sign out, 1 is Remove.
     action: usize,
@@ -84,8 +93,10 @@ impl SettingsPage {
         client: Arc<Client>,
         pairs: Vec<Pair>,
         active_pair: Option<(String, String)>,
+        release: Option<Entity<ReleaseCheck>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let _release = release.as_ref().map(|release| cx.observe(release, |_, _, cx| cx.notify()));
         let mut page = Self {
             client,
             pairs,
@@ -94,6 +105,8 @@ impl SettingsPage {
             load_error: None,
             message: None,
             local: LocalSettings::load(&LocalSettings::dir()),
+            release,
+            _release,
             row: 0,
             action: 0,
             picker: None,
@@ -197,16 +210,35 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn toggle_hwdec(&mut self, cx: &mut Context<Self>) {
-        let new = LocalSettings { hardware_decoding: !self.local.hardware_decoding };
+    /// Saves the Local settings. Returns false when the save failed, and shows why.
+    fn save_local(&mut self, new: LocalSettings, label: &str, cx: &mut Context<Self>) -> bool {
+        cx.notify();
         match new.save(&LocalSettings::dir()) {
             Ok(()) => {
                 self.local = new;
                 self.message = None;
+                true
             }
-            Err(err) => self.message = Some((format!("Could not save hardware decoding: {err}"), true)),
+            Err(err) => {
+                self.message = Some((format!("Could not save {label}: {err}"), true));
+                false
+            }
         }
-        cx.notify();
+    }
+
+    fn toggle_hwdec(&mut self, cx: &mut Context<Self>) {
+        let new = LocalSettings { hardware_decoding: !self.local.hardware_decoding, ..self.local.clone() };
+        self.save_local(new, "hardware decoding", cx);
+    }
+
+    /// Turns the release check on or off. On, the app checks at once.
+    fn toggle_releases(&mut self, cx: &mut Context<Self>) {
+        let enabled = !self.local.check_releases;
+        if self.save_local(LocalSettings { check_releases: enabled, ..self.local.clone() }, "the release check", cx)
+            && let Some(release) = &self.release
+        {
+            release.update(cx, |release, cx| release.set_enabled(enabled, cx));
+        }
     }
 
     fn act(&mut self, index: usize, action: usize, cx: &mut Context<Self>) {
@@ -258,6 +290,7 @@ impl SettingsPage {
                 _ => return false,
             },
             Key::Right | Key::Other("enter") | Key::Left if row == HWDEC_ROW => self.toggle_hwdec(cx),
+            Key::Right | Key::Other("enter") | Key::Left if row == RELEASES_ROW => self.toggle_releases(cx),
             Key::Other("enter") => self.act(row - FIRST_PAIR, self.action, cx),
             Key::Right if row < self.add_row() => self.action = 1,
             Key::Left if row < self.add_row() && self.action == 1 => self.action = 0,
@@ -407,7 +440,8 @@ impl Render for SettingsPage {
                 ]
             }
         };
-        let hwdec = if self.local.hardware_decoding { "On" } else { "Off" };
+        let on_off = |on: bool| if on { "On" } else { "Off" };
+        let newer = self.release.as_ref().and_then(|release| release.read(cx).release.clone());
         let pairs: Vec<_> = self.pairs.iter().enumerate().map(|(i, pair)| self.pair_row(i, pair, cx)).collect();
         let add = self.add_row();
         div()
@@ -425,7 +459,14 @@ impl Render for SettingsPage {
             .child(self.header("Playback", cx))
             .children(playback)
             .child(self.header("Player", cx))
-            .child(self.row(HWDEC_ROW, "Hardware decoding".into(), hwdec.into(), cx))
+            .child(self.row(HWDEC_ROW, "Hardware decoding".into(), on_off(self.local.hardware_decoding).into(), cx))
+            .child(self.header("Releases", cx))
+            .child(self.row(
+                RELEASES_ROW,
+                "Check for new releases".into(),
+                on_off(self.local.check_releases).into(),
+                cx,
+            ))
             .child(self.header("Accounts", cx))
             .children(pairs)
             .child(self.row(add, "Add server".into(), "".into(), cx))
@@ -433,7 +474,23 @@ impl Render for SettingsPage {
                 div().pt(px(12.)).text_color(if failed { t.danger } else { t.secondary }).child(text)
             }))
             .child(div().flex_1())
-            .child(div().pt(px(24.)).text_size(px(12.)).text_color(t.secondary).child(crate::BUILD_IDENTITY))
+            .child(
+                div()
+                    .pt(px(24.))
+                    .flex()
+                    .gap(px(14.))
+                    .text_size(px(12.))
+                    .text_color(t.secondary)
+                    .child(crate::BUILD_IDENTITY)
+                    .children(newer.map(|release| {
+                        div()
+                            .id("settings-release")
+                            .clickable()
+                            .text_color(t.accent)
+                            .on_click(move |_, _, cx| cx.open_url(&release.url))
+                            .child(format!("Relics {} is out", release.version))
+                    })),
+            )
     }
 }
 

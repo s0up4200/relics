@@ -5636,6 +5636,7 @@ dependencies = [
  "mpris-server",
  "oo7",
  "raw-window-handle",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -28,6 +28,7 @@ use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
 use crate::library_page::{LibraryPage, is_shows};
 use crate::person::PersonPage;
+use crate::release::ReleaseCheck;
 use crate::requests::Requests;
 use crate::search::{OpenPerson, Search};
 use crate::settings_page::{AccountAction, SettingsPage};
@@ -281,6 +282,8 @@ pub struct Pages {
     menu: Option<usize>,
     /// Each Server and Account pair, and the Active server, for the Accounts section of the Settings page.
     pub pairs: (Vec<Pair>, Option<(String, String)>),
+    /// The release check of the app, for the Settings page.
+    pub release: Option<Entity<ReleaseCheck>>,
     focus_handle: FocusHandle,
     focus_pending: bool,
     /// The window of the progress events of the Live updates: 30 seconds.
@@ -314,6 +317,7 @@ impl Pages {
             sidebar: None,
             menu: None,
             pairs: (Vec::new(), None),
+            release: None,
             focus_handle: cx.focus_handle(),
             focus_pending: false,
             progress: Throttle::new(Duration::from_secs(30)),
@@ -551,8 +555,8 @@ impl Pages {
 
     /// Opens a new Settings page, which reads the Server settings again.
     fn open_settings(&mut self, cx: &mut Context<Self>) {
-        let (client, (pairs, active)) = (self.client.clone(), self.pairs.clone());
-        let page = cx.new(|cx| SettingsPage::new(client, pairs, active, cx));
+        let (client, (pairs, active), release) = (self.client.clone(), self.pairs.clone(), self.release.clone());
+        let page = cx.new(|cx| SettingsPage::new(client, pairs, active, release, cx));
         cx.subscribe(&page, |_, _, action: &AccountAction, cx| cx.emit(action.clone())).detach();
         self.sidebar = None;
         self.open(Page::Settings(page), cx);

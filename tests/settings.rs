@@ -181,9 +181,20 @@ fn config_dir(name: &str) -> std::path::PathBuf {
 fn hardware_decoding_is_auto_safe_until_the_user_turns_it_off() {
     let dir = config_dir("default");
     assert_eq!(LocalSettings::load(&dir).hwdec(), "auto-safe");
-    LocalSettings { hardware_decoding: false }.save(&dir).unwrap();
-    assert_eq!(std::fs::read_to_string(dir.join("settings.toml")).unwrap().trim(), "hardware_decoding = false");
+    LocalSettings { hardware_decoding: false, ..LocalSettings::default() }.save(&dir).unwrap();
+    assert!(std::fs::read_to_string(dir.join("settings.toml")).unwrap().contains("hardware_decoding = false\n"));
     assert_eq!(LocalSettings::load(&dir).hwdec(), "no");
+}
+
+#[test]
+fn the_release_check_is_on_until_the_user_turns_it_off() {
+    let dir = config_dir("releases");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A settings file from a build before the release check.
+    std::fs::write(dir.join("settings.toml"), "hardware_decoding = false\n").unwrap();
+    assert!(LocalSettings::load(&dir).check_releases);
+    LocalSettings { check_releases: false, ..LocalSettings::default() }.save(&dir).unwrap();
+    assert!(!LocalSettings::load(&dir).check_releases);
 }
 
 #[test]
