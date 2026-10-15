@@ -94,6 +94,15 @@ impl Server {
             (_, "catalog/query") => ok("query_catalog_items_ok.json"),
             (_, "catalog/items/test-item") => ok("get_catalog_item_ok.json"),
             (_, "catalog/items/test-item/versions") => ok("list_catalog_item_versions_ok.json"),
+            (_, "catalog/items/test-series") => {
+                let mut item: serde_json::Value = serde_json::from_str(&common::fixture("get_catalog_item_ok.json")).unwrap();
+                item["content_id"] = "test-series".into();
+                item["type"] = "series".into();
+                json(200, item.to_string())
+            }
+            (_, "catalog/series/test-series/seasons") => ok("list_series_seasons_ok.json"),
+            (_, "catalog/series/test-series/seasons/1/episodes") => ok("list_season_episodes_ok.json"),
+            ("DELETE", "watched/test-series") => json(204, String::new()),
             (_, "recommendations/similar/test-item") => ok("list_similar_ok.json"),
             (_, "collections/server") => json(200, r#"{"libraries":[]}"#.into()),
             (_, "library/12/collections") => ok("get_library_collections_ok.json"),
@@ -160,6 +169,33 @@ fn rig(cx: &mut TestAppContext) -> (Entity<Pages>, &mut VisualTestContext, Serve
 }
 
 type Changes = mpsc::UnboundedSender<LiveChange>;
+
+#[gpui::test]
+fn an_episode_read_from_before_a_watched_mark_triggers_a_corrective_reload(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    let episodes = "catalog/series/test-series/seasons/1/episodes";
+    server.hold(&[episodes]);
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail.clone()), cx));
+    cx.run_until_parked();
+    assert_eq!(server.count(episodes), 1);
+    // Play, Shuffle, Watchlist, Favorite, Watched.
+    detail.update(cx, |detail, cx| {
+        for _ in 0..4 {
+            detail.key(relics::keys::Key::Right, cx);
+        }
+        detail.key(relics::keys::Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(server.requests("DELETE", "watched/test-series").len(), 1);
+    assert_eq!(server.count("catalog/items/test-series?"), 1);
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/items/test-series?"), 2, "the old episode read queues a reload");
+    assert_eq!(server.count(episodes), 2);
+}
 
 /// Sends `change` as a Live update and lets the pages act on it.
 fn send(cx: &mut VisualTestContext, changes: &Changes, change: LiveChange) {

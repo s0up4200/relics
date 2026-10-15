@@ -80,7 +80,7 @@ impl Change {
     }
 }
 
-/// The load of a part, from `Fresh::begin` or `Fresh::more`.
+/// A read of a part, from `Fresh::begin`, `Fresh::more` or `Fresh::ticket`.
 #[derive(Clone, Copy)]
 pub struct Ticket {
     load: u64,
@@ -114,6 +114,11 @@ impl Fresh {
     pub fn more(&mut self) -> Ticket {
         self.loading = true;
         self.load += 1;
+        self.ticket()
+    }
+
+    /// A child read, such as the episodes of a Detail page, belongs to the load and writes of its part.
+    pub fn ticket(&self) -> Ticket {
         Ticket { load: self.load, write: self.write }
     }
 
@@ -124,6 +129,15 @@ impl Fresh {
             return false;
         }
         self.loading = false;
+        self.accepts(ticket)
+    }
+
+    /// A read still belongs to this load and no write ran meanwhile. An old child read queues a reload without
+    /// ending the load of its part.
+    pub fn accepts(&mut self, ticket: Ticket) -> bool {
+        if ticket.load != self.load {
+            return false;
+        }
         if ticket.write != self.write {
             self.due = true;
             return false;
@@ -473,5 +487,24 @@ mod tests {
         let read = fresh.begin();
         assert!(fresh.end(read));
         assert!(!fresh.ready(), "a failed or done load alone does not reload");
+    }
+
+    #[test]
+    fn a_child_read_rejects_writes_without_ending_the_main_load() {
+        let mut fresh = Fresh::default();
+        fresh.touch(true, false);
+        let main = fresh.begin();
+        let child = fresh.ticket();
+        fresh.write();
+        assert!(!fresh.accepts(child));
+        assert!(!fresh.written(), "the main load still runs");
+        assert!(fresh.loading());
+        assert!(!fresh.end(main));
+        assert!(fresh.ready());
+        let main = fresh.begin();
+        assert!(!fresh.accepts(child), "a new load supersedes its old child reads");
+        assert!(fresh.end(main));
+        assert!(fresh.accepts(fresh.ticket()));
+        assert!(!fresh.ready());
     }
 }

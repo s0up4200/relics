@@ -159,7 +159,10 @@ impl LibraryWindow {
                 view.update(cx, |view, _| view.closed(window));
             }
             if let Screen::Pages(pages) = &this.screen {
-                pages.update(cx, |pages, cx| pages.focus(window, cx));
+                pages.update(cx, |pages, cx| {
+                    pages.set_shown(true, cx);
+                    pages.focus(window, cx);
+                });
             }
             cx.notify();
         });
@@ -449,11 +452,12 @@ impl LibraryWindow {
         pages.update(cx, |pages, cx| pages.focus(window, cx));
         let play = cx.subscribe_in(&pages, window, {
             let client = client.clone();
-            move |this, _, home::Play(item), window, cx| {
+            move |this, pages, home::Play(item), window, cx| {
                 this.player_error = None;
                 this.player.update(cx, |player, cx| player.play(client.clone(), item.clone(), cx));
                 if let Some(view) = this.player_view.clone().filter(|_| this.player.read(cx).in_view()) {
                     view.update(cx, |view, cx| view.open(window, cx));
+                    pages.update(cx, |pages, cx| pages.set_shown(false, cx));
                 }
                 cx.notify();
             }

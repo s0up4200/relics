@@ -294,10 +294,12 @@ impl Detail {
             return;
         };
         let (client, image_size) = (self.client.clone(), self.episode_size);
+        let ticket = self.fresh.ticket();
         self._episodes = cx.spawn(async move |this, cx| {
             let result = client.season_episodes(&id, season, image_size).await;
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.accepts(ticket) => {}
                     Ok(episodes) => {
                         let thumbs = episodes
                             .iter()
@@ -319,6 +321,9 @@ impl Detail {
                     }
                     Err(err) if !this.episodes.is_empty() => eprintln!("relics: cannot reload the episodes: {err}"),
                     Err(err) => this.error = Some(err.to_string()),
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })

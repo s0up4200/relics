@@ -391,10 +391,13 @@ impl Client {
         let body = serde_json::json!({ "value": value });
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
         let written = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await;
-        if written.is_ok() && self.auth.lock().unwrap().profile_id == profile_id {
-            self.server_settings.lock().unwrap().set(key, &value);
+        if self.auth.lock().unwrap().profile_id == profile_id {
+            if written.is_ok() {
+                self.server_settings.lock().unwrap().set(key, &value);
+            }
+            // A write of the old Profile must not invalidate the read of the new Profile.
+            self.settings_writes.fetch_add(1, Ordering::SeqCst);
         }
-        self.settings_writes.fetch_add(1, Ordering::SeqCst);
         written.map(|_| ())
     }
 

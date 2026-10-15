@@ -87,6 +87,48 @@ fn another_profile_starts_from_the_defaults() {
     assert_eq!(client.server_settings(), ServerSettings::default());
 }
 
+#[test]
+fn an_old_profiles_write_does_not_discard_the_new_profiles_settings() {
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use http_client::FakeHttpClient;
+
+    let (finish_write, write) = oneshot::channel::<()>();
+    let (finish_read, read) = oneshot::channel::<()>();
+    let waits = Arc::new(Mutex::new((Some(write), Some(read))));
+    let http = FakeHttpClient::create(move |req| {
+        let writing = req.method() == "PUT";
+        let wait = {
+            let mut waits = waits.lock().unwrap();
+            if writing { waits.0.take().unwrap() } else { waits.1.take().unwrap() }
+        };
+        async move {
+            wait.await.unwrap();
+            let body = if writing {
+                common::fixture("update_setting_value_ok.json")
+            } else {
+                json!({"revision": 17, "items": [value("playback.subtitle_mode", json!("always"))]}).to_string()
+            };
+            Ok(common::json(200, body).unwrap())
+        }
+    });
+    let client = common::client(http, "https://silo.test/");
+    client.set_profile(Some("p-owner".into()));
+    block_on(async {
+        let mut write = Box::pin(client.set_server_setting("playback.subtitle_mode", json!("off")));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        client.set_profile(Some("p-kid".into()));
+        let mut read = Box::pin(client.load_server_settings());
+        assert!(futures::poll!(read.as_mut()).is_pending());
+        finish_write.send(()).unwrap();
+        write.await.unwrap();
+        finish_read.send(()).unwrap();
+        read.await.unwrap();
+    });
+    assert_eq!(client.server_settings().subtitle_mode, SubtitleMode::Always);
+}
+
 /// The method, URL and body of each request.
 /// A fake server that answers each write with `status`.
 fn fake_write(status: u16) -> (Client, Log) {
