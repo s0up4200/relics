@@ -15,22 +15,16 @@ If a step fails, do not release.
 
 ## Make the release
 
-1. Raise `version` in `Cargo.toml`. Run `cargo check` to update `Cargo.lock`. Merge the change to `main`.
-2. On `main`, create a signed tag for the version, for example `git tag -s v0.2.0`, and push it.
-3. The Release workflow starts on the tag. It makes sure that the tag is signed and agrees with `Cargo.toml`, builds the package from `packaging/aur/PKGBUILD` in an Arch Linux container, and creates the GitHub release.
+Run `/release-tag`. It does these steps:
 
-To test the package build before you tag, start the Release workflow by hand on a branch (`gh workflow run release.yml --ref <branch>`). A manual run does not create a release.
+1. It opens a pull request that raises `version` in `Cargo.toml` and `Cargo.lock`, and waits until you merge it. If `Cargo.toml` already has the new version, it skips this step.
+2. On `main`, it creates a signed tag for the version, for example `v0.2.0`, and pushes it.
 
-## Update the AUR package
+The Release workflow starts on the tag. It makes sure that the tag is signed and agrees with `Cargo.toml`, and builds the package from `packaging/aur/PKGBUILD` in an Arch Linux container. Then it publishes the GitHub release at once, with the package, `sha256sums.txt`, and notes that git-cliff writes from the PR titles (see `cliff.toml`).
 
-The repository must be public, because the AUR package downloads the tarball of the tag from GitHub.
+The PR title check makes each PR title start with a type, such as `feat:` or `fix:`. git-cliff uses the type to put the PR under New Features, Bug Fixes or Other Changes. A title with `!` before the colon goes under Breaking Changes.
 
-1. Copy `packaging/aur/PKGBUILD` to your clone of the AUR repository `relics`.
-2. Set `pkgver` to the new version and `pkgrel` to `1`.
-3. Run `updpkgsums` to replace `SKIP` with the checksum of the tarball.
-4. Build the package in a clean chroot (`extra-x86_64-build` from `devtools`).
-5. Run `makepkg --printsrcinfo > .SRCINFO`.
-6. Commit and push to the AUR.
+To test the package build before you tag, start the Release workflow by hand on a branch (`gh workflow run release.yml --ref <branch>`). A manual run does not create a release. Its run summary shows the notes for the commits since the last tag.
 
 ## Omarchy updates
 

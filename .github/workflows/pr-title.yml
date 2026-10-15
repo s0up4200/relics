@@ -1,0 +1,22 @@
+name: PR title
+
+# Pull requests are squash-merged, so the PR title becomes the commit subject.
+# git-cliff (cliff.toml) sorts the release notes by the type at the start of the subject.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a type at the start of the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! grep -qE '^[a-z]+(\([^)]*\))?!?: ' <<<"$TITLE"; then
+            echo "::error::Start the PR title with a type, for example feat: ..., fix(player): ... or feat!: ... for a breaking change."
+            exit 1
+          fi

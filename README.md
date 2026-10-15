@@ -12,13 +12,22 @@ Not affiliated with the Silo project.
 
 ## Install
 
-Install the `relics` package from the AUR with your AUR helper:
+Relics is an Arch Linux package for x86_64. Each [release](https://github.com/s0up4200/relics/releases/latest) has the package and a checksum file.
 
-```sh
-yay -S relics
-```
+1. Download `relics-<version>-1-x86_64.pkg.tar.zst` and `sha256sums.txt` from the latest release into one folder.
+2. In that folder, make sure that the download is complete:
 
-The package builds the app from source. The build takes some minutes.
+   ```sh
+   sha256sum -c sha256sums.txt
+   ```
+
+3. Install the package:
+
+   ```sh
+   sudo pacman -U relics-*.pkg.tar.zst
+   ```
+
+To update, do the same steps with the new release. To get a notice for each new release, click **Watch** > **Custom** > **Releases** on the GitHub page of the repository.
 
 ## Make the window opaque in Omarchy
 
@@ -58,6 +67,8 @@ cargo build --release
 The app needs a Wayland desktop to show video.
 
 Run `relics --version` to show the version and source commit without opening a window.
+
+If you use Claude Code in this checkout, run `/install-local`. It builds the app and installs it for your user in `~/.local`, so that Relics shows in the Omarchy launcher. This copy takes priority over the package. To go back to the package, remove `~/.local/bin/relics` and `~/.local/share/applications/relics.desktop`.
 Settings and the startup log show the same build identity. `-dirty` means that tracked files had local changes at build time.
 If the source has no commit metadata, the build shows `unknown` and emits a build warning. Release packages require a known commit.
 

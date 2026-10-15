@@ -1,0 +1,32 @@
+# git-cliff writes the notes of each GitHub release from the commit subjects.
+# Pull requests are squash-merged, so each subject is the PR title.
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+# The HTML comment in a group name sets the order of the groups. striptags removes it.
+body = """
+{% if previous.version %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim }}\
+{% endfor %}
+{% endfor %}
+**Full Changelog**: https://github.com/s0up4200/relics/compare/{{ previous.version }}...{{ version }}
+{% else %}\
+First release of Relics. The [README](https://github.com/s0up4200/relics#install) tells you how to install it.
+{% endif %}\
+"""
+trim = true
+
+[git]
+conventional_commits = false
+commit_parsers = [
+  { message = '^chore\(release\)', skip = true },
+  { message = '^Merge ', skip = true },
+  { message = '^[a-z]+(\([^)]*\))?!:', group = "<!-- 0 -->Breaking Changes" },
+  { message = '^feat', group = "<!-- 1 -->New Features" },
+  { message = '^fix', group = "<!-- 2 -->Bug Fixes" },
+  { message = '.*', group = "<!-- 3 -->Other Changes" },
+]
+sort_commits = "newest"

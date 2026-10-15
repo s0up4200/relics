@@ -1,5 +1,4 @@
-# Template for the AUR package. The release workflow builds the package from this file.
-# To update the AUR, copy this file to the AUR clone, set pkgver, and run updpkgsums.
+# The release workflow builds the Arch package from this file.
 pkgname=relics
 pkgver=0.1.0
 pkgrel=1
@@ -11,6 +10,9 @@ depends=('mpv' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'vulkan-icd-
 makedepends=('cargo' 'clang' 'cmake')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
+# Full debug info makes the build larger than the free disk of a CI runner.
+# With lto, gcc writes C objects that rustc cannot link, because rustc links with its own lld.
+options=('!debug' '!lto')
 
 prepare() {
   cd "$pkgname-$pkgver"
@@ -20,6 +22,9 @@ prepare() {
 
 build() {
   cd "$pkgname-$pkgver"
+  # aws-lc-sys compiles jitterentropy at -O0, and its check fails when CFLAGS add -O2.
+  # cargo still gives the optimization level to the C code of the other crates.
+  export CFLAGS="${CFLAGS/-O2/}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release
@@ -27,6 +32,8 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
+  # The same CFLAGS as build(), so that cargo does not build aws-lc-sys again.
+  export CFLAGS="${CFLAGS/-O2/}"
   export RUSTUP_TOOLCHAIN=stable
   local identity
   identity=$(target/release/relics --version) || return 1
@@ -34,7 +41,8 @@ check() {
     echo 'The package has no source commit.' >&2
     return 1
   fi
-  cargo test --frozen
+  # --release uses the dependencies of the release build, so they are not built again.
+  cargo test --frozen --release
 }
 
 package() {
