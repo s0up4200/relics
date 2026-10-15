@@ -399,7 +399,7 @@ fn closing_the_account_menu_restores_the_filter_field_and_selection(cx: &mut Tes
         relics::text_input::init(cx);
     });
     for search in [true, false] {
-        for to_year in [false, true] {
+        for (to_year, outside_click) in [(false, false), (true, false), (false, true), (true, true)] {
             let (client, seen) = client();
             let (_, cx) =
                 cx.add_window_view(|window, cx| PageWindow(cx.new(|cx| Pages::new(client, "Test".into(), window, cx))));
@@ -423,7 +423,13 @@ fn closing_the_account_menu_restores_the_filter_field_and_selection(cx: &mut Tes
             let menu = cx.debug_bounds("account-menu").unwrap();
             cx.simulate_click(menu.center(), gpui::Modifiers::default());
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.simulate_keystrokes("escape");
+            if outside_click {
+                let position =
+                    cx.update(|window, _| gpui::point(window.viewport_size().width - gpui::px(20.), gpui::px(50.)));
+                cx.simulate_click(position, gpui::Modifiers::default());
+            } else {
+                cx.simulate_keystrokes("escape");
+            }
             cx.update(|window, cx| window.draw(cx).clear(cx));
             cx.simulate_input("9");
             assert_eq!(queries(&seen).len(), count, "editing does not apply the filter");
@@ -434,7 +440,7 @@ fn closing_the_account_menu_restores_the_filter_field_and_selection(cx: &mut Tes
                 serde_json::json!([
                     {"field":"year", "op": if to_year { "lte" } else { "gte" }, "value":2904}
                 ]),
-                "search={search}, to_year={to_year}"
+                "search={search}, to_year={to_year}, outside_click={outside_click}"
             );
         }
     }

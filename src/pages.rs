@@ -680,8 +680,8 @@ impl Pages {
     }
 
     fn page_click(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.menu = None;
-        if self.sidebar.take().is_some() {
+        let menu = self.menu.take().is_some();
+        if self.sidebar.take().is_some() || menu {
             self.page.set_active(true, cx);
         }
         cx.notify();
