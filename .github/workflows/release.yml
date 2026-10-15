@@ -1,7 +1,9 @@
 name: Release
 
 # A signed tag vX.Y.Z builds the package from packaging/aur/PKGBUILD and creates a GitHub release.
+# The release has the package, its checksum and notes from git-cliff (cliff.toml).
 # A manual run (workflow_dispatch) builds the package for the current version and creates no release.
+# It shows the notes for the commits since the last tag in the run summary.
 on:
   push:
     tags: ['v*']
@@ -14,12 +16,16 @@ jobs:
   release:
     runs-on: ubuntu-latest
     container: archlinux:latest
+    timeout-minutes: 90
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Install packages
-        run: pacman -Syu --noconfirm --needed base-devel git github-cli
+        run: pacman -Syu --noconfirm --needed base-devel git github-cli git-cliff
       - uses: actions/checkout@v5
+        with:
+          # git-cliff needs the earlier tags to find the commits of this release.
+          fetch-depth: 0
       - name: Check the version and the tag signature
         id: version
         run: |
@@ -54,6 +60,14 @@ jobs:
           chown -R builder packaging/aur
           cd packaging/aur
           sudo -u builder makepkg --syncdeps --noconfirm
+          sha256sum relics-*.pkg.tar.zst > sha256sums.txt
+      - name: Show the release notes
+        if: github.ref_type != 'tag'
+        run: git cliff --unreleased --strip all >> "$GITHUB_STEP_SUMMARY"
       - name: Create the GitHub release
         if: github.ref_type == 'tag'
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        run: |
+          git cliff --current --strip all -o notes.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            packaging/aur/relics-*.pkg.tar.zst packaging/aur/sha256sums.txt

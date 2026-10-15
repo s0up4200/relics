@@ -4,7 +4,7 @@ description: Build relics from this checkout and install it for the current user
 disable-model-invocation: true
 ---
 
-This skill installs the app from source for one user, until the AUR package exists. It needs no `sudo`. An install replaces the copies of an earlier install.
+This skill installs the app from source for one user, to try a build that is not released yet. This copy takes priority over the release package, in the terminal and in the launcher. It needs no `sudo`. An install replaces the copies of an earlier install.
 
 1. Build the release binary. Run the build from the root of this checkout:
 

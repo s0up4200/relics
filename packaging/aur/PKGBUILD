@@ -1,5 +1,4 @@
-# Template for the AUR package. The release workflow builds the package from this file.
-# To update the AUR, copy this file to the AUR clone, set pkgver, and run updpkgsums.
+# The release workflow builds the Arch package from this file.
 pkgname=relics
 pkgver=0.1.0
 pkgrel=1
@@ -11,6 +10,8 @@ depends=('mpv' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'vulkan-icd-
 makedepends=('cargo' 'clang' 'cmake')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
+# Full debug info makes the build larger than the free disk of a CI runner.
+options=('!debug')
 
 prepare() {
   cd "$pkgname-$pkgver"
@@ -34,7 +35,8 @@ check() {
     echo 'The package has no source commit.' >&2
     return 1
   fi
-  cargo test --frozen
+  # --release uses the dependencies of the release build, so they are not built again.
+  cargo test --frozen --release
 }
 
 package() {
