@@ -185,8 +185,9 @@ async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStre
         Either::Left((socket, _)) => socket?,
         Either::Right(_) => anyhow::bail!("no answer in {} s", HANDSHAKE.as_secs()),
     };
-    let token_left =
-        token_expiry(&client.tokens().access_token).and_then(|exp| exp.duration_since(SystemTime::now()).ok());
+    // A token that expired during the ticket call or the handshake leaves no time, not the full connection time.
+    let token_left = token_expiry(&client.tokens().access_token)
+        .map(|exp| exp.duration_since(SystemTime::now()).unwrap_or_default());
     let lifetime = Duration::from_secs(ticket.max_connection_seconds);
     Ok((socket, token_left.map_or(lifetime, |left| left.min(lifetime))))
 }
