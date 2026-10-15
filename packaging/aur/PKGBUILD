@@ -21,6 +21,9 @@ prepare() {
 
 build() {
   cd "$pkgname-$pkgver"
+  # aws-lc-sys compiles jitterentropy at -O0, and its check fails when CFLAGS add -O2.
+  # cargo still gives the optimization level to the C code of the other crates.
+  export CFLAGS="${CFLAGS/-O2/}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release
@@ -28,6 +31,8 @@ build() {
 
 check() {
   cd "$pkgname-$pkgver"
+  # The same CFLAGS as build(), so that cargo does not build aws-lc-sys again.
+  export CFLAGS="${CFLAGS/-O2/}"
   export RUSTUP_TOOLCHAIN=stable
   local identity
   identity=$(target/release/relics --version) || return 1
