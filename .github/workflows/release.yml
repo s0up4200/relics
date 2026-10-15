@@ -24,6 +24,8 @@ jobs:
         run: pacman -Syu --noconfirm --needed base-devel git github-cli git-cliff
       - uses: actions/checkout@v5
         with:
+          # No later step uses git credentials. The token must not stay where makepkg build scripts can read it.
+          persist-credentials: false
           # git-cliff needs the earlier tags to find the commits of this release.
           fetch-depth: 0
       - name: Check the version and the tag signature

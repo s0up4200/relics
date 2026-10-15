@@ -11,7 +11,7 @@ Keep the Release workflow that the repo already has. It starts on a `v*` tag, ch
 1. Attach the built package (`.pkg.tar.zst`) and a SHA-256 checksum file to the release. Today the workflow builds the package and then discards it.
 2. Write the release notes with git-cliff. Group the commits by their conventional-commit type, with the same headings that GoReleaser uses in mkbrr and qui.
 3. Turn off the `debug` option of makepkg in the container, so that the build fits on the disk of the runner.
-4. Raise `version` in `Cargo.toml` in a pull request before you run `/release-tag`. The workflow refuses a tag that does not agree with `Cargo.toml`, and the skill does not change the file.
+4. The workflow refuses a tag that does not agree with `Cargo.toml`. When this note was written, the skill did not change the file. Since s0up4200/skills@b40c950, `/release-tag` opens the version-bump pull request itself before it tags.
 
 ## What the repo has now
 
@@ -75,7 +75,7 @@ Relics fits this flow with one gap:
 
 - The tag is signed and annotated (`-s`, `-m`). The signature check of the workflow agrees with this.
 - Step 7 does not apply. Relics has no docs site and no changelog file, so it needs no release-notes pull request. The changelog goes in the body of the GitHub release. mkbrr needs the pull request because its changelog is in `documentation/changelog.mdx` ([mkbrr `changelog.yml`](file:///home/soup/github/autobrr/mkbrr/.github/workflows/changelog.yml)).
-- The skill does not change `Cargo.toml`. If the skill tags `v0.2.0` while `Cargo.toml` says `0.1.0`, the workflow fails at "Check the version and the tag signature". [`docs/release.md`](../release.md) already says to raise `version` and merge it to `main` first. `main` needs a pull request (the ruleset "main: pull requests"), so the bump is a short pull request such as `chore: release v0.2.0`. Then run `/release-tag` and pick the same version.
+- When this note was written, the skill did not change `Cargo.toml`. Since s0up4200/skills@b40c950, it opens the bump pull request itself (step 4b). If the skill tags `v0.2.0` while `Cargo.toml` says `0.1.0`, the workflow fails at "Check the version and the tag signature". [`docs/release.md`](../release.md) already says to raise `version` and merge it to `main` first. `main` needs a pull request (the ruleset "main: pull requests"), so the bump is a short pull request such as `chore: release v0.2.0`. Then run `/release-tag` and pick the same version.
 - Only admins can create `v*` tags (the ruleset "Release tags: admins only", from `gh api repos/s0up4200/relics/rulesets`). So a bot with `GITHUB_TOKEN` cannot make the tag. This rules out tools that make the tag themselves (see release-plz below).
 
 ### The changelog style of the sibling projects
