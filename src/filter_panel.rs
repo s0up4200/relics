@@ -8,10 +8,12 @@
 use std::collections::HashMap;
 
 use gpui::{
-    Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement, ScrollHandle,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled, div, px,
+    AppContext as _, Context, Div, ElementId, Entity, FocusHandle, Focusable as _, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement, ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px,
 };
-use gpui_omarchy::{ActiveTheme, Theme};
+use gpui_kit::base::input::{Enter, InputEvent, InputState, MoveDown, MoveUp, Paste};
+use gpui_omarchy::{ActiveTheme, Theme, input};
 
 use crate::api::wire;
 use crate::browse::{ADDED_SPANS, Browse, Choice, Facet, RELEASED_SPANS, SortField, Watch};
@@ -170,6 +172,12 @@ fn matches<'a>(values: &'a [String], text: &str) -> impl Iterator<Item = &'a Str
     values.iter().filter(move |value| value.to_lowercase().contains(&needle)).take(SHOWN_VALUES)
 }
 
+pub struct Events<V> {
+    pub click: fn(&mut V, usize, &mut Context<V>),
+    pub edit: fn(&mut V, Text, String, &mut Context<V>),
+    pub key: fn(&mut V, Key, &mut Window, &mut Context<V>),
+}
+
 pub struct Panel {
     pub kind: MenuKind,
     pub facets: Facets,
@@ -178,11 +186,30 @@ pub struct Panel {
     row: usize,
     texts: HashMap<Text, String>,
     scroll: ScrollHandle,
+    editors: HashMap<Text, (Entity<InputState>, Subscription)>,
+    focus_pending: bool,
 }
 
 impl Panel {
     pub fn new(kind: MenuKind, facets: Facets, this_year: i64) -> Self {
-        Panel { kind, facets, this_year, row: 0, texts: HashMap::new(), scroll: ScrollHandle::new() }
+        Panel {
+            kind,
+            facets,
+            this_year,
+            row: 0,
+            texts: HashMap::new(),
+            scroll: ScrollHandle::new(),
+            editors: HashMap::new(),
+            focus_pending: true,
+        }
+    }
+
+    pub fn refocus(&mut self) {
+        self.focus_pending = true;
+    }
+
+    pub fn editing(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.editors.values().any(|(editor, _)| editor.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// The typed text of a field.
@@ -244,8 +271,9 @@ impl Panel {
         entries[self.row.min(entries.len() - 1)].clone()
     }
 
-    /// Handles a key. `typed` is the text that the key types, for a text field.
-    pub fn key(&mut self, key: Key, typed: Option<&str>, browse: &mut Browse) -> Outcome {
+    /// Handles navigation and submission after the editor handles text editing.
+    pub fn key(&mut self, key: Key, browse: &mut Browse) -> Outcome {
+        self.focus_pending = true;
         let sections = self.sections();
         let starts = Self::starts(&sections);
         let last = sections.iter().map(|s| s.entries.len()).sum::<usize>() - 1;
@@ -253,7 +281,7 @@ impl Panel {
         let section = starts.iter().rposition(|start| *start <= self.row).unwrap_or(0);
         let focused = self.focused();
         if let Entry::Field(text) = focused
-            && let Some(outcome) = self.field_key(text, key, typed, browse)
+            && let Some(outcome) = self.field_key(text, key, browse)
         {
             return outcome;
         }
@@ -279,6 +307,7 @@ impl Panel {
 
     /// A click on an entry: it gets the focus, and a pill is picked as with Enter.
     pub fn click(&mut self, row: usize, browse: &mut Browse) -> Outcome {
+        self.focus_pending = true;
         self.row = row;
         match self.focused() {
             Entry::Pick(choice) => self.pick(&choice, browse),
@@ -291,21 +320,33 @@ impl Panel {
         if self.kind == MenuKind::Filter { Outcome::Changed } else { Outcome::Closed }
     }
 
-    /// A key in a text field, or `None` when the key moves the focus.
-    fn field_key(&mut self, text: Text, key: Key, typed: Option<&str>, browse: &mut Browse) -> Option<Outcome> {
-        let buffer = self.texts.entry(text).or_default();
+    pub fn sync_focus(&mut self, window: &Window, cx: &gpui::App) {
+        let focused = self
+            .editors
+            .iter()
+            .find_map(|(text, (editor, _))| editor.read(cx).focus_handle(cx).is_focused(window).then_some(*text));
+        let Some(text) = focused else { return };
+        if let Some(row) =
+            self.sections().into_iter().flat_map(|s| s.entries).position(|entry| entry == Entry::Field(text))
+        {
+            self.row = row;
+        }
+    }
+
+    /// The editor changed a draft. Applied filters stay unchanged until Enter.
+    pub fn edit(&mut self, text: Text, value: String) {
+        self.texts.insert(text, value);
+    }
+
+    /// Page actions run after the editor handles its own commands.
+    fn field_key(&mut self, text: Text, key: Key, browse: &mut Browse) -> Option<Outcome> {
         match key {
-            Key::Other("escape") if !buffer.is_empty() => buffer.clear(),
-            Key::Other("escape") => return None,
-            Key::Other("backspace") => _ = buffer.pop(),
-            Key::Other("enter") => return Some(self.submit(text, browse)),
-            _ => {
-                let digits = matches!(text, Text::YearFrom | Text::YearTo);
-                let typed = typed
-                    .filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
-                    .filter(|t| !digits || t.chars().all(|c| c.is_ascii_digit()))?;
-                buffer.push_str(typed);
+            Key::Other("escape") if !self.text(text).is_empty() => {
+                self.texts.remove(&text);
             }
+            Key::Other("enter") => return Some(self.submit(text, browse)),
+            Key::Other("backspace") | Key::Left | Key::Right => return Some(Outcome::Moved),
+            _ => return None,
         }
         Some(Outcome::Moved)
     }
@@ -341,13 +382,50 @@ impl Panel {
 
     /// The panel. `active` shows the focus ring. A click on entry `row` calls `on_click(view, row, cx)`.
     pub fn render<V: 'static>(
-        &self,
+        &mut self,
         browse: &Browse,
         active: bool,
-        cx: &Context<V>,
-        on_click: fn(&mut V, usize, &mut Context<V>),
+        fallback: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<V>,
+        events: Events<V>,
     ) -> impl IntoElement {
-        let t = cx.omarchy();
+        let Events { click: on_click, edit: on_edit, key: on_key } = events;
+        let sections = self.sections();
+        for text in sections.iter().flat_map(|s| &s.entries).filter_map(|entry| match entry {
+            Entry::Field(text) => Some(*text),
+            _ => None,
+        }) {
+            self.editors.entry(text).or_insert_with(|| {
+                let editor = cx.new(|cx| {
+                    let editor = InputState::new(window, cx);
+                    if matches!(text, Text::YearFrom | Text::YearTo) {
+                        editor.validate(|value, _| value.bytes().all(|c| c.is_ascii_digit()))
+                    } else {
+                        editor
+                    }
+                });
+                let subscription = cx.subscribe(&editor, move |view, editor, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        on_edit(view, text, editor.read(cx).value().to_string(), cx);
+                    }
+                });
+                (editor, subscription)
+            });
+            let editor = &self.editors[&text].0;
+            if editor.read(cx).value().as_ref() != self.text(text) {
+                editor.update(cx, |editor, cx| editor.set_value(self.text(text).to_string(), window, cx));
+            }
+        }
+        if active && self.focus_pending {
+            self.focus_pending = false;
+            if let Entry::Field(text) = self.focused() {
+                self.editors[&text].0.update(cx, |editor, cx| editor.focus(window, cx));
+            } else {
+                window.focus(fallback, cx);
+            }
+        }
+        let t = cx.omarchy().clone();
         let title = match self.kind {
             MenuKind::Sort => "Sort",
             MenuKind::Filter => "Filters",
@@ -358,14 +436,44 @@ impl Panel {
             _ => "Enter picks · Esc closes",
         };
         let mut row = 0;
-        let sections = self.sections().into_iter().map(|section| {
+        let sections = sections.into_iter().map(|section| {
             let pills = section.entries.into_iter().map(|entry| {
                 let index = row;
                 row += 1;
                 let focused = active && index == self.row;
                 let (label, on, field): (SharedString, bool, bool) = match &entry {
                     Entry::Pick(choice) => (choice.label().into(), browse.is_chosen(choice), false),
-                    Entry::Field(text) => (self.field_label(*text, browse, focused).into(), false, true),
+                    Entry::Field(text) => (Self::field_label(*text).into(), false, true),
+                };
+                let content = if let Entry::Field(text) = &entry {
+                    let editor = &self.editors[text].0;
+                    let year = matches!(text, Text::YearFrom | Text::YearTo);
+                    div()
+                        .capture_action(move |_: &Paste, _, cx| {
+                            // The editor removes newlines before its validator sees pasted text.
+                            if year
+                                && cx
+                                    .read_from_clipboard()
+                                    .and_then(|item| item.text())
+                                    .is_some_and(|text| !text.bytes().all(|c| c.is_ascii_digit()))
+                            {
+                                cx.stop_propagation();
+                            }
+                        })
+                        .w(px(220.))
+                        .on_action(
+                            cx.listener(move |view, _: &Enter, window, cx| {
+                                on_key(view, Key::Other("enter"), window, cx)
+                            }),
+                        )
+                        .on_action(cx.listener(move |view, _: &MoveUp, window, cx| on_key(view, Key::Up, window, cx)))
+                        .on_action(
+                            cx.listener(move |view, _: &MoveDown, window, cx| on_key(view, Key::Down, window, cx)),
+                        )
+                        .child(input(("filter-input", index), editor, window, cx).prefix(label.clone()))
+                        .into_any_element()
+                } else {
+                    div().child(label).into_any_element()
                 };
                 div()
                     .id(("filter-panel", index))
@@ -385,14 +493,14 @@ impl Panel {
                     .border_2()
                     .border_color(if focused { t.accent } else { gpui::transparent_black() })
                     .on_click(cx.listener(move |view, _, _, cx| on_click(view, index, cx)))
-                    .child(label)
+                    .child(content)
             });
             div()
                 .flex()
                 .flex_col()
                 .gap(px(6.))
                 .child(div().text_size(px(12.)).text_color(t.secondary).child(section.title))
-                .child(div().flex().flex_wrap().gap(px(8.)).children(pills.collect::<Vec<_>>()))
+                .child(div().flex().flex_wrap().items_center().gap(px(8.)).children(pills.collect::<Vec<_>>()))
         });
         div()
             .p(px(16.))
@@ -422,25 +530,12 @@ impl Panel {
             )
     }
 
-    /// The label of a text field: the typed text with a caret, else the value of its filter, else a hint.
-    fn field_label(&self, text: Text, browse: &Browse, focused: bool) -> String {
-        let typed = self.text(text);
-        if focused || !typed.is_empty() {
-            let name = match text {
-                Text::YearFrom => "From",
-                Text::YearTo => "To",
-                Text::Facet(facet) => facet.label(),
-            };
-            return format!("{name}: {typed}▏");
-        }
-        let f = &browse.filters;
+    /// The non-editable prefix of a field.
+    fn field_label(text: Text) -> String {
         match text {
-            Text::YearFrom => f.year_from.map_or("From year…".into(), |year| format!("From {year}")),
-            Text::YearTo => f.year_to.map_or("To year…".into(), |year| format!("To {year}")),
-            Text::Facet(facet) if self.facets.values(facet).is_empty() => {
-                f.facet(facet).map_or("Type a name…".into(), |name| name.to_string())
-            }
-            Text::Facet(_) => "Type to narrow…".into(),
+            Text::YearFrom => "From:".into(),
+            Text::YearTo => "To:".into(),
+            Text::Facet(facet) => format!("{}:", facet.label()),
         }
     }
 }

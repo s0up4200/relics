@@ -1,19 +1,20 @@
-//! The Search page and the filmography query of the Person page. Search sends the text 200 ms after the last key.
+//! The Search page and the filmography query of the Person page. Search sends the text 200 ms after the last text change.
 //! It shows the matching people in a row above a grid of the matching titles. Enter on a person opens the Person
 //! page. A bar below the field sorts and filters the titles with the sort and filter panel of a Library. When the
 //! Server takes requests, a Request to add row between the people and the titles shows the titles that are not on
 //! the Server, and Enter on one sends a request.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Datelike as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement, Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, Task, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable as _, FontWeight,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement, Render, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
-use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
+use gpui_kit::base::input::{Enter, InputEvent, InputState, MoveDown};
+use gpui_omarchy::{ActiveTheme, ButtonVariant, button, input};
 
 use crate::api::{Client, wire};
 use crate::artwork::{self, ArtworkCache};
@@ -25,7 +26,7 @@ use crate::home::{Open, Play};
 use crate::keys::Key;
 use crate::requests;
 
-/// The pause after the last key before Search sends the text.
+/// The pause after the last text change before Search sends the text.
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 const PHOTO: f32 = 96.;
 
@@ -71,72 +72,6 @@ pub fn person_query(person_id: &str, type_: Option<&str>) -> wire::CatalogQuery 
     }
 }
 
-/// What a key did in the search field.
-#[derive(Debug, PartialEq, Eq)]
-pub enum FieldKey {
-    /// The text changed. The search is due after `DEBOUNCE`.
-    Edited,
-    /// The first Esc removed the text.
-    Cleared,
-    /// Down or Enter: the focus goes into the results.
-    Results,
-    /// Esc in an empty field: the page goes back.
-    Back,
-    /// The field used the key, but nothing changed.
-    Stay,
-    /// The field does not use the key.
-    Unused,
-}
-
-/// The text of the search field and the time when it is due to be sent. The caller gives the time, so a test
-/// checks the pause without a clock.
-#[derive(Debug, Default)]
-pub struct Field {
-    text: String,
-    due: Option<Instant>,
-}
-
-impl Field {
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// Handles a key at `now`. `typed` is the text that the key types, if any, so j types a letter and the Down
-    /// arrow moves into the results.
-    pub fn key(&mut self, key: Key, typed: Option<&str>, now: Instant) -> FieldKey {
-        match key {
-            Key::Other("escape") if self.text.is_empty() => FieldKey::Back,
-            Key::Other("escape") => {
-                self.text.clear();
-                self.due = None;
-                FieldKey::Cleared
-            }
-            Key::Other("enter") => FieldKey::Results,
-            Key::Other("backspace") if self.text.pop().is_none() => FieldKey::Stay,
-            Key::Other("backspace") => {
-                self.due = Some(now + DEBOUNCE);
-                FieldKey::Edited
-            }
-            _ => match typed.filter(|text| !text.is_empty() && !text.chars().any(char::is_control)) {
-                Some(text) => {
-                    self.text.push_str(text);
-                    self.due = Some(now + DEBOUNCE);
-                    FieldKey::Edited
-                }
-                None if key == Key::Down => FieldKey::Results,
-                None => FieldKey::Unused,
-            },
-        }
-    }
-
-    /// The text to send, once at `now` the pause after the last edit is over. `None` before that.
-    pub fn take_due(&mut self, now: Instant) -> Option<String> {
-        self.due.filter(|due| now >= *due)?;
-        self.due = None;
-        Some(self.text.trim().to_string())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Field,
@@ -158,7 +93,9 @@ enum Control {
 
 pub struct Search {
     client: Arc<Client>,
-    field: Field,
+    field: Entity<InputState>,
+    focus_handle: FocusHandle,
+    focus_pending: bool,
     focus: Focus,
     /// The page has the keyboard focus, so the focused control shows the focus ring.
     pub active: bool,
@@ -197,7 +134,7 @@ impl EventEmitter<Open> for Search {}
 impl EventEmitter<OpenPerson> for Search {}
 
 impl Search {
-    pub fn new(client: Arc<Client>, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: Arc<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.on_release(|this, cx| this.drop_thumbs(cx)).detach();
         let facets = cx.spawn({
             let client = client.clone();
@@ -227,9 +164,31 @@ impl Search {
                 Err(err) => eprintln!("relics: cannot read the request status: {err}"),
             }
         });
+        let field = cx.new(|cx| InputState::new(window, cx).placeholder("Titles and people"));
+        let changes = cx.subscribe_in(&field, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Change) {
+                if this.focus != Focus::Field {
+                    this.set_focus(Focus::Field, cx);
+                }
+                if this.field.read(cx).value().is_empty() && this.shown.is_empty() {
+                    this._debounce = Task::ready(());
+                    return;
+                }
+                this._debounce = cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(DEBOUNCE).await;
+                    this.update_in(cx, |this, window, cx| {
+                        let text = this.field.read(cx).value().trim().to_string();
+                        this.search(text, window, cx);
+                    })
+                    .ok();
+                });
+            }
+        });
         Self {
             client,
-            field: Field::default(),
+            field,
+            focus_handle: cx.focus_handle(),
+            focus_pending: true,
             focus: Focus::Field,
             active: false,
             shown: String::new(),
@@ -251,7 +210,7 @@ impl Search {
             _requests: requests,
             _to_add: Task::ready(()),
             _send: Task::ready(()),
-            _events: Vec::new(),
+            _events: vec![changes],
         }
     }
 
@@ -263,6 +222,9 @@ impl Search {
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
+        if active && let Some(menu) = &mut self.menu {
+            menu.refocus();
+        }
         self.set_focus(self.focus, cx);
     }
 
@@ -274,6 +236,7 @@ impl Search {
     /// Moves the focus. A focus outside the bar closes the panel. A bar control that went away with a removed
     /// chip gives the focus to the last control.
     fn set_focus(&mut self, focus: Focus, cx: &mut Context<Self>) {
+        self.focus_pending = true;
         self.focus = match focus {
             Focus::Bar(i) => Focus::Bar(i.min(self.controls().len() - 1)),
             focus => {
@@ -335,6 +298,22 @@ impl Search {
         }
         self.set_focus(self.focus, cx);
         Some(outcome)
+    }
+
+    fn edit_menu(&mut self, text: filter_panel::Text, value: String, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.menu {
+            menu.edit(text, value);
+        }
+        cx.notify();
+    }
+
+    fn menu_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
+        self.key(key, window, cx);
+    }
+
+    pub fn editing(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.field.read(cx).focus_handle(cx).is_focused(window)
+            || self.menu.as_ref().is_some_and(|menu| menu.editing(window, cx))
     }
 
     fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
@@ -461,37 +440,36 @@ impl Search {
         }
     }
 
-    /// Handles a key. `typed` is the text that the key types. Returns false when the page does not use the key,
+    /// Records the editor before a page action or the account menu moves focus.
+    pub fn sync_focus(&mut self, window: &Window, cx: &gpui::App) {
+        if self.field.read(cx).focus_handle(cx).is_focused(window) {
+            self.focus = Focus::Field;
+            self.menu = None;
+        }
+        if let Some(menu) = &mut self.menu {
+            menu.sync_focus(window, cx);
+        }
+    }
+
+    /// Handles a page action. Returns false when the page does not use the key,
     /// for example Esc in an empty field.
-    pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, typed, browse), cx) {
+    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.sync_focus(window, cx);
+        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, browse), cx) {
             return outcome != Outcome::Unused;
         }
         let focus = match self.focus {
-            Focus::Field => match self.field.key(key, typed, Instant::now()) {
-                FieldKey::Edited => {
-                    // A new key drops the timer of the old one.
-                    self._debounce = cx.spawn_in(window, async move |this, cx| {
-                        cx.background_executor().timer(DEBOUNCE).await;
-                        this.update_in(cx, |this, window, cx| {
-                            if let Some(text) = this.field.take_due(Instant::now()) {
-                                this.search(text, window, cx);
-                            }
-                        })
-                        .ok();
-                    });
-                    Focus::Field
-                }
-                FieldKey::Cleared => {
+            Focus::Field => match key {
+                Key::Other("escape") if !self.field.read(cx).value().is_empty() => {
+                    self.field.update(cx, |field, cx| field.set_value("", window, cx));
                     self._debounce = Task::ready(());
                     self.search(String::new(), window, cx);
                     Focus::Field
                 }
-                FieldKey::Results if key == Key::Down => Focus::Bar(0),
-                FieldKey::Results if !self.people.is_empty() => Focus::Person(0),
-                FieldKey::Results => self.below_people(cx).unwrap_or(Focus::Field),
-                FieldKey::Stay => Focus::Field,
-                FieldKey::Back | FieldKey::Unused => return false,
+                Key::Down => Focus::Bar(0),
+                Key::Other("enter") if !self.people.is_empty() => Focus::Person(0),
+                Key::Other("enter") => self.below_people(cx).unwrap_or(Focus::Field),
+                _ => return false,
             },
             _ if key == Key::Other("/") => Focus::Field,
             Focus::Bar(i) => match key {
@@ -696,29 +674,28 @@ impl Search {
 }
 
 impl Render for Search {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.omarchy().clone();
-        let in_field = self.active && self.focus == Focus::Field;
-        let text = self.field.text();
+        if self.active && self.focus_pending {
+            self.focus_pending = false;
+            if self.focus == Focus::Field {
+                self.field.update(cx, |field, cx| field.focus(window, cx));
+            } else {
+                window.focus(&self.focus_handle, cx);
+            }
+        }
         let field = div()
-            .id("search-field")
-            .clickable()
+            .id("search-field-container")
+            .debug_selector(|| "search-field".into())
             .on_click(cx.listener(|this, _, _, cx| this.set_focus(Focus::Field, cx)))
-            .w_full()
             .max_w(px(640.))
-            .px(px(16.))
-            .py(px(10.))
-            .rounded(px(12.))
-            .bg(t.surface)
-            .border_2()
-            .border_color(if in_field { t.accent } else { gpui::transparent_black() })
-            .text_size(px(16.))
-            .text_color(if text.is_empty() { t.secondary } else { t.bright })
-            .child(match (text.is_empty(), in_field) {
-                (true, _) => "Titles and people".to_string(),
-                (false, true) => format!("{text}▏"),
-                (false, false) => text.to_string(),
-            });
+            .on_action(cx.listener(|this, _: &Enter, window, cx| {
+                this.key(Key::Other("enter"), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveDown, window, cx| {
+                this.key(Key::Down, window, cx);
+            }))
+            .child(input("search-field", &self.field, window, cx));
         let mut header =
             div().px(px(40.)).pt(px(28.)).pb(px(18.)).flex().flex_col().gap(px(18.)).child(
                 div().text_size(px(34.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("Search"),
@@ -729,8 +706,15 @@ impl Render for Search {
         if !chips.is_empty() {
             header = header.child(div().flex().flex_wrap().gap(px(8.)).children(chips));
         }
-        if let Some(menu) = &self.menu {
-            header = header.child(menu.render(&self.browse, self.active, cx, Self::click_menu));
+        if let Some(menu) = &mut self.menu {
+            header = header.child(menu.render(
+                &self.browse,
+                self.active,
+                &self.focus_handle,
+                window,
+                cx,
+                filter_panel::Events { click: Self::click_menu, edit: Self::edit_menu, key: Self::menu_key },
+            ));
         }
         if let Some(error) = &self.people_error {
             header =
@@ -770,55 +754,12 @@ impl Render for Search {
                 .into_any_element(),
             None => div().into_any_element(),
         };
-        div().size_full().flex().flex_col().child(header).child(div().flex_1().min_h_0().child(content))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn letters_go_into_the_field_and_the_search_is_due_200_ms_after_the_last_key() {
-        let start = Instant::now();
-        let ms = |n| start + Duration::from_millis(n);
-        let mut field = Field::default();
-        assert_eq!(field.key(Key::parse("h"), Some("H"), ms(0)), FieldKey::Edited);
-        assert_eq!(field.key(Key::parse("space"), Some(" "), ms(50)), FieldKey::Edited);
-        assert_eq!(field.key(Key::parse("j"), Some("j"), ms(100)), FieldKey::Edited);
-        assert_eq!(field.key(Key::parse("1"), Some("1"), ms(150)), FieldKey::Edited);
-        assert_eq!(field.text(), "H j1");
-        assert_eq!(field.take_due(ms(299)), None, "the pause starts again at each key");
-        assert_eq!(field.take_due(ms(350)), Some("H j1".into()));
-        assert_eq!(field.take_due(ms(900)), None, "a search is sent once");
-        assert_eq!(field.key(Key::parse("backspace"), None, ms(1000)), FieldKey::Edited);
-        assert_eq!(field.take_due(ms(1200)), Some("H j".into()));
-    }
-
-    #[test]
-    fn the_first_esc_clears_the_field_and_the_second_goes_back() {
-        let now = Instant::now();
-        let mut field = Field::default();
-        field.key(Key::parse("a"), Some("a"), now);
-        assert_eq!(field.key(Key::parse("escape"), None, now), FieldKey::Cleared);
-        assert_eq!(field.text(), "");
-        assert_eq!(field.take_due(now + DEBOUNCE), None, "a cleared field sends nothing");
-        assert_eq!(field.key(Key::parse("escape"), None, now), FieldKey::Back);
-    }
-
-    #[test]
-    fn down_or_enter_moves_into_the_results_and_other_keys_stay_out_of_the_text() {
-        let now = Instant::now();
-        let mut field = Field::default();
-        assert_eq!(field.key(Key::parse("down"), None, now), FieldKey::Results);
-        assert_eq!(field.key(Key::parse("enter"), Some("\n"), now), FieldKey::Results);
-        assert_eq!(
-            field.key(Key::parse("backspace"), None, now),
-            FieldKey::Stay,
-            "Backspace in an empty field does not go back"
-        );
-        assert_eq!(field.key(Key::parse("left"), None, now), FieldKey::Unused);
-        assert_eq!(field.key(Key::parse("tab"), Some("\t"), now), FieldKey::Unused);
-        assert_eq!(field.text(), "");
+        div()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
