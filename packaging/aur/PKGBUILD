@@ -11,7 +11,8 @@ makedepends=('cargo' 'clang' 'cmake')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 # Full debug info makes the build larger than the free disk of a CI runner.
-options=('!debug')
+# With lto, gcc writes C objects that rustc cannot link, because rustc links with its own lld.
+options=('!debug' '!lto')
 
 prepare() {
   cd "$pkgname-$pkgver"
