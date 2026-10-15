@@ -135,6 +135,13 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// The page shows again. A newer Settings page can have changed the Local settings, so the page reads them
+    /// again, and a toggle here does not write back an old value.
+    pub fn shown(&mut self, cx: &mut Context<Self>) {
+        self.local = LocalSettings::load(&LocalSettings::dir());
+        cx.notify();
+    }
+
     /// The row after the last Account: Add server.
     fn add_row(&self) -> usize {
         FIRST_PAIR + self.pairs.len()

@@ -228,6 +228,7 @@ impl Page {
             Page::Home(home) => home.update(cx, |home, cx| home.shown(cx)),
             Page::Library(page) => page.update(cx, |page, cx| page.shown(cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.shown(cx)),
+            Page::Settings(page) => page.update(cx, |page, cx| page.shown(cx)),
             _ => {
                 if let Some(grid) = self.grid(cx) {
                     grid.update(cx, |grid, cx| grid.shown(cx));

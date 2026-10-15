@@ -204,3 +204,38 @@ fn a_broken_settings_file_gives_the_defaults() {
     std::fs::write(dir.join("settings.toml"), "hardware_decoding = [").unwrap();
     assert_eq!(LocalSettings::load(&dir), LocalSettings::default());
 }
+
+struct PageWindow(gpui::Entity<relics::pages::Pages>);
+impl gpui::Render for PageWindow {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui_omarchy::focus_scope("test-pages").size_full().child(self.0.clone())
+    }
+}
+
+#[gpui::test]
+fn a_settings_page_in_the_back_history_keeps_the_changes_of_a_newer_one(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    let dir = config_dir("stacked");
+    // Only this test in this file reads the Local settings through XDG_CONFIG_HOME.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+    });
+    let (client, _) = common::fake(|_| common::not_found());
+    let client = std::sync::Arc::new(client);
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
+    });
+    // A Settings page, and a second one on top of it. The second one turns the release check off.
+    cx.simulate_keystrokes(", , j j j j j j j j j enter");
+    cx.run_until_parked();
+    assert!(!LocalSettings::load(&dir.join("relics")).check_releases);
+    // Back to the first page, which turns hardware decoding off.
+    cx.simulate_keystrokes("escape j j j j j j j j enter");
+    cx.run_until_parked();
+    let saved = LocalSettings::load(&dir.join("relics"));
+    assert!(!saved.hardware_decoding);
+    assert!(!saved.check_releases, "the older page wrote back its stale release setting");
+}
