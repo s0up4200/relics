@@ -3,6 +3,10 @@
 **Build identity**:
 The version and source commit recorded when Relics was built, with a marker for local changes.
 
+**Release notice**:
+The notice in the Library window that a newer Relics release exists on GitHub. It links to the release page. The app does not update itself.
+_Avoid_: update prompt, update notification
+
 **Search query**:
 The text used to find Items, People, and titles under Request to add on the Active server.
 

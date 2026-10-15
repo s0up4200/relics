@@ -21,6 +21,7 @@ pub mod playback;
 pub mod player;
 pub mod player_view;
 pub mod profiles;
+pub mod release;
 pub mod requests;
 pub mod search;
 pub mod secrets;

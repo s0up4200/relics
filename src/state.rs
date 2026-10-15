@@ -14,6 +14,9 @@ pub struct State {
     pub servers: Vec<SavedServer>,
     /// The `(server id, account id)` that the app opens at launch.
     pub active: Option<(String, String)>,
+    /// The version of the Release notice that the user hid. A later release shows the notice again.
+    #[serde(default)]
+    pub hidden_release: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +58,7 @@ impl State {
 
     /// An empty state with a new device id.
     pub fn fresh() -> Self {
-        Self { device_id: uuid::Uuid::new_v4().to_string(), servers: Vec::new(), active: None }
+        Self { device_id: uuid::Uuid::new_v4().to_string(), servers: Vec::new(), active: None, hidden_release: None }
     }
 
     /// Reads the state in `dir`. When there is no file yet, it makes a new device id and saves it.
