@@ -278,3 +278,15 @@ impl LocalSettings {
         if self.hardware_decoding { "auto-safe" } else { "no" }
     }
 }
+
+struct LocalDirectory(PathBuf);
+impl gpui::Global for LocalDirectory {}
+
+/// Use isolated Local settings for windows created by a test rig.
+pub fn use_directory(dir: PathBuf, cx: &mut gpui::App) {
+    cx.set_global(LocalDirectory(dir));
+}
+
+pub fn directory(cx: &gpui::App) -> PathBuf {
+    cx.try_global::<LocalDirectory>().map_or_else(LocalSettings::dir, |dir| dir.0.clone())
+}

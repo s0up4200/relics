@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::NaiveDate;
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
+    ParentElement, Render, StatefulInteractiveElement as _, Styled, Subscription, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -18,6 +18,7 @@ use crate::grid::{Grid, Move};
 use crate::home::{Open, Play};
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::search::{OpenPerson, person_query};
 
 const PHOTO_WIDTH: f32 = 180.;
@@ -60,8 +61,7 @@ pub struct PersonPage {
     tab_focus: usize,
     /// The page has the keyboard focus.
     active: bool,
-    fresh: Fresh,
-    _load: Task<()>,
+    fresh: Loader,
     _events: Vec<Subscription>,
 }
 
@@ -100,8 +100,7 @@ impl PersonPage {
             in_tabs: false,
             tab_focus: 0,
             active: false,
-            fresh: Fresh::default(),
-            _load: Task::ready(()),
+            fresh: Loader::default(),
             _events: events,
         };
         page.load(cx);
@@ -111,25 +110,21 @@ impl PersonPage {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         let (client, id) = (self.client.clone(), self.id.clone());
-        let ticket = self.fresh.begin();
-        self._load = cx.spawn(async move |this, cx| {
-            let result = client.person(&id).await;
-            this.update(cx, |this, cx| {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move { client.person(&id).await },
+            move |this, result, _cx| {
                 match result {
-                    _ if !this.fresh.end(ticket) => {}
                     Ok(person) => this.person = Some(person),
-                    // The page keeps the Person that it shows, with no error.
-                    Err(err) if this.person.is_some() => eprintln!("relics: cannot reload person {}: {err}", this.id),
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load,
+        );
         cx.notify();
     }
 
@@ -214,6 +209,7 @@ impl PersonPage {
         let error = self.error.clone().map(|error| {
             div().flex().items_center().gap(px(14.)).text_color(t.danger).child(error).child(
                 button("person-retry", "Retry", ButtonVariant::Secondary, cx)
+                    .debug_selector(|| "person-retry".into())
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
             )
         });

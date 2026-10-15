@@ -35,6 +35,7 @@ use crate::state::Pair;
 use freshness::{Coordinator, Moved};
 
 pub mod freshness;
+pub mod loading;
 
 /// Below this window width, the sidebar is an icon rail.
 const NARROW: f32 = 1100.;

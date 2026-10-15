@@ -382,3 +382,22 @@ fn prune_keeps_an_etag_while_the_file_or_a_shrunk_copy_stays() {
     left.sort();
     assert_eq!(left, ["a", "a.etag", "b-w300", "b.etag"]);
 }
+
+#[gpui::test]
+fn replacing_and_clearing_previews_releases_the_old_images(cx: &mut gpui::TestAppContext) {
+    use base64::Engine as _;
+    let pixels = vec![255; 16 * 16 * 4];
+    let hash = base64::engine::general_purpose::STANDARD.encode(thumbhash::rgba_to_thumb_hash(16, 16, &pixels));
+    let first = relics::artwork::thumbhash(&hash).unwrap();
+    let old = std::sync::Arc::downgrade(&first);
+    let second = relics::artwork::thumbhash(&hash).unwrap();
+    let replaced = std::sync::Arc::downgrade(&second);
+    let mut previews = vec![Some(first), None];
+    cx.update(|cx| relics::artwork::replace_previews(&mut previews, vec![Some(second)], cx));
+    cx.run_until_parked();
+    assert!(old.upgrade().is_none());
+    assert!(replaced.upgrade().is_some());
+    cx.update(|cx| relics::artwork::replace_previews(&mut previews, Vec::new(), cx));
+    cx.run_until_parked();
+    assert!(replaced.upgrade().is_none());
+}

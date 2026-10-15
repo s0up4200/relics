@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{
     Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render, ScrollHandle,
-    StatefulInteractiveElement as _, Styled, Task, Window, div, px,
+    StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -15,6 +15,7 @@ use crate::filter_panel::bar_pill;
 use crate::grid::kept_focus;
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 
 /// The most Request to add results that Search shows, as in the web client.
 const LIMIT: usize = 20;
@@ -96,8 +97,7 @@ pub struct Requests {
     /// The error of the last cancel.
     notice: Option<String>,
     scroll: ScrollHandle,
-    fresh: Fresh,
-    _loading: Task<()>,
+    fresh: Loader,
 }
 
 impl Requests {
@@ -112,8 +112,7 @@ impl Requests {
             failed: false,
             notice: None,
             scroll: ScrollHandle::new(),
-            fresh: Fresh::default(),
-            _loading: Task::ready(()),
+            fresh: Loader::default(),
         };
         page.load(cx);
         page
@@ -123,13 +122,12 @@ impl Requests {
     /// pages are in, so the scroll position stays, and the focus stays on its request.
     fn load(&mut self, cx: &mut Context<Self>) {
         let (client, want) = (self.client.clone(), self.items.len());
-        if self.items.is_empty() {
-            self.status = Some("Loading…".into());
-            self.failed = false;
-        }
-        let ticket = self.fresh.begin();
-        self._loading = cx.spawn(async move |this, cx| {
-            let result = async {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move {
                 let (mut items, mut next) = (Vec::new(), None);
                 loop {
                     let page = client.my_requests(next.as_deref()).await?;
@@ -139,11 +137,9 @@ impl Requests {
                         return Ok::<_, crate::api::Error>((items, next));
                     }
                 }
-            }
-            .await;
-            this.update(cx, |this, cx| {
+            },
+            move |this, result, _cx| {
                 match result {
-                    _ if !this.fresh.end(ticket) => {}
                     Ok((items, next)) => {
                         this.focus = kept_focus(&this.items, this.focus, &items, |r| r.id.clone());
                         this.items = items;
@@ -151,21 +147,15 @@ impl Requests {
                         this.status = this.items.is_empty().then(|| "No requests.".into());
                         this.failed = false;
                     }
-                    // A page that loaded keeps what it shows, with no error.
-                    Err(err) if !this.items.is_empty() => eprintln!("relics: cannot reload the requests: {err}"),
                     // The Library window shows Offline or the sign-in screen.
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;
                     }
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load,
+        );
         cx.notify();
     }
 
@@ -181,32 +171,26 @@ impl Requests {
     /// Loads the page after `cursor`.
     fn load_more(&mut self, cursor: String, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        self.status = Some("Loading…".into());
-        let ticket = self.fresh.more();
-        self._loading = cx.spawn(async move |this, cx| {
-            let result = client.my_requests(Some(&cursor)).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    _ if !this.fresh.end(ticket) => this.status = None,
-                    Ok(page) => {
-                        this.items.extend(page.items);
-                        this.next = page.page.and_then(|p| p.next_cursor);
-                        this.status = this.items.is_empty().then(|| "No requests.".into());
-                    }
-                    // The Library window shows Offline or the sign-in screen.
-                    Err(err) => {
-                        this.next = Some(cursor);
-                        this.status = Some(err.to_string());
-                        this.failed = true;
-                    }
+        self.next = Some(cursor.clone());
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Page,
+            async move { client.my_requests(Some(&cursor)).await },
+            |this, result, _| match result {
+                Ok(page) => {
+                    this.items.extend(page.items);
+                    this.next = page.page.and_then(|p| p.next_cursor);
+                    this.status = this.items.is_empty().then(|| "No requests.".into());
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
+                Err(err) => {
+                    this.status = Some(err.to_string());
+                    this.failed = true;
                 }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load,
+        );
         cx.notify();
     }
 
@@ -340,17 +324,19 @@ impl Render for Requests {
             .text_color(t.bright)
             .child("My requests");
         let rows: Vec<_> = self.items.iter().enumerate().map(|(i, request)| self.row(i, request, cx)).collect();
-        let status = self.status.clone().map(|status| {
+        let status = self.fresh.status(self.status.as_deref(), self.failed).map(|(status, failed)| {
             let retry = button("requests-retry", "Retry", ButtonVariant::Secondary, cx)
+                .debug_selector(|| "requests-retry".into())
                 .on_click(cx.listener(|this, _, _, cx| this.retry(cx)));
             div()
+                .debug_selector(|| "requests-status".into())
                 .pb(px(40.))
                 .flex()
                 .items_center()
                 .gap(px(14.))
-                .text_color(if self.failed { t.danger } else { t.secondary })
-                .child(status)
-                .children(self.failed.then_some(retry))
+                .text_color(if failed { t.danger } else { t.secondary })
+                .child(status.to_owned())
+                .children(failed.then_some(retry))
         });
         let notice = self.notice.clone().map(|notice| div().text_color(t.danger).child(notice));
         div()

@@ -99,6 +99,11 @@ pub fn global(cx: &mut App) -> Entity<ArtworkCache> {
     }
     let dir = cache_dir();
     let http = cx.http_client();
+    install(http, dir, cx)
+}
+
+/// Install an Artwork cache with its own HTTP client and disk directory.
+pub fn install(http: Arc<dyn HttpClient>, dir: PathBuf, cx: &mut App) -> Entity<ArtworkCache> {
     let cache = cx.new(|cx: &mut Context<ArtworkCache>| ArtworkCache {
         this: cx.weak_entity(),
         http,
@@ -854,5 +859,16 @@ impl std::fmt::Display for Rung {
             Rung::Medium => "medium",
             Rung::Large => "large",
         })
+    }
+}
+
+/// Replace decoded previews and release the images that the page no longer uses.
+pub fn replace_previews(
+    previews: &mut Vec<Option<Arc<RenderImage>>>,
+    replacement: Vec<Option<Arc<RenderImage>>>,
+    cx: &mut gpui::App,
+) {
+    for image in std::mem::replace(previews, replacement).into_iter().flatten() {
+        cx.drop_image(image, None);
     }
 }
