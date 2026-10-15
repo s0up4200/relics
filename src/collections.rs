@@ -15,6 +15,7 @@ use crate::click::Clickable as _;
 use crate::grid::{POSTER_HEIGHT, POSTER_WIDTH};
 use crate::home::{Focus, art, move_focus};
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::sideways::Row;
 
 const CARDS: Row = Row { width: POSTER_WIDTH, gap: 14., pad: 40. };
@@ -66,6 +67,19 @@ pub fn server_groups(libraries: Vec<wire::ServerCollectionLibrary>) -> Vec<Group
         .collect()
 }
 
+/// The focus after a reload from `old` to `new` rows: the same collection in the same row, or the same place in the
+/// row when the collection is gone. `None` when the row is gone or no card had the focus.
+fn kept_focus(focus: Focus, old: &[Group], new: &[Group]) -> Option<Focus> {
+    let Focus::Card { row, col } = focus else {
+        return None;
+    };
+    let group = old.get(row)?;
+    let row = new.iter().position(|g| g.library_id == group.library_id && g.title == group.title)?;
+    let cards = &new[row].cards;
+    let col = crate::grid::kept_focus(&group.cards, col, cards, |card| card.id.clone());
+    Some(Focus::Card { row, col })
+}
+
 pub struct Collections {
     client: Arc<Client>,
     scope: Scope,
@@ -80,6 +94,7 @@ pub struct Collections {
     /// items near the viewport.
     page: ListState,
     row_scrolls: Vec<ScrollHandle>,
+    fresh: Fresh,
     _loading: Task<()>,
 }
 
@@ -97,16 +112,21 @@ impl Collections {
             active: false,
             page: ListState::new(0, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
+            fresh: Fresh::default(),
             _loading: Task::ready(()),
         };
         collections.load(cx);
         collections
     }
 
+    /// Loads the collections. A reload keeps the rows and the focus until the new rows come.
     fn load(&mut self, cx: &mut Context<Self>) {
         let (client, scope) = (self.client.clone(), self.scope.clone());
-        self.status = Some("Loading…".into());
-        self.failed = false;
+        if self.groups.is_empty() {
+            self.status = Some("Loading…".into());
+            self.failed = false;
+        }
+        let ticket = self.fresh.begin();
         self._loading = cx.spawn(async move |this, cx| {
             let result = match scope {
                 Scope::Library(id) => client.library_collections(&id).await.map(library_groups),
@@ -114,17 +134,40 @@ impl Collections {
             };
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok(groups) => {
                         this.status = groups.is_empty().then(|| "No collections.".into());
-                        this.row_scrolls = groups.iter().map(|_| ScrollHandle::new()).collect();
+                        let old = |group: &Group| {
+                            this.groups.iter().position(|g| g.library_id == group.library_id && g.title == group.title)
+                        };
+                        this.row_scrolls = groups
+                            .iter()
+                            .map(|group| old(group).map_or_else(ScrollHandle::new, |i| this.row_scrolls[i].clone()))
+                            .collect();
+                        let focus = kept_focus(this.focus, &this.groups, &groups);
+                        if this.page.item_count() == this.title_items() + groups.len() + 1 {
+                            this.page.remeasure();
+                        }
                         this.groups = groups;
-                        this.focus = move_focus(Focus::Outside, Key::Right, &this.row_lengths());
+                        let rows = this.row_lengths();
+                        this.focus = match focus {
+                            Some(Focus::Card { row, col }) if rows.get(row).is_some_and(|&len| col < len) => {
+                                Focus::Card { row, col }
+                            }
+                            _ => move_focus(Focus::Outside, Key::Right, &rows),
+                        };
+                        this.failed = false;
                     }
-                    // The view keeps what it shows. The Library window shows Offline or the sign-in screen.
+                    // A view that loaded keeps what it shows, with no error.
+                    Err(err) if !this.groups.is_empty() => eprintln!("relics: cannot reload the collections: {err}"),
+                    // The Library window shows Offline or the sign-in screen.
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;
                     }
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })
@@ -223,6 +266,23 @@ impl Collections {
             )
             .child(div().text_size(px(12.)).text_color(t.secondary).child(count))
             .into_any_element()
+    }
+}
+
+impl Reload for Collections {
+    fn deps(&self) -> Vec<Deps> {
+        vec![match &self.scope {
+            Scope::Library(id) => Deps::Catalog(Some(id.clone())),
+            Scope::Server => Deps::Catalog(None),
+        }]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load(cx);
     }
 }
 

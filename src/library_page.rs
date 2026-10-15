@@ -21,6 +21,7 @@ use crate::filter_panel::{self, Chip, Facets, MenuKind, Outcome, Panel, bar_pill
 use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Moved, Reload};
 use crate::player::start_shuffle;
 
 /// A Shows library: its grid lists series, or episodes in Episodes mode.
@@ -72,11 +73,31 @@ pub struct LibraryPage {
     active: bool,
     /// Why the last Shuffle failed.
     shuffle_error: Option<String>,
+    /// The filter values.
+    fresh: Fresh,
     _shuffle: Task<()>,
     _facets: Task<()>,
     _events: Vec<Subscription>,
 }
 
+/// The Recommended rows, the collections and the grid of a Library page, each with true when its tab is selected.
+pub type TabViews = (Option<(Entity<Home>, bool)>, Option<(Entity<Collections>, bool)>, (Entity<Grid>, bool));
+
+impl Reload for LibraryPage {
+    fn deps(&self) -> Vec<Deps> {
+        vec![Deps::Catalog(Some(self.library.id.to_string()))]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load_facets(cx);
+    }
+}
+
+impl EventEmitter<Moved> for LibraryPage {}
 impl EventEmitter<Play> for LibraryPage {}
 impl EventEmitter<Open> for LibraryPage {}
 impl EventEmitter<OpenGrid> for LibraryPage {}
@@ -92,27 +113,7 @@ impl LibraryPage {
             cx.subscribe(&grid, |_, _, Play(item), cx| cx.emit(Play(item.clone()))),
             cx.subscribe(&grid, |_, _, Open(item), cx| cx.emit(Open(item.clone()))),
         ];
-        let facets = cx.spawn({
-            let (client, id) = (client.clone(), library.id.to_string());
-            async move |this, cx| match client.filters(Some(&id)).await {
-                Ok(filters) => {
-                    this.update(cx, |this, cx| {
-                        this.facets = filters.into();
-                        if let Some(menu) = &mut this.menu {
-                            menu.facets = this.facets.clone();
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                // The filter panel works without the values: it has no genre, language, studio, network or
-                // country section then.
-                Err(err) => {
-                    eprintln!("relics: cannot read the filter values of library {id}: {err}")
-                }
-            }
-        });
-        Self {
+        let mut page = Self {
             focus_handle: cx.focus_handle(),
             focus_pending: true,
             client,
@@ -129,10 +130,50 @@ impl LibraryPage {
             menu: None,
             active: false,
             shuffle_error: None,
+            fresh: Fresh::default(),
             _shuffle: Task::ready(()),
-            _facets: facets,
+            _facets: Task::ready(()),
             _events: events,
-        }
+        };
+        page.load_facets(cx);
+        page
+    }
+
+    /// Loads the filter values of the Library.
+    fn load_facets(&mut self, cx: &mut Context<Self>) {
+        let (client, id) = (self.client.clone(), self.library.id.to_string());
+        let ticket = self.fresh.begin();
+        self._facets = cx.spawn(async move |this, cx| {
+            let result = client.filters(Some(&id)).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    _ if !this.fresh.end(ticket) => {}
+                    Ok(filters) => {
+                        this.facets = filters.into();
+                        if let Some(menu) = &mut this.menu {
+                            menu.facets = this.facets.clone();
+                        }
+                    }
+                    // The filter panel works without the values: it has no genre, language, studio, network or
+                    // country section then.
+                    Err(err) => eprintln!("relics: cannot read the filter values of library {id}: {err}"),
+                }
+                if this.fresh.ready() {
+                    this.load_facets(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+    }
+
+    /// The views of the tabs that the user opened, each with true when its tab is selected.
+    pub fn tabs(&self) -> TabViews {
+        (
+            self.recommended.clone().map(|home| (home, self.tab == Tab::Recommended)),
+            self.collections.clone().map(|collections| (collections, self.tab == Tab::Collections)),
+            (self.grid.clone(), self.tab == Tab::Library),
+        )
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -190,27 +231,8 @@ impl LibraryPage {
         self.sync(cx);
     }
 
-    /// Reloads the Recommended tab, when the user opened it. `shows` is true when the page shows.
-    pub fn refresh(&mut self, shows: bool, cx: &mut Context<Self>) {
-        let shows = shows && self.tab == Tab::Recommended;
-        if let Some(home) = &self.recommended {
-            home.update(cx, |home, cx| home.refresh(shows, cx));
-        }
-    }
-
-    /// The page shows again.
-    pub fn shown(&mut self, cx: &mut Context<Self>) {
-        if let Some(home) = self.recommended.as_ref().filter(|_| self.tab == Tab::Recommended) {
-            home.update(cx, |home, cx| home.shown(cx));
-        }
-        if self.tab == Tab::Library {
-            self.grid.update(cx, |grid, cx| grid.shown(cx));
-        }
-    }
-
     fn open_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
-        self.shown(cx);
         if tab == Tab::Recommended && self.recommended.is_none() {
             let rows = Rows::Library(self.library.id.to_string());
             let home = cx.new(|cx| Home::new(self.client.clone(), rows, window, cx));
@@ -226,6 +248,7 @@ impl LibraryPage {
             self.collections = Some(collections);
         }
         self.sync(cx);
+        cx.emit(Moved);
     }
 
     fn activate(&mut self, control: Control, window: &mut Window, cx: &mut Context<Self>) {

@@ -17,6 +17,7 @@ use crate::click::Clickable as _;
 use crate::grid::{Grid, Move};
 use crate::home::{Open, Play};
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::search::{OpenPerson, person_query};
 
 const PHOTO_WIDTH: f32 = 180.;
@@ -59,8 +60,23 @@ pub struct PersonPage {
     tab_focus: usize,
     /// The page has the keyboard focus.
     active: bool,
+    fresh: Fresh,
     _load: Task<()>,
     _events: Vec<Subscription>,
+}
+
+impl Reload for PersonPage {
+    fn deps(&self) -> Vec<Deps> {
+        vec![Deps::Catalog(None)]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load(cx);
+    }
 }
 
 impl EventEmitter<Play> for PersonPage {}
@@ -84,6 +100,7 @@ impl PersonPage {
             in_tabs: false,
             tab_focus: 0,
             active: false,
+            fresh: Fresh::default(),
             _load: Task::ready(()),
             _events: events,
         };
@@ -94,13 +111,20 @@ impl PersonPage {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         let (client, id) = (self.client.clone(), self.id.clone());
+        let ticket = self.fresh.begin();
         self._load = cx.spawn(async move |this, cx| {
             let result = client.person(&id).await;
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok(person) => this.person = Some(person),
+                    // The page keeps the Person that it shows, with no error.
+                    Err(err) if this.person.is_some() => eprintln!("relics: cannot reload person {}: {err}", this.id),
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })

@@ -156,7 +156,7 @@ The app state when the active Server does not answer, or answers 503. The app ke
 _Avoid_: disconnected, down
 
 **Live updates**:
-The Server tells the app about changes to the state of the Profile and to the Libraries, so that open pages show them without a restart. A page out of view waits until it shows again.
+The Server tells the app about changes to the state of the Profile and to the Libraries, so that open pages show them without a restart. Hidden pages and tabs, including pages behind full-screen pickers, wait until their content shows again. Keyboard focus does not determine visibility.
 _Avoid_: realtime, push, sync
 
 **Track picker**:

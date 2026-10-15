@@ -12,7 +12,9 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::filter_panel::bar_pill;
+use crate::grid::kept_focus;
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 
 /// The most Request to add results that Search shows, as in the web client.
 const LIMIT: usize = 20;
@@ -94,8 +96,8 @@ pub struct Requests {
     /// The error of the last cancel.
     notice: Option<String>,
     scroll: ScrollHandle,
+    fresh: Fresh,
     _loading: Task<()>,
-    _cancel: Task<()>,
 }
 
 impl Requests {
@@ -110,36 +112,96 @@ impl Requests {
             failed: false,
             notice: None,
             scroll: ScrollHandle::new(),
+            fresh: Fresh::default(),
             _loading: Task::ready(()),
-            _cancel: Task::ready(()),
         };
-        page.load(None, cx);
+        page.load(cx);
         page
     }
 
-    /// Loads the page after `cursor`, or the first page again when `cursor` is `None`.
-    fn load(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        self.status = Some("Loading…".into());
-        self.failed = false;
+    /// Loads the requests from the first page, as many as the page has. The new list replaces the old one when all
+    /// pages are in, so the scroll position stays, and the focus stays on its request.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        let (client, want) = (self.client.clone(), self.items.len());
+        if self.items.is_empty() {
+            self.status = Some("Loading…".into());
+            self.failed = false;
+        }
+        let ticket = self.fresh.begin();
         self._loading = cx.spawn(async move |this, cx| {
-            let result = client.my_requests(cursor.as_deref()).await;
+            let result = async {
+                let (mut items, mut next) = (Vec::new(), None);
+                loop {
+                    let page = client.my_requests(next.as_deref()).await?;
+                    items.extend(page.items);
+                    next = page.page.and_then(|p| p.next_cursor);
+                    if items.len() >= want || next.is_none() {
+                        return Ok::<_, crate::api::Error>((items, next));
+                    }
+                }
+            }
+            .await;
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
+                    Ok((items, next)) => {
+                        this.focus = kept_focus(&this.items, this.focus, &items, |r| r.id.clone());
+                        this.items = items;
+                        this.next = next;
+                        this.status = this.items.is_empty().then(|| "No requests.".into());
+                        this.failed = false;
+                    }
+                    // A page that loaded keeps what it shows, with no error.
+                    Err(err) if !this.items.is_empty() => eprintln!("relics: cannot reload the requests: {err}"),
+                    // The Library window shows Offline or the sign-in screen.
+                    Err(err) => {
+                        this.status = Some(err.to_string());
+                        this.failed = true;
+                    }
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        cx.notify();
+    }
+
+    /// Retry after a failed load: the next page again, or the first page.
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        self.failed = false;
+        match self.next.take() {
+            Some(next) if !self.items.is_empty() => self.load_more(next, cx),
+            _ => self.load(cx),
+        }
+    }
+
+    /// Loads the page after `cursor`.
+    fn load_more(&mut self, cursor: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        self.status = Some("Loading…".into());
+        let ticket = self.fresh.more();
+        self._loading = cx.spawn(async move |this, cx| {
+            let result = client.my_requests(Some(&cursor)).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    _ if !this.fresh.end(ticket) => this.status = None,
                     Ok(page) => {
-                        if cursor.is_none() {
-                            this.items.clear();
-                            this.focus = 0;
-                        }
                         this.items.extend(page.items);
                         this.next = page.page.and_then(|p| p.next_cursor);
                         this.status = this.items.is_empty().then(|| "No requests.".into());
                     }
                     // The Library window shows Offline or the sign-in screen.
                     Err(err) => {
+                        this.next = Some(cursor);
                         this.status = Some(err.to_string());
                         this.failed = true;
                     }
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })
@@ -155,7 +217,8 @@ impl Requests {
         };
         let (client, id) = (self.client.clone(), request.id.to_string());
         self.notice = None;
-        self._cancel = cx.spawn(async move |this, cx| {
+        self.fresh.write();
+        cx.spawn(async move |this, cx| {
             let result = client.cancel_request(&id).await;
             this.update(cx, |this, cx| {
                 match result {
@@ -166,10 +229,14 @@ impl Requests {
                     }
                     Err(err) => this.notice = Some(format!("Not cancelled: {err}")),
                 }
+                if this.fresh.written() {
+                    this.load(cx);
+                }
                 cx.notify();
             })
             .ok();
-        });
+        })
+        .detach();
     }
 
     /// Handles a key. Returns false when the page does not use it, for example Left to the sidebar.
@@ -186,11 +253,14 @@ impl Requests {
         };
         self.focus = focus;
         self.scroll.scroll_to_item(focus + 1);
-        if focus == last && !self.failed && self.status.is_none() {
-            let next = self.next.take();
-            if next.is_some() {
-                self.load(next, cx);
-            }
+        // A reload that runs covers the requests that the page has, so the next page waits for it.
+        if focus == last
+            && !self.failed
+            && self.status.is_none()
+            && !self.fresh.loading()
+            && let Some(next) = self.next.take()
+        {
+            self.load_more(next, cx);
         }
         cx.notify();
         true
@@ -245,6 +315,20 @@ impl Requests {
     }
 }
 
+impl Reload for Requests {
+    fn deps(&self) -> Vec<Deps> {
+        vec![Deps::Recovery]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load(cx);
+    }
+}
+
 impl Render for Requests {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.omarchy().clone();
@@ -258,7 +342,7 @@ impl Render for Requests {
         let rows: Vec<_> = self.items.iter().enumerate().map(|(i, request)| self.row(i, request, cx)).collect();
         let status = self.status.clone().map(|status| {
             let retry = button("requests-retry", "Retry", ButtonVariant::Secondary, cx)
-                .on_click(cx.listener(|this, _, _, cx| this.load(None, cx)));
+                .on_click(cx.listener(|this, _, _, cx| this.retry(cx)));
             div()
                 .pb(px(40.))
                 .flex()

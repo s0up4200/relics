@@ -29,6 +29,7 @@ use crate::api::Client;
 use crate::choice_list::{Choice, ChoiceList, Outcome};
 use crate::click::Clickable as _;
 use crate::keys::Key;
+use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::release::ReleaseCheck;
 use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
 use crate::state::Pair;
@@ -81,12 +82,27 @@ pub struct SettingsPage {
     picker: Option<ChoiceList>,
     /// The page has the keyboard focus.
     pub active: bool,
+    fresh: Fresh,
     _load: Task<()>,
-    /// One write for each key. A new change of the key drops the old write.
+    /// The write that runs for each key. A new change of the key drops the old write.
     writes: HashMap<&'static str, Task<()>>,
 }
 
 impl EventEmitter<AccountAction> for SettingsPage {}
+
+impl Reload for SettingsPage {
+    fn deps(&self) -> Vec<Deps> {
+        vec![Deps::Recovery]
+    }
+
+    fn fresh(&mut self, _: usize) -> &mut Fresh {
+        &mut self.fresh
+    }
+
+    fn reload(&mut self, _: usize, cx: &mut Context<Self>) {
+        self.load(cx);
+    }
+}
 
 impl SettingsPage {
     pub fn new(
@@ -111,6 +127,7 @@ impl SettingsPage {
             action: 0,
             picker: None,
             active: true,
+            fresh: Fresh::default(),
             _load: Task::ready(()),
             writes: HashMap::new(),
         };
@@ -121,12 +138,19 @@ impl SettingsPage {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.load_error = None;
         let client = self.client.clone();
+        let ticket = self.fresh.begin();
         self._load = cx.spawn(async move |this, cx| {
             let result = client.load_server_settings().await;
             this.update(cx, |this, cx| {
                 match result {
+                    _ if !this.fresh.end(ticket) => {}
                     Ok(()) => this.server = Some(client.server_settings()),
+                    // The page keeps the settings that it shows, with no error.
+                    Err(err) if this.server.is_some() => eprintln!("relics: cannot reload the Server settings: {err}"),
                     Err(err) => this.load_error = Some(err.to_string()),
+                }
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
                 cx.notify();
             })
@@ -203,6 +227,13 @@ impl SettingsPage {
         let write = cx.spawn(async move |this, cx| {
             let result = client.set_server_setting(key, new).await;
             this.update(cx, |this, cx| {
+                // The task ends here, so it must not drop itself.
+                if let Some(write) = this.writes.remove(key) {
+                    write.detach();
+                }
+                if this.fresh.written() {
+                    this.load(cx);
+                }
                 if let Err(err) = result {
                     if let Some(server) = &mut this.server {
                         server.set(key, &old);
@@ -213,7 +244,11 @@ impl SettingsPage {
             })
             .ok();
         });
-        self.writes.insert(key, write);
+        self.fresh.write();
+        if self.writes.insert(key, write).is_some() {
+            // The old write of the key is dropped. The new one still holds the reloads.
+            self.fresh.written();
+        }
         cx.notify();
     }
 

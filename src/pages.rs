@@ -6,9 +6,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
-use futures::StreamExt as _;
+use futures::stream::BoxStream;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _,
@@ -23,7 +22,7 @@ use crate::browse;
 use crate::click::Clickable as _;
 use crate::collections::{Collections, OpenCollection, Scope};
 use crate::detail::{self, Detail};
-use crate::grid::{Grid, GridPage, Source};
+use crate::grid::{GridPage, Source};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
 use crate::library_page::{LibraryPage, is_shows};
@@ -33,6 +32,9 @@ use crate::requests::Requests;
 use crate::search::{OpenPerson, Search};
 use crate::settings_page::{AccountAction, SettingsPage};
 use crate::state::Pair;
+use freshness::{Coordinator, Moved};
+
+pub mod freshness;
 
 /// Below this window width, the sidebar is an icon rail.
 const NARROW: f32 = 1100.;
@@ -96,82 +98,6 @@ fn kept_row(row: usize, old: &[wire::UserLibrary], new: &[wire::UserLibrary]) ->
     }
 }
 
-/// What a refresh reloads. Home, the Recommended tabs and the Detail page do not know where a refresh came from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Refresh {
-    /// The Library list, Home, each Recommended tab that the user opened, and each Detail page.
-    All,
-    /// Home, each opened Recommended tab, and the Detail page of the Item, of the series, or of an episode of the
-    /// series.
-    Item { item: Option<String>, series: Option<String> },
-    /// Home, the Recommended tab of the Library, and each Detail page. A `library` of `None` is each opened
-    /// Recommended tab. An `item` of `None` is no Detail page.
-    Library { library: Option<String>, item: Option<String> },
-    /// The Library list, Home, and the Recommended tab of the Library. A `library` of `None` is each opened
-    /// Recommended tab.
-    Libraries { library: Option<String> },
-}
-
-impl Refresh {
-    /// The refresh reloads the Recommended tab of the Library `id`.
-    pub fn reaches_library(&self, id: &str) -> bool {
-        match self {
-            Refresh::Library { library: Some(library), .. } | Refresh::Libraries { library: Some(library) } => {
-                library == id
-            }
-            _ => true,
-        }
-    }
-
-    /// The refresh reloads the Detail page of the Item `page`. `page_series` is the series of an episode page.
-    pub fn reaches_detail(&self, page: &str, page_series: Option<&str>) -> bool {
-        match self {
-            Refresh::All => true,
-            // The event of an episode does not name its series, so each Item change reaches each Detail page.
-            Refresh::Library { item, .. } => item.is_some(),
-            Refresh::Libraries { .. } => false,
-            Refresh::Item { item, series } => {
-                item.as_deref() == Some(page) || series.as_deref().is_some_and(|s| s == page || Some(s) == page_series)
-            }
-        }
-    }
-}
-
-/// Lets the first refresh through at once and opens a window of `period`. The window holds the refreshes that
-/// come in it, and lets them through together at its end. A window that held refreshes opens the next window.
-pub struct Throttle {
-    pub period: Duration,
-    open: bool,
-    held: Vec<Refresh>,
-    /// The timer of the open window.
-    window: Task<()>,
-}
-
-impl Throttle {
-    pub fn new(period: Duration) -> Self {
-        Self { period, open: false, held: Vec::new(), window: Task::ready(()) }
-    }
-
-    /// Returns true when `refresh` runs now and a window opens. Otherwise the open window holds it.
-    pub fn push(&mut self, refresh: Refresh) -> bool {
-        if !self.open {
-            self.open = true;
-            return true;
-        }
-        if !self.held.contains(&refresh) {
-            self.held.push(refresh);
-        }
-        false
-    }
-
-    /// The end of the window: the refreshes to run now. The next window stays open when there are any.
-    pub fn tick(&mut self) -> Vec<Refresh> {
-        let held = std::mem::take(&mut self.held);
-        self.open = !held.is_empty();
-        held
-    }
-}
-
 #[derive(Clone)]
 pub enum Page {
     Home(Entity<Home>),
@@ -222,33 +148,6 @@ impl Page {
         }
     }
 
-    /// The page shows again. A page that became stale while it did not show reloads.
-    fn shown(&self, cx: &mut gpui::App) {
-        match self {
-            Page::Home(home) => home.update(cx, |home, cx| home.shown(cx)),
-            Page::Library(page) => page.update(cx, |page, cx| page.shown(cx)),
-            Page::Detail(page) => page.update(cx, |page, cx| page.shown(cx)),
-            Page::Settings(page) => page.update(cx, |page, cx| page.shown(cx)),
-            _ => {
-                if let Some(grid) = self.grid(cx) {
-                    grid.update(cx, |grid, cx| grid.shown(cx));
-                }
-            }
-        }
-    }
-
-    /// The poster grid of the page: the Library grid, the Search results, the filmography, or the grid of a
-    /// GridPage.
-    fn grid(&self, cx: &gpui::App) -> Option<Entity<Grid>> {
-        match self {
-            Page::Library(page) => Some(page.read(cx).grid.clone()),
-            Page::Search(page) => page.read(cx).titles.clone(),
-            Page::Person(page) => Some(page.read(cx).grid.clone()),
-            Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => Some(page.read(cx).grid.clone()),
-            _ => None,
-        }
-    }
-
     fn into_any_element(self) -> AnyElement {
         match self {
             Page::Home(home) => home.into_any_element(),
@@ -287,12 +186,7 @@ pub struct Pages {
     pub release: Option<Entity<ReleaseCheck>>,
     focus_handle: FocusHandle,
     focus_pending: bool,
-    /// The window of the progress events of the Live updates: 30 seconds.
-    progress: Throttle,
-    /// The window of the catalog events of the Live updates: 2 seconds.
-    catalog: Throttle,
-    /// The Live updates of the Profile. The socket lives as long as the pages.
-    _live: Task<()>,
+    freshness: Coordinator,
     _libraries: Task<()>,
     _events: Vec<Subscription>,
 }
@@ -303,6 +197,18 @@ impl EventEmitter<AccountAction> for Pages {}
 
 impl Pages {
     pub fn new(client: Arc<Client>, profile_name: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let changes = client.live_updates();
+        Self::with_changes(client, profile_name, changes, window, cx)
+    }
+
+    /// The pages with `changes` as their Live updates.
+    pub fn with_changes(
+        client: Arc<Client>,
+        profile_name: String,
+        changes: BoxStream<'static, LiveChange>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let home = cx.new(|cx| Home::new(client.clone(), Rows::Home, window, cx));
         cx.subscribe_in(&home, window, |this, _, open: &OpenGrid, window, cx| this.open_grid(open, window, cx))
             .detach();
@@ -321,109 +227,16 @@ impl Pages {
             release: None,
             focus_handle: cx.focus_handle(),
             focus_pending: false,
-            progress: Throttle::new(Duration::from_secs(30)),
-            catalog: Throttle::new(Duration::from_secs(2)),
-            _live: Task::ready(()),
+            freshness: Coordinator::default(),
             _libraries: Task::ready(()),
             _events: Vec::new(),
         };
         pages.listen(&home, window, cx);
         pages.page.set_active(true, cx);
         pages.load_libraries(cx);
-        pages.listen_live(cx);
+        pages.listen_live(changes, cx);
         pages.focus(window, cx);
         pages
-    }
-
-    fn listen_live(&mut self, cx: &mut Context<Self>) {
-        let mut changes = self.client.live_updates();
-        self._live = cx.spawn(async move |this, cx| {
-            while let Some(change) = changes.next().await {
-                if this.update(cx, |this, cx| this.live(change, cx)).is_err() {
-                    return;
-                }
-            }
-        });
-    }
-
-    fn live(&mut self, change: LiveChange, cx: &mut Context<Self>) {
-        match change {
-            LiveChange::Resync => self.refresh(&Refresh::All, cx),
-            LiveChange::UserState { item, series, progress: false } => {
-                self.refresh(&Refresh::Item { item, series }, cx)
-            }
-            LiveChange::UserState { item, series, progress: true } => {
-                self.throttled(|this| &mut this.progress, Refresh::Item { item, series }, cx)
-            }
-            LiveChange::Catalog { library, item } => {
-                self.throttled(|this| &mut this.catalog, Refresh::Library { library, item }, cx)
-            }
-            LiveChange::Libraries { library } => {
-                self.throttled(|this| &mut this.catalog, Refresh::Libraries { library }, cx)
-            }
-        }
-    }
-
-    /// Runs `refresh` through the window that `window` picks.
-    fn throttled(&mut self, window: fn(&mut Self) -> &mut Throttle, refresh: Refresh, cx: &mut Context<Self>) {
-        if !window(self).push(refresh.clone()) {
-            return;
-        }
-        self.refresh(&refresh, cx);
-        let period = window(self).period;
-        window(self).window = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(period).await;
-                let open = this.update(cx, |this, cx| {
-                    let held = window(this).tick();
-                    for refresh in &held {
-                        this.refresh(refresh, cx);
-                    }
-                    !held.is_empty()
-                });
-                if !matches!(open, Ok(true)) {
-                    return;
-                }
-            }
-        });
-    }
-
-    /// Reloads the pages that `refresh` reaches, and each grid. A page that shows reloads now, and keeps its scroll
-    /// position and focus. A page that does not show becomes stale, and reloads one time when it shows again.
-    pub fn refresh(&mut self, refresh: &Refresh, cx: &mut Context<Self>) {
-        if matches!(refresh, Refresh::All | Refresh::Libraries { .. }) {
-            self.load_libraries(cx);
-        }
-        let home = matches!(&self.page, Page::Home(home) if *home == self.home);
-        self.home.update(cx, |page, cx| page.refresh(home, cx));
-        for page in self.library_pages.values() {
-            let shows = matches!(&self.page, Page::Library(p) if p == page);
-            page.update(cx, |page, cx| {
-                if refresh.reaches_library(&page.library.id.to_string()) {
-                    page.refresh(shows, cx);
-                }
-            });
-        }
-        for page in std::iter::once(&self.page).chain(&self.back) {
-            if let Page::Detail(detail) = page {
-                let shows = matches!(&self.page, Page::Detail(p) if p == detail);
-                detail.update(cx, |detail, cx| {
-                    let (id, series) = detail.shows();
-                    if refresh.reaches_detail(id, series) {
-                        detail.refresh(shows, cx);
-                    }
-                });
-            }
-        }
-        // A grid cannot tell if a changed Item is in its query, so each refresh reaches each grid. A page can be in the
-        // list more than one time, and a second mark does nothing. The grid that shows reloads now.
-        let kept = self.library_pages.values().cloned().map(Page::Library).chain(self.search.clone().map(Page::Search));
-        let pages = std::iter::once(self.page.clone()).chain(self.back.iter().cloned()).chain(kept);
-        let grids: Vec<_> = pages.filter_map(|page| page.grid(cx)).collect();
-        for grid in grids {
-            grid.update(cx, |grid, _| grid.stale = true);
-        }
-        self.page.shown(cx);
     }
 
     /// Gives the keyboard focus to the pages, for example when they come back after the PIN entry.
@@ -433,25 +246,36 @@ impl Pages {
 
     fn load_libraries(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        self._libraries = cx.spawn(async move |this, cx| match client.libraries().await {
-            Ok(libraries) => {
-                this.update(cx, |this, cx| {
-                    // A removed Library, or one with another type, opens fresh next time.
-                    this.library_pages.retain(|_, page| relist(page, &libraries, cx));
-                    this.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
-                    let removed = matches!(&this.page, Page::Library(page) if !relist(page, &libraries, cx));
-                    this.sidebar = this.sidebar.map(|row| kept_row(row, &this.libraries, &libraries));
-                    this.libraries = libraries;
-                    if removed {
-                        this.back.clear();
-                        this.show(Page::Home(this.home.clone()), cx);
+        let ticket = self.freshness.libraries().begin();
+        self._libraries = cx.spawn(async move |this, cx| {
+            let result = client.libraries().await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(libraries) if this.freshness.libraries().end(ticket) => {
+                        // A removed Library, or one with another type, opens fresh next time.
+                        this.library_pages.retain(|_, page| relist(page, &libraries, cx));
+                        this.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
+                        let removed = matches!(&this.page, Page::Library(page) if !relist(page, &libraries, cx));
+                        this.sidebar = this.sidebar.map(|row| kept_row(row, &this.libraries, &libraries));
+                        this.libraries = libraries;
+                        if removed {
+                            this.back.clear();
+                            this.show(Page::Home(this.home.clone()), cx);
+                        }
                     }
-                    cx.notify();
-                })
-                .ok();
-            }
-            // The sidebar shows Home only. It reads the list again when it gets the focus.
-            Err(err) => eprintln!("relics: cannot read the libraries: {err}"),
+                    Ok(_) => {}
+                    // The sidebar shows Home only. It reads the list again when it gets the focus.
+                    Err(err) => {
+                        this.freshness.libraries().end(ticket);
+                        eprintln!("relics: cannot read the libraries: {err}");
+                    }
+                }
+                if this.freshness.libraries().ready() {
+                    this.load_libraries(cx);
+                }
+                cx.notify();
+            })
+            .ok();
         });
     }
 
@@ -573,8 +397,12 @@ impl Pages {
         self.focus_pending = true;
         self.page.set_active(false, cx);
         page.set_active(self.sidebar.is_none(), cx);
-        page.shown(cx);
+        // A newer Settings page can have changed the Local settings.
+        if let Page::Settings(settings) = &page {
+            settings.update(cx, |settings, cx| settings.shown(cx));
+        }
         self.page = page;
+        self.sync(cx);
         cx.notify();
     }
 
@@ -648,6 +476,7 @@ impl Pages {
                         self._events.push(cx.subscribe_in(&page, window, |this, _, open: &OpenGrid, window, cx| {
                             this.open_grid(open, window, cx)
                         }));
+                        self._events.push(cx.subscribe(&page, |this, _, _: &Moved, cx| this.sync(cx)));
                         self._events.push(cx.subscribe_in(
                             &page,
                             window,
@@ -986,9 +815,7 @@ impl Render for Pages {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use super::{Refresh, Throttle, kept_row, relisted, shortcut, sidebar_width};
+    use super::{kept_row, relisted, shortcut, sidebar_width};
     use crate::api::wire;
 
     fn library(id: &str, kind: &str) -> wire::UserLibrary {
@@ -1013,30 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn an_item_change_reaches_its_detail_page_and_the_detail_page_of_its_series() {
-        let episode = Refresh::Item { item: Some("episode:e1".into()), series: Some("series:s".into()) };
-        assert!(episode.reaches_detail("episode:e1", Some("series:s")));
-        assert!(episode.reaches_detail("series:s", None), "the page of the series");
-        assert!(episode.reaches_detail("episode:e2", Some("series:s")), "another episode of the series");
-        assert!(!episode.reaches_detail("movie:m", None));
-        let movie = Refresh::Item { item: Some("movie:m".into()), series: None };
-        assert!(movie.reaches_detail("movie:m", None));
-        assert!(!movie.reaches_detail("episode:e1", None), "no series matches no series");
-        assert!(Refresh::All.reaches_detail("movie:m", None));
-        let library = |library: Option<&str>, item: Option<&str>| Refresh::Library {
-            library: library.map(Into::into),
-            item: item.map(Into::into),
-        };
-        assert!(!library(None, None).reaches_detail("movie:m", None));
-        assert!(library(Some("7"), Some("movie:m")).reaches_detail("movie:m", None), "a catalog change of the Item");
-        assert!(
-            library(Some("7"), Some("episode:e1")).reaches_detail("series:s", None),
-            "the event does not name the series of an episode, so each Item change reaches each Detail page"
-        );
-        assert!(!Refresh::Libraries { library: Some("7".into()) }.reaches_detail("movie:m", None));
-    }
-
-    #[test]
     fn the_sidebar_focus_stays_on_its_library_or_row_when_the_library_list_changes() {
         let old = [library("films", "movies"), library("shows", "series")];
         let new = [library("kids", "movies"), library("films", "movies"), library("shows", "series")];
@@ -1058,35 +861,5 @@ mod tests {
         assert_eq!(name(&[renamed]), Some("Films".into()), "a renamed Library");
         assert_eq!(name(&[library("12", "shows")]), None, "another type");
         assert_eq!(name(&[library("7", "shows")]), None, "a removed Library");
-    }
-
-    #[test]
-    fn a_library_change_reaches_only_the_recommended_tab_of_its_library() {
-        let library = |id: Option<&str>| Refresh::Library { library: id.map(Into::into), item: None };
-        assert!(library(Some("7")).reaches_library("7"));
-        assert!(!library(Some("7")).reaches_library("8"));
-        assert!(library(None).reaches_library("8"), "no Library reaches each tab");
-        let libraries = |id: Option<&str>| Refresh::Libraries { library: id.map(Into::into) };
-        assert!(libraries(Some("7")).reaches_library("7"));
-        assert!(!libraries(Some("7")).reaches_library("8"));
-        assert!(libraries(None).reaches_library("8"));
-        assert!(Refresh::All.reaches_library("8"));
-        assert!(Refresh::Item { item: None, series: None }.reaches_library("8"));
-    }
-
-    #[test]
-    fn a_burst_runs_one_refresh_now_and_one_at_the_end_of_each_window() {
-        let mut throttle = Throttle::new(Duration::from_secs(30));
-        let a = Refresh::Library { library: Some("1".into()), item: None };
-        let b = Refresh::Library { library: Some("2".into()), item: None };
-        assert!(throttle.push(a.clone()), "the first refresh runs now");
-        assert!(!throttle.push(a.clone()));
-        assert!(!throttle.push(b.clone()));
-        assert!(!throttle.push(a.clone()));
-        assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one refresh of each target");
-        assert!(!throttle.push(a.clone()), "the trailing refresh opened the next window");
-        assert_eq!(throttle.tick(), std::slice::from_ref(&a));
-        assert_eq!(throttle.tick(), [], "a quiet window closes");
-        assert!(throttle.push(a), "the next refresh runs now");
     }
 }
