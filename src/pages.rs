@@ -282,6 +282,7 @@ pub struct Pages {
     /// Each Server and Account pair, and the Active server, for the Accounts section of the Settings page.
     pub pairs: (Vec<Pair>, Option<(String, String)>),
     focus_handle: FocusHandle,
+    focus_pending: bool,
     /// The window of the progress events of the Live updates: 30 seconds.
     progress: Throttle,
     /// The window of the catalog events of the Live updates: 2 seconds.
@@ -314,6 +315,7 @@ impl Pages {
             menu: None,
             pairs: (Vec::new(), None),
             focus_handle: cx.focus_handle(),
+            focus_pending: false,
             progress: Throttle::new(Duration::from_secs(30)),
             catalog: Throttle::new(Duration::from_secs(2)),
             _live: Task::ready(()),
@@ -525,7 +527,7 @@ impl Pages {
                 Some(search) => search.clone(),
                 None => {
                     let client = self.client.clone();
-                    let search = cx.new(|cx| Search::new(client, cx));
+                    let search = cx.new(|cx| Search::new(client, window, cx));
                     self.listen(&search, window, cx);
                     self._events.push(cx.subscribe_in(&search, window, |this, _, person, window, cx| {
                         this.open_person(person, window, cx)
@@ -563,6 +565,7 @@ impl Pages {
     }
 
     fn show(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.focus_pending = true;
         self.page.set_active(false, cx);
         page.set_active(self.sidebar.is_none(), cx);
         page.shown(cx);
@@ -684,14 +687,14 @@ impl Pages {
         cx.notify();
     }
 
-    /// Gives a key to the page. `typed` is the text that the key types, for the search field.
-    fn page_key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Gives a navigation key to the page.
+    fn page_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match self.page.clone() {
             Page::Home(home) => home.update(cx, |home, cx| home.key(key, cx)),
-            Page::Library(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
+            Page::Library(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
             Page::Detail(page) => page.update(cx, |page, cx| page.key(key, cx)),
             Page::Person(page) => page.update(cx, |page, cx| page.key(key, cx)),
-            Page::Search(page) => page.update(cx, |page, cx| page.key(key, typed, window, cx)),
+            Page::Search(page) => page.update(cx, |page, cx| page.key(key, window, cx)),
             Page::Grid(page) | Page::Watchlist(page) | Page::History(page) => {
                 page.update(cx, |page, cx| page.key(key, cx))
             }
@@ -704,11 +707,13 @@ impl Pages {
     /// Opens or closes the sidebar menu.
     fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         self.menu = if self.menu.is_some() { None } else { Some(0) };
+        self.page.set_active(self.menu.is_none() && self.sidebar.is_none(), cx);
         cx.notify();
     }
 
     fn choose(&mut self, choice: MenuChoice, cx: &mut Context<Self>) {
         self.menu = None;
+        self.page.set_active(self.sidebar.is_none(), cx);
         cx.emit(choice);
         cx.notify();
     }
@@ -719,7 +724,7 @@ impl Pages {
             Key::Down => self.menu = Some((selected + 1).min(MENU.len() - 1)),
             Key::Up => self.menu = Some(selected.saturating_sub(1)),
             Key::Other("enter") => self.choose(MENU[selected].0, cx),
-            Key::Other("escape" | "backspace" | "m") => self.menu = None,
+            Key::Other("escape" | "backspace" | "m") => self.toggle_menu(cx),
             _ => {}
         }
         cx.stop_propagation();
@@ -727,14 +732,19 @@ impl Pages {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if match &self.page {
+            Page::Search(page) => page.read(cx).editing(window, cx),
+            Page::Library(page) => page.read(cx).editing(window, cx),
+            _ => false,
+        } {
+            return;
+        }
         let keystroke = &event.keystroke;
         let key = Key::parse(&keystroke.key);
         if let Some(selected) = self.menu {
             return self.menu_key(selected, key, cx);
         }
-        let m = keystroke.modifiers;
-        let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt && !m.platform);
-        let used = (self.sidebar.is_none() && self.page_key(key, typed, window, cx))
+        let used = (self.sidebar.is_none() && self.page_key(key, window, cx))
             || match (self.sidebar, key) {
                 (_, Key::Other("/")) => {
                     self.sidebar = None;
@@ -922,11 +932,20 @@ impl Pages {
 
 impl Render for Pages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_pending || self.sidebar.is_some() || self.menu.is_some() {
+            self.focus_pending = false;
+            window.focus(&self.focus_handle, cx);
+        }
         let t = cx.omarchy().clone();
         let viewport = window.viewport_size().width.to_f64() as f32;
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::key))
+            .on_action(cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| {
+                if !this.page_key(Key::Other("escape"), window, cx) {
+                    this.go_back(cx);
+                }
+            }))
             .size_full()
             .flex()
             .bg(t.background)

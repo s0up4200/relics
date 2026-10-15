@@ -81,6 +81,7 @@ fn main() {
     });
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         gpui_omarchy::init(cx);
+        relics::text_input::init(cx);
         relics::theme::keep_readable(cx);
         let user_agent = concat!("relics/", env!("CARGO_PKG_VERSION"));
         let http = ReqwestClient::proxy_and_user_agent(gpui::http_client::read_proxy_from_env(), user_agent)

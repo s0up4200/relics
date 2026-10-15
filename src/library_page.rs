@@ -48,6 +48,8 @@ enum Control {
 }
 
 pub struct LibraryPage {
+    focus_handle: gpui::FocusHandle,
+    focus_pending: bool,
     client: Arc<Client>,
     pub library: wire::UserLibrary,
     shows: bool,
@@ -111,6 +113,8 @@ impl LibraryPage {
             }
         });
         Self {
+            focus_handle: cx.focus_handle(),
+            focus_pending: true,
             client,
             library,
             shows,
@@ -139,6 +143,7 @@ impl LibraryPage {
     /// Gives the focus ring to the part of the page that has the keyboard focus. A control that went away
     /// with a removed chip or a tab change gives the focus to the last control.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        self.focus_pending = true;
         self.bar = self.bar.min(self.controls().len() - 1);
         let content = self.active && !self.in_bar;
         let tab = self.tab;
@@ -254,18 +259,39 @@ impl LibraryPage {
         if changed {
             self.apply(cx);
         }
+        if outcome == Outcome::Closed {
+            self.focus_pending = true;
+        }
         cx.notify();
         Some(outcome)
+    }
+
+    fn edit_menu(&mut self, text: filter_panel::Text, value: String, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.menu {
+            menu.edit(text, value);
+        }
+        cx.notify();
+    }
+
+    fn menu_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
+        self.key(key, window, cx);
+    }
+
+    pub fn editing(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.menu.as_ref().is_some_and(|menu| menu.editing(window, cx))
     }
 
     fn click_menu(&mut self, row: usize, cx: &mut Context<Self>) {
         self.step_menu(|menu, browse| menu.click(row, browse), cx);
     }
 
-    /// Handles a key. `typed` is the text that the key types, for a text field of the filter panel. Returns
+    /// Handles a page action. Returns
     /// false when the page does not use the key, for example h or Left at the left edge.
-    pub fn key(&mut self, key: Key, typed: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, typed, browse), cx) {
+    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(menu) = &mut self.menu {
+            menu.sync_focus(window, cx);
+        }
+        if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, browse), cx) {
             return outcome != Outcome::Unused;
         }
         if self.in_bar {
@@ -400,7 +426,11 @@ impl LibraryPage {
 }
 
 impl Render for LibraryPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.active && self.focus_pending {
+            self.focus_pending = false;
+            window.focus(&self.focus_handle, cx);
+        }
         let t = cx.omarchy().clone();
         let (mut tabs, mut pills, mut chips) = (Vec::new(), Vec::new(), Vec::new());
         for (index, control) in self.controls().iter().enumerate() {
@@ -445,8 +475,15 @@ impl Render for LibraryPage {
             if !chips.is_empty() {
                 header = header.child(div().flex().flex_wrap().gap(px(8.)).children(chips));
             }
-            if let Some(menu) = &self.menu {
-                header = header.child(menu.render(&self.browse, self.active, cx, Self::click_menu));
+            if let Some(menu) = &mut self.menu {
+                header = header.child(menu.render(
+                    &self.browse,
+                    self.active,
+                    &self.focus_handle,
+                    window,
+                    cx,
+                    filter_panel::Events { click: Self::click_menu, edit: Self::edit_menu, key: Self::menu_key },
+                ));
             }
         }
         let content = match (self.tab, &self.recommended) {
@@ -475,7 +512,7 @@ impl Render for LibraryPage {
                 .into_any_element(),
             (Tab::Library, _) => div().size_full().px(px(40.)).child(self.grid.clone()).into_any_element(),
         };
-        div().size_full().flex().flex_col().child(header).child(
+        div().track_focus(&self.focus_handle).size_full().flex().flex_col().child(header).child(
             div()
                 .flex_1()
                 .min_h_0()

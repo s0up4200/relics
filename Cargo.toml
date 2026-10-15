@@ -49,4 +49,5 @@ async-net = "=2.0.0"
 hyper-util = { version = "=0.1.21", default-features = false, features = ["client-proxy"] }
 
 [dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7", features = ["test-support"] }
 http_client = { package = "gpui-pre-http-client", version = "=0.3.7", features = ["test-support"] }

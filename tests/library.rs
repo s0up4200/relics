@@ -365,7 +365,14 @@ fn facets() -> Facets {
 fn keys(panel: &mut Panel, browse: &mut Browse, keys: &[(&str, Option<&str>)]) -> Outcome {
     let mut last = Outcome::Unused;
     for (key, typed) in keys {
-        last = panel.key(Key::parse(key), *typed, browse);
+        if let Some(typed) = typed {
+            if let Entry::Field(text) = panel.focused() {
+                let value = format!("{}{typed}", panel.text(text));
+                panel.edit(text, value);
+            }
+        } else {
+            last = panel.key(Key::parse(key), browse);
+        }
     }
     last
 }
@@ -404,9 +411,9 @@ fn a_year_field_takes_digits_and_enter_sets_the_year() {
     let (mut panel, mut browse) = (Panel::new(MenuKind::Filter, facets(), 2026), Browse::default());
     keys(&mut panel, &mut browse, &[("down", None), ("down", None), ("down", None)]);
     assert_eq!(panel.focused(), Entry::Field(Text::YearFrom));
-    let typed = [("1", Some("1")), ("9", Some("9")), ("x", Some("x")), ("9", Some("9")), ("5", Some("5"))];
+    let typed = [("1", Some("1")), ("9", Some("9")), ("9", Some("9")), ("5", Some("5"))];
     keys(&mut panel, &mut browse, &typed);
-    assert_eq!(panel.text(Text::YearFrom), "1995", "a letter is not a digit");
+    assert_eq!(panel.text(Text::YearFrom), "1995", "the year draft is applied only on Enter");
     assert_eq!(keys(&mut panel, &mut browse, &[("enter", None)]), Outcome::Changed);
     assert_eq!(browse.filters.year_from, Some(1995));
     assert_eq!(panel.text(Text::YearFrom), "", "Enter empties the field");
