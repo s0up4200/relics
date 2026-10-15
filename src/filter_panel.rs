@@ -204,6 +204,10 @@ impl Panel {
         }
     }
 
+    pub fn refocus(&mut self) {
+        self.focus_pending = true;
+    }
+
     pub fn editing(&self, window: &Window, cx: &gpui::App) -> bool {
         self.editors.values().any(|(editor, _)| editor.read(cx).focus_handle(cx).is_focused(window))
     }

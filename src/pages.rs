@@ -705,7 +705,12 @@ impl Pages {
     }
 
     /// Opens or closes the sidebar menu.
-    fn toggle_menu(&mut self, cx: &mut Context<Self>) {
+    fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.page {
+            Page::Search(page) => page.update(cx, |page, cx| page.sync_focus(window, cx)),
+            Page::Library(page) => page.update(cx, |page, cx| page.sync_focus(window, cx)),
+            _ => {}
+        }
         self.menu = if self.menu.is_some() { None } else { Some(0) };
         self.page.set_active(self.menu.is_none() && self.sidebar.is_none(), cx);
         cx.notify();
@@ -719,12 +724,12 @@ impl Pages {
     }
 
     /// A key while the menu is open. The menu takes each key.
-    fn menu_key(&mut self, selected: usize, key: Key, cx: &mut Context<Self>) {
+    fn menu_key(&mut self, selected: usize, key: Key, window: &mut Window, cx: &mut Context<Self>) {
         match key {
             Key::Down => self.menu = Some((selected + 1).min(MENU.len() - 1)),
             Key::Up => self.menu = Some(selected.saturating_sub(1)),
             Key::Other("enter") => self.choose(MENU[selected].0, cx),
-            Key::Other("escape" | "backspace" | "m") => self.toggle_menu(cx),
+            Key::Other("escape" | "backspace" | "m") => self.toggle_menu(window, cx),
             _ => {}
         }
         cx.stop_propagation();
@@ -742,7 +747,7 @@ impl Pages {
         let keystroke = &event.keystroke;
         let key = Key::parse(&keystroke.key);
         if let Some(selected) = self.menu {
-            return self.menu_key(selected, key, cx);
+            return self.menu_key(selected, key, window, cx);
         }
         let used = (self.sidebar.is_none() && self.page_key(key, window, cx))
             || match (self.sidebar, key) {
@@ -756,7 +761,7 @@ impl Pages {
                     true
                 }
                 (_, Key::Other("m")) => {
-                    self.toggle_menu(cx);
+                    self.toggle_menu(window, cx);
                     true
                 }
                 (_, Key::Other(key)) if let Some(row) = shortcut(key, &self.libraries) => {
@@ -879,6 +884,7 @@ impl Pages {
         let initial = self.profile_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         div()
             .id("account-menu")
+            .debug_selector(|| "account-menu".into())
             .clickable()
             .px(px(10.))
             .py(px(8.))
@@ -887,7 +893,7 @@ impl Pages {
             .items_center()
             .gap(px(12.))
             .when(rail, |row| row.justify_center())
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx)))
             .when(rail, |row| row.text_color(t.bright).child(initial))
             .when(!rail, |row| {
                 row.child(

@@ -222,6 +222,9 @@ impl Search {
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
+        if active && let Some(menu) = &mut self.menu {
+            menu.refocus();
+        }
         self.set_focus(self.focus, cx);
     }
 
@@ -437,9 +440,8 @@ impl Search {
         }
     }
 
-    /// Handles a page action. Returns false when the page does not use the key,
-    /// for example Esc in an empty field.
-    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    /// Records the editor before a page action or the account menu moves focus.
+    pub fn sync_focus(&mut self, window: &Window, cx: &gpui::App) {
         if self.field.read(cx).focus_handle(cx).is_focused(window) {
             self.focus = Focus::Field;
             self.menu = None;
@@ -447,6 +449,12 @@ impl Search {
         if let Some(menu) = &mut self.menu {
             menu.sync_focus(window, cx);
         }
+    }
+
+    /// Handles a page action. Returns false when the page does not use the key,
+    /// for example Esc in an empty field.
+    pub fn key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.sync_focus(window, cx);
         if let Some(outcome) = self.step_menu(|menu, browse| menu.key(key, browse), cx) {
             return outcome != Outcome::Unused;
         }

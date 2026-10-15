@@ -390,3 +390,52 @@ fn search_mouse_and_sidebar_entry_focus_the_real_editor(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(queries(&seen).last().unwrap()["q"], "sidebar");
 }
+
+#[gpui::test]
+fn closing_the_account_menu_restores_the_filter_field_and_selection(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+        relics::text_input::init(cx);
+    });
+    for search in [true, false] {
+        for to_year in [false, true] {
+            let (client, seen) = client();
+            let (_, cx) =
+                cx.add_window_view(|window, cx| PageWindow(cx.new(|cx| Pages::new(client, "Test".into(), window, cx))));
+            cx.run_until_parked();
+            if search {
+                cx.simulate_keystrokes("/");
+                cx.simulate_input("heat");
+                cx.executor().advance_clock(Duration::from_millis(200));
+                cx.run_until_parked();
+                cx.simulate_keystrokes("down right enter down down down");
+            } else {
+                cx.simulate_keystrokes("2 up right enter down down down");
+            }
+            if to_year {
+                cx.simulate_keystrokes("tab");
+            }
+            cx.simulate_input("2004");
+            cx.simulate_keystrokes("home right shift-right");
+            let count = queries(&seen).len();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let menu = cx.debug_bounds("account-menu").unwrap();
+            cx.simulate_click(menu.center(), gpui::Modifiers::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_input("9");
+            assert_eq!(queries(&seen).len(), count, "editing does not apply the filter");
+            cx.simulate_keystrokes("enter");
+            let query = queries(&seen).pop().unwrap();
+            assert_eq!(
+                query["groups"][0]["rules"],
+                serde_json::json!([
+                    {"field":"year", "op": if to_year { "lte" } else { "gte" }, "value":2904}
+                ]),
+                "search={search}, to_year={to_year}"
+            );
+        }
+    }
+}
