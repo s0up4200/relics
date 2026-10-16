@@ -69,6 +69,29 @@ enum Close {
     Lost,
 }
 
+/// A drop this long before the end of the connection time is still planned. The margin covers the time of the
+/// upgrade answer and a clock that is a few seconds behind the Server.
+const MARGIN: Duration = Duration::from_secs(5);
+
+/// The connection time of a socket: the time of the ticket, or less when the access token expires sooner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lifetime(Duration);
+
+impl Lifetime {
+    /// `expiry` is the expiry of the access token, `None` when the app cannot read it. `now` is the time after the
+    /// handshake. A token that expired during the ticket call or the handshake leaves no time.
+    fn new(ticket: Duration, expiry: Option<SystemTime>, now: SystemTime) -> Self {
+        let left = expiry.map(|exp| exp.duration_since(now).unwrap_or_default());
+        Self(left.map_or(ticket, |left| left.min(ticket)))
+    }
+
+    /// How a stream end or a socket error counts after `elapsed` of listening: planned at the end of the
+    /// connection time, else lost.
+    fn dropped(self, elapsed: Duration) -> Close {
+        if elapsed + MARGIN >= self.0 { Close::Planned } else { Close::Lost }
+    }
+}
+
 /// The close code that follows `access_changed`.
 const ACCESS_CHANGED: u16 = 4001;
 
@@ -176,7 +199,7 @@ async fn run(client: Arc<Client>, changes: mpsc::UnboundedSender<LiveChange>) {
 
 /// Mints a ticket and opens the socket with it. Also gives the connection time of the socket: the time of the ticket,
 /// or less when the access token expires sooner.
-async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStream>, Duration)> {
+async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStream>, Lifetime)> {
     // The client refreshes the access token after a 401. After a 403 it waits for the user to enter the PIN of the
     // Profile, for as long as the user takes, so the deadline starts after the ticket.
     let ticket: Ticket = client.call_with_retries(Method::POST, "events/ws-ticket", None).await?;
@@ -185,11 +208,8 @@ async fn connect(client: &Client) -> anyhow::Result<(WebSocketStream<ConnectStre
         Either::Left((socket, _)) => socket?,
         Either::Right(_) => anyhow::bail!("no answer in {} s", HANDSHAKE.as_secs()),
     };
-    // A token that expired during the ticket call or the handshake leaves no time, not the full connection time.
-    let token_left = token_expiry(&client.tokens().access_token)
-        .map(|exp| exp.duration_since(SystemTime::now()).unwrap_or_default());
-    let lifetime = Duration::from_secs(ticket.max_connection_seconds);
-    Ok((socket, token_left.map_or(lifetime, |left| left.min(lifetime))))
+    let expiry = token_expiry(&client.tokens().access_token);
+    Ok((socket, Lifetime::new(Duration::from_secs(ticket.max_connection_seconds), expiry, SystemTime::now())))
 }
 
 /// Opens the socket with `ticket`.
@@ -248,7 +268,7 @@ async fn open(client: &Client, url: &Url) -> anyhow::Result<TcpStream> {
 /// unless the access changed. A drop at the end of the connection time `lifetime` is also a planned close.
 async fn listen(
     mut socket: WebSocketStream<ConnectStream>,
-    lifetime: Duration,
+    lifetime: Lifetime,
     profile: &str,
     changes: &mpsc::UnboundedSender<LiveChange>,
 ) -> Close {
@@ -260,9 +280,8 @@ async fn listen(
         // tungstenite answers each ping while it reads.
         let message = match select(socket.next(), Timer::after(SILENCE)).await {
             Either::Left((Some(Ok(message)), _)) => message,
-            // The margin covers the time of the upgrade answer and a clock that is a few seconds behind the Server.
-            Either::Left(_) if opened.elapsed() + Duration::from_secs(5) >= lifetime => return Close::Planned,
-            _ => return Close::Lost,
+            Either::Left(_) => return lifetime.dropped(opened.elapsed()),
+            Either::Right(_) => return Close::Lost,
         };
         match message {
             Message::Text(text) => match decode(&text, profile) {
@@ -286,7 +305,44 @@ async fn listen(
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, LiveChange, decode};
+    use std::time::{Duration, SystemTime};
+
+    use super::{Close, Frame, Lifetime, LiveChange, decode};
+
+    const NOW: SystemTime = SystemTime::UNIX_EPOCH;
+
+    fn secs(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn the_connection_time_is_the_ticket_or_the_token_time_when_that_is_shorter() {
+        assert_eq!(Lifetime::new(secs(300), None, NOW), Lifetime(secs(300)), "no readable expiry");
+        assert_eq!(Lifetime::new(secs(300), Some(NOW + secs(60)), NOW), Lifetime(secs(60)));
+        assert_eq!(Lifetime::new(secs(300), Some(NOW + secs(900)), NOW), Lifetime(secs(300)));
+        assert_eq!(Lifetime::new(secs(300), Some(NOW), NOW), Lifetime(secs(0)), "the token expires now");
+        let after = NOW + secs(10);
+        assert_eq!(Lifetime::new(secs(300), Some(NOW), after), Lifetime(secs(0)), "an expired token");
+        assert_eq!(Lifetime::new(secs(0), None, NOW), Lifetime(secs(0)), "a ticket with no time");
+    }
+
+    #[test]
+    fn a_drop_is_planned_from_5_seconds_before_the_end_of_the_connection_time() {
+        let lifetime = Lifetime(secs(300));
+        assert_eq!(lifetime.dropped(secs(295) - Duration::from_millis(1)), Close::Lost);
+        assert_eq!(lifetime.dropped(secs(295)), Close::Planned);
+        assert_eq!(lifetime.dropped(secs(295) + Duration::from_millis(1)), Close::Planned);
+        assert_eq!(lifetime.dropped(secs(400)), Close::Planned);
+        assert_eq!(lifetime.dropped(secs(0)), Close::Lost);
+    }
+
+    #[test]
+    fn with_no_time_past_the_margin_each_drop_is_planned() {
+        let expired = Lifetime::new(secs(300), Some(NOW), NOW + secs(10));
+        assert_eq!(expired.dropped(secs(0)), Close::Planned);
+        assert_eq!(Lifetime(secs(5)).dropped(secs(0)), Close::Planned, "the margin covers all 5 seconds");
+        assert_eq!(Lifetime(secs(6)).dropped(secs(0)), Close::Lost);
+    }
 
     fn event(channel: &str, event: &str, data: serde_json::Value) -> String {
         serde_json::json!({"type": "event", "channel": channel, "event": event, "event_id": "1", "timestamp": "t", "data": data})

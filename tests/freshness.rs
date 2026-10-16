@@ -94,6 +94,7 @@ impl Server {
         let path = req.path.split('?').next().unwrap();
         match (req.method.as_str(), path) {
             (_, "system/info") => ok("get_system_info_ok.json"),
+            (_, "profiles") => ok("list_profiles_ok.json"),
             (_, "sync/progress") => ok("sync_progress_ok.json"),
             (_, "profiles/p-owner/verify-pin") => ok("verify_profile_pin_ok.json"),
             (_, "catalog/items/movie:heat-1995/versions") => ok("list_catalog_item_versions_ok.json"),
@@ -195,6 +196,8 @@ fn make_rig(
             reply.ok_or_else(|| anyhow::anyhow!("no route to host"))
         }
     });
+    // The Library window makes the client of each Server that it switches to with the HTTP client of the app.
+    cx.update(|cx| cx.set_http_client(http.clone()));
     let client = Arc::new(common::client(http, "https://silo.test/"));
     client.set_profile(Some("p-owner".into()));
     let (changes, stream) = mpsc::unbounded();
@@ -203,18 +206,28 @@ fn make_rig(
         let pages = cx.new(|cx| Pages::with_changes(pages_client.clone(), "Test".into(), stream.boxed(), window, cx));
         let library = library.then(|| {
             let mut state = relics::state::State::fresh();
-            state.servers.push(relics::state::SavedServer {
-                id: "server-1".into(),
-                url: "https://silo.test/".into(),
-                accounts: vec![relics::state::SavedAccount {
-                    id: "account-1".into(),
-                    username: "Test".into(),
-                    last_profile: Some("p-owner".into()),
-                }],
-            });
+            // The Server list has a second Server, with the same fake behind it.
+            for (n, url) in [(1, "https://silo.test/"), (2, "https://silo2.test/")] {
+                state.servers.push(relics::state::SavedServer {
+                    id: format!("server-{n}"),
+                    url: url.into(),
+                    accounts: vec![relics::state::SavedAccount {
+                        id: format!("account-{n}"),
+                        username: "Test".into(),
+                        last_profile: Some("p-owner".into()),
+                    }],
+                });
+            }
             state.active = Some(("server-1".into(), "account-1".into()));
-            let profiles: relics::api::wire::ProfileCollection =
+            let tokens = relics::api::Tokens { access_token: "acc".into(), refresh_token: "ref".into() };
+            let tokens = (1..=2).map(|n| ((format!("server-{n}"), format!("account-{n}")), tokens.clone())).collect();
+            // The Profile picker has a second Profile, with no PIN.
+            let mut profiles: serde_json::Value =
                 serde_json::from_str(&common::fixture("list_profiles_ok.json")).unwrap();
+            let mut kid = profiles["items"][0].clone();
+            (kid["id"], kid["name"]) = ("p-kid".into(), "Kid".into());
+            profiles["items"].as_array_mut().unwrap().push(kid);
+            let profiles: relics::api::wire::ProfileCollection = serde_json::from_value(profiles).unwrap();
             let mut profiles = profiles.items;
             profiles[0].has_pin = true;
             let session = relics::library::Session {
@@ -223,6 +236,7 @@ fn make_rig(
                 client: pages_client,
                 pages: pages.clone(),
                 profiles,
+                tokens,
             };
             cx.new(|cx| relics::library::LibraryWindow::with_session(session, window, cx))
         });
@@ -694,6 +708,73 @@ fn library_defers_reload_behind_profile_server_and_pin_screens(cx: &mut TestAppC
     assert_eq!(server.requests("POST", "profiles/p-owner/verify-pin").len(), 1);
     // The held request retries with the token, then one queued refresh runs.
     assert_eq!(server.count("catalog/filters"), filters + 2);
+}
+
+/// Keeps progress that the Server did not get, holds the sync of the recovery, and lets the Server answer again.
+/// With `fail`, the held sync fails.
+fn hold_recovery_sync(client: &Client, server: &Server, fail: bool, cx: &mut VisualTestContext) {
+    keep_progress(client, server, cx);
+    if fail {
+        server.fail(&["sync/progress"]);
+    }
+    server.hold(&["sync/progress"]);
+    recover(cx);
+    assert_eq!(server.requests("POST", "sync/progress").len(), 1, "the recovery sync waits");
+}
+
+/// Completes the held sync of the old recovery and checks that it went to the old Profile on the old Server, and
+/// that it reloads none of the pages that replaced the old pages.
+fn complete_old_sync(server: &Server, cx: &mut VisualTestContext) {
+    let home = server.count("home/layout");
+    server.hold(&[]);
+    server.fail(&[]);
+    server.release();
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(60));
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home, "the old recovery reloads no replacement page");
+    let syncs = server.requests("POST", "sync/progress");
+    assert_eq!(syncs.len(), 1, "no other Profile or Server sends the kept progress");
+    assert_owner_progress(&syncs[0]);
+}
+
+/// The sync sends the kept progress of `p-owner` to the first Server.
+fn assert_owner_progress(sync: &Seen) {
+    assert!(sync.url.starts_with("https://silo.test/"), "{}", sync.url);
+    assert_eq!(sync.header("x-profile-id"), Some("p-owner"));
+    let body: serde_json::Value = serde_json::from_str(&sync.body).unwrap();
+    assert_eq!(body["items"][0]["position_ms"], 75500);
+}
+
+#[gpui::test]
+fn old_recovery_cannot_reload_the_pages_of_the_next_profile(cx: &mut TestAppContext) {
+    let (_, cx, server, _, client) = make_rig(cx, true);
+    hold_recovery_sync(&client, &server, false, cx);
+    let home = server.count("home/layout");
+    cx.simulate_keystrokes("m enter right enter");
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home + 1, "the pages of the next Profile load");
+    complete_old_sync(&server, cx);
+    futures::executor::block_on(client.sync_progress()).unwrap();
+    assert_eq!(server.requests("POST", "sync/progress").len(), 1, "the next Profile has no kept progress");
+}
+
+#[gpui::test]
+fn old_recovery_cannot_reload_the_pages_of_the_next_server(cx: &mut TestAppContext) {
+    let (_, cx, server, _, client) = make_rig(cx, true);
+    hold_recovery_sync(&client, &server, true, cx);
+    let home = server.requests("GET", "home/layout").len();
+    cx.simulate_keystrokes("m down enter down enter");
+    cx.run_until_parked();
+    let next = server.requests("GET", "home/layout");
+    assert_eq!(next.len(), home + 1, "the pages of the next Server load");
+    assert!(next[home].url.starts_with("https://silo2.test/"), "{}", next[home].url);
+    complete_old_sync(&server, cx);
+    cx.simulate_keystrokes("m down enter up enter");
+    cx.run_until_parked();
+    let syncs = server.requests("POST", "sync/progress");
+    assert_eq!(syncs.len(), 2, "the progress of the failed sync goes out when its Account is active again");
+    assert_owner_progress(&syncs[1]);
 }
 
 #[gpui::test]
