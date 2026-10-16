@@ -371,10 +371,11 @@ enum Raw {
     Property(String, Option<String>),
 }
 
-/// An mpv handle with the options of `Player::open`. Its event thread logs each raw event.
+/// An mpv handle with the options of `Player::open`. Its event thread logs each raw event with the time that the
+/// event reached the thread.
 struct Recorder {
     mpv: Arc<libmpv2::Mpv>,
-    log: Arc<Mutex<Vec<Raw>>>,
+    log: Arc<Mutex<Vec<(Instant, Raw)>>>,
     events: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -404,10 +405,12 @@ fn recorder() -> Recorder {
         let (mpv, log) = (mpv.clone(), log.clone());
         move || {
             loop {
+                let received;
                 // SAFETY: the event and its data stay valid until the next wait on this handle, and only this thread
                 // waits.
                 let raw = unsafe {
                     let event = &*mpv_wait_event(mpv.ctx.as_ptr().cast(), -1.0);
+                    received = Instant::now();
                     match event.event_id {
                         SHUTDOWN => return,
                         START_FILE => Raw::Start(*event.data.cast::<i64>()),
@@ -428,7 +431,7 @@ fn recorder() -> Recorder {
                         _ => continue,
                     }
                 };
-                log.lock().unwrap().push(raw);
+                log.lock().unwrap().push((received, raw));
             }
         }
     });
@@ -436,26 +439,31 @@ fn recorder() -> Recorder {
 }
 
 impl Recorder {
-    /// Replaces the file with `url` at `start`, and returns the playlist entry id of the load. The log stays locked
-    /// during the call, so each event after the `Loadfile` item reached the event thread after the call returned.
+    /// Replaces the file with `url` at `start`, and returns the playlist entry id of the load. The `Loadfile` item has
+    /// the time that the call returned, so each event after it in the log reached the event thread after the call
+    /// returned. The id is correct only for a file that is not a playlist, because mpv can replace a playlist entry
+    /// with new entries before the property read.
     fn load(&self, url: &str, start: f64) -> i64 {
-        let mut log = self.log.lock().unwrap();
         self.mpv.command("loadfile", &[url, "replace", "-1", &format!("start={start}")]).unwrap();
+        let returned = Instant::now();
         // `replace` empties the playlist, so the new entry is the first one.
         let id = self.mpv.get_property("playlist/0/id").unwrap();
-        log.push(Raw::Loadfile(id));
+        self.log.lock().unwrap().push((returned, Raw::Loadfile(id)));
         id
     }
 
+    /// The log in the order of time.
     fn log(&self) -> Vec<Raw> {
-        self.log.lock().unwrap().clone()
+        let mut log = self.log.lock().unwrap().clone();
+        log.sort_by_key(|(at, _)| *at);
+        log.into_iter().map(|(_, raw)| raw).collect()
     }
 
     /// Waits up to 15 s for an event at or after the log index `from` that `want` accepts, and returns its index.
     fn wait(&self, from: usize, want: impl Fn(&Raw) -> bool) -> usize {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if let Some(at) = self.log.lock().unwrap().iter().skip(from).position(&want) {
+            if let Some(at) = self.log().iter().skip(from).position(&want) {
                 return from + at;
             }
             assert!(Instant::now() < deadline, "no such event in {}", show(&self.log()));
@@ -587,7 +595,11 @@ fn an_hls_load_that_cannot_open_ends_three_more_entries_with_an_error() {
     // and mpv opens the manifest as a playlist of the three segments.
     let stub = stub(2);
     let rec = recorder();
-    let a = rec.load(&format!("{}/hls/index.m3u8", stub.url), 0.0);
+    rec.load(&format!("{}/hls/index.m3u8", stub.url), 0.0);
+    // The id of the manifest entry comes from its start-file, because the redirect can replace the first entry of the
+    // playlist before a property read.
+    rec.wait(0, |r| matches!(r, Raw::Start(_)));
+    let a = rec.log().iter().find_map(|r| if let Raw::Start(id) = r { Some(*id) } else { None }).unwrap();
     rec.wait(0, |r| *r == Raw::End { id: a + 3, reason: REASON_ERROR });
     let log = rec.log();
     let ends: Vec<&Raw> = log.iter().filter(|r| matches!(r, Raw::End { .. })).collect();

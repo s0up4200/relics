@@ -22,7 +22,7 @@ Two faults are confirmed. Both come from the same gap. The old file plays on aft
 Other results:
 
 - mpv names the playlist entry of each `start-file` and `end-file` event, but libmpv2 6.0 drops that id. Property change events name no entry.
-- In 30 replacements with real libmpv, no event of the old file reached the event thread after the next `loadfile` returned. The only exception was the `end-file` of the old file, which the adapter skips.
+- In 100 replacements with real libmpv, no event of the old file reached the event thread after the next `loadfile` returned. The only exception was the `end-file` of the old file, which the adapter skips. In one other run, a position value of the old file reached the event thread while the next `loadfile` ran.
 - The recommended fix is a lifecycle rule in the Playback session, with no change to the adapter. Until the session sends its first load, it drops each file event. It counts an end of file only after the file of its own load loaded. This removes both confirmed faults as the tests reproduce them, and keeps the handle reuse. It does not find the load of an event.
 - Entry ids in the adapter are the complete fix, but they need unsafe code. They are worth the cost only if the remaining race shows up.
 
@@ -60,9 +60,9 @@ The tests in `tests/mpv.rs` run real libmpv (`vo=null ao=null`) against the loca
 
 | Test | Observation |
 |---|---|
-| `the_end_file_of_the_old_load_comes_after_the_next_load_returns_and_names_its_entry` | The test replaces a file with another file, as a new Item or a version switch does. Then it loads the same file again at a position, as a reload does. In both cases, the `end-file` of the old entry (reason `stop`) reaches the event thread after the next `loadfile` returns, and before the `start-file` of the new entry. |
+| `the_end_file_of_the_old_load_comes_after_the_next_load_returns_and_names_its_entry` | The test replaces a file with another file, as a new Item or a version switch does. Then it loads the same file again at a position, as a reload does. In both cases, the `end-file` of the old entry (reason `stop`) reaches the event thread after the next `loadfile` returns, and before the `start-file` of the new entry. The recorder logs each event with the time that it reached the event thread. |
 | `a_file_at_its_end_reports_eof_reached_once_and_ends_with_stop_at_the_next_load` | A file at its end reports `eof-reached=yes` once, before the next load. Its `end-file` has the reason `stop`, so the adapter makes one `EndOfFile` for it. |
-| `no_value_of_the_old_file_arrives_after_the_next_load_returns_and_no_end_before_the_file_loads` | 10 replacements before, at and after the end of the old file. No value of the old file arrives after the next `loadfile` returns. No `eof-reached=yes` arrives between the `start-file` and the `file-loaded` of an entry. Three runs (30 replacements) passed. |
+| `no_value_of_the_old_file_arrives_after_the_next_load_returns_and_no_end_before_the_file_loads` | 10 replacements before, at and after the end of the old file. No value of the old file arrives after the next `loadfile` returns. No `eof-reached=yes` arrives between the `start-file` and the `file-loaded` of an entry. Ten runs (100 replacements) passed. |
 | `an_hls_load_that_cannot_open_ends_three_more_entries_with_an_error` | The test loads an HLS manifest whose segments fail. The load ends as `redirect`, and then three new entries (one per segment) end with an error. The adapter sends three `LoadFailed` for one load. |
 
 A probe that was not kept loaded two files back to back. In 5 of 5 runs, the first entry got no `start-file` and no `end-file`. So a count of `start-file` events cannot match events to loads. Only the entry id can.
@@ -101,7 +101,7 @@ This fault needs no timing accident. Two fast clicks on Next, or a pick while a 
 
 - An event in the channel when the next load starts. The adapter can send an event of the old file just before the main thread runs the start reply of the next Item. The main thread then sends the `Load`. Only after that does it read the old event. A late `EndOfFile` then starts the recovery of the new session. The result is one extra token refresh and one reload. The recovery chain also moves to `Reloaded`, so the next real failure skips the refresh and asks for a replan. The window starts when the start reply arrives, and it ends when the main thread runs the task of that reply. No test reproduces it.
 - Three `LoadFailed` from one HLS load. The first starts the recovery. The other two do nothing while the refresh runs. If the refresh returned between them, a late one would move the chain to a replan. With a real server, the refresh takes longer than the segment failures, so this is unlikely.
-- A property value that mpv reads just before the next `loadfile`. The source lets it arrive after the call returns, because mpv reads the value before it processes the command. The tests did not see it in 30 replacements.
+- A property value that mpv reads just before the next `loadfile`. The source lets it arrive after the call returns, because mpv reads the value before it processes the command. The tests did not see that in 100 replacements. In an earlier version of the recorder, one `time-pos` value of the old file reached the event thread while the call ran. In the app, the controller reads such an event only after the `Load` returns, so it reaches the new session. A late `Position` does no harm, because the session drops it until `FileLoaded`. A late `EndOfFile` in the same place is the first suspected race.
 
 ## Which events can name their load
 
@@ -128,7 +128,7 @@ No current behavior changes with these rules. In the tests, mpv sends no `eof-re
 The complete fix attributes events by entry id. Do it only if the remaining race shows up in use:
 
 - The adapter reads the raw `mpv_event` through `Mpv::ctx` and the C API, to get the entry id of `start-file` and `end-file`. That needs unsafe code, and `libmpv2-sys` (already in `Cargo.lock`) as a direct dependency, or a change to libmpv2.
-- `Handle::load` returns the entry id of the load (`playlist/0/id` after `replace`).
+- `Handle::load` returns the entry id of the load. Use the result of the `loadfile` command, not `playlist/0/id`, because a playlist entry can redirect before the property read.
 - The event thread tags each input with the entry of the last `start-file`, and clears the tag at `end-file`. On a `redirect`, the inserted entries take the load of the entry that ended.
 - Property values follow the stale rule of the mpv source, so this fix depends on behavior that the mpv documentation does not promise. Keep `no_value_of_the_old_file_arrives_after_the_next_load_returns_and_no_end_before_the_file_loads` to catch a change in mpv.
 - The controller drops each input whose entry is not the entry of the latest `Load`.
@@ -136,7 +136,7 @@ The complete fix attributes events by entry id. Do it only if the remaining race
 ## Limits
 
 - The tests use `vo=null ao=null`. The Player view uses `vo=libmpv` and a real audio output, which can change the timing of the end of file.
-- 30 replacements on one machine show no late value. They do not prove that none can arrive.
+- 100 replacements on one machine show no value after the call returns. They do not prove that none can arrive.
 - No test drives the controller with real libmpv, because `InView` needs a Wayland surface. The confirmed faults combine a real mpv fact (the old file plays on and reports its end) with a controller reproduction that uses the fake media.
 - All requests went to the local HTTP stub or the fake Silo server.
 
