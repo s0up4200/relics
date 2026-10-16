@@ -600,9 +600,15 @@ fn an_hls_load_that_cannot_open_ends_three_more_entries_with_an_error() {
     // playlist before a property read.
     rec.wait(0, |r| matches!(r, Raw::Start(_)));
     let a = rec.log().iter().find_map(|r| if let Raw::Start(id) = r { Some(*id) } else { None }).unwrap();
-    rec.wait(0, |r| *r == Raw::End { id: a + 3, reason: REASON_ERROR });
+    // mpv documents only that the ids are unique, so the test does not compute the ids of the new entries.
+    let error = |r: &Raw| matches!(r, Raw::End { reason: REASON_ERROR, .. });
+    let at = rec.wait(0, error);
+    let at = rec.wait(at + 1, error);
+    rec.wait(at + 1, error);
     let log = rec.log();
-    let ends: Vec<&Raw> = log.iter().filter(|r| matches!(r, Raw::End { .. })).collect();
-    let error = |id| Raw::End { id, reason: REASON_ERROR };
-    assert_eq!(ends, [&Raw::End { id: a, reason: REASON_REDIRECT }, &error(a + 1), &error(a + 2), &error(a + 3)]);
+    let ends: Vec<(i64, c_int)> =
+        log.iter().filter_map(|r| if let Raw::End { id, reason } = r { Some((*id, *reason)) } else { None }).collect();
+    let errors: std::collections::HashSet<i64> = ends[1..].iter().map(|(id, _)| *id).collect();
+    assert_eq!(ends[0], (a, REASON_REDIRECT), "{}", show(&log));
+    assert!(ends.len() == 4 && errors.len() == 3 && !errors.contains(&a), "{}", show(&log));
 }
