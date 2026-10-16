@@ -1,5 +1,6 @@
 //! The mpv adapter with real libmpv (`vo=null ao=null`) against a local HTTP stub on
 //! 127.0.0.1. The stub serves the test video from tests/media/ (scripts/make-test-video.sh).
+#![allow(clippy::disallowed_types)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
