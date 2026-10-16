@@ -20,7 +20,8 @@ Fixes # (issue)
 
 <!--- Delete this section if your change has no visible UI.
       Screenshots and recordings on GitHub are public.
-      Mask each token and your Silo server address in every capture. --->
+      Mask each token and your Silo server address in every capture.
+      The maintainer can publish private captures as a brrbin Evidence and link it here. --->
 
 ## Checklist
 
