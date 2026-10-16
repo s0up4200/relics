@@ -249,6 +249,11 @@ impl ProfilePicker {
 
 impl Render for ProfilePicker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // When the picker shows at launch, its first frame is Home ready. A deferred call runs when the window has
+        // drawn the frame.
+        if crate::startup::on() {
+            window.defer(cx, |_, _| crate::startup::mark("home-ready"));
+        }
         let t = cx.omarchy().clone();
         let page = div()
             .track_focus(&self.focus_handle)

@@ -471,7 +471,12 @@ pub fn image(url: Option<String>, thumb: Option<Arc<RenderImage>>, width: f32) -
     let id = SharedString::from(url.clone());
     let source = move |window: &mut Window, cx: &mut App| {
         let target = (width * window.scale_factor()).ceil() as u32;
-        global(cx).update(cx, |cache, cx| cache.load(&url, target, window, cx))
+        let image = global(cx).update(cx, |cache, cx| cache.load(&url, target, window, cx));
+        // A deferred call runs when the window has drawn the frame.
+        if matches!(image, Some(Ok(_))) && crate::startup::on() {
+            window.defer(cx, |_, _| crate::startup::mark("first-poster"));
+        }
+        image
     };
     // GPUI keeps the loading state, and thus shows the Thumbhash, only for an image with an id.
     img(ImageSource::Custom(Arc::new(source)))

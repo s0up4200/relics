@@ -21,6 +21,10 @@ _Avoid_: current server, selected server
 **Library window**:
 The app window where the user browses the Silo library and starts playback. Its app id is `relics`.
 
+**Home ready**:
+The moment after launch when the Library window first paints the Home rows. When the Profile picker shows at launch, the paint of the picker is Home ready.
+_Avoid_: loaded, started
+
 **Account**:
 A user's sign-in on one Server. An Account holds the tokens and owns zero or more Profiles. One Server can have several Accounts in the app.
 _Avoid_: user, login

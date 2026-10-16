@@ -60,6 +60,7 @@ impl AssetSource for Assets {
 }
 
 fn main() {
+    relics::startup::mark("main");
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "--version") {
         println!("{}", relics::BUILD_IDENTITY);
         return;

@@ -30,6 +30,7 @@ use crate::secrets;
 use crate::settings::LocalSettings;
 use crate::settings_page::AccountAction;
 use crate::sign_in::{SignIn, SignedIn};
+use crate::startup;
 use crate::state::{Pair, SavedAccount, SavedServer, State};
 use crate::video;
 
@@ -225,8 +226,9 @@ impl LibraryWindow {
                 false
             }
         });
-        // A debug build (`cargo run`) sends no request to GitHub.
-        let http = (!isolated && !cfg!(debug_assertions)).then(|| cx.http_client());
+        // A debug build (`cargo run`) sends no request to GitHub. A launch with the startup trace also sends none, so
+        // that a series of launches stays under the GitHub limit.
+        let http = (!isolated && !cfg!(debug_assertions) && !startup::on()).then(|| cx.http_client());
         let enabled = !isolated && LocalSettings::load(&crate::settings::directory(cx)).check_releases;
         let release = cx.new(|cx| ReleaseCheck::new(http, enabled, cx));
         let release_changed = cx.observe(&release, |_, _, cx| cx.notify());
@@ -318,6 +320,7 @@ impl LibraryWindow {
         self.set_screen(Screen::Message(format!("Signing in to {}…", server.name)), cx);
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let tokens = secrets::load(&server.id, &account_id).await;
+            startup::mark("keyring");
             this.update_in(cx, |this, window, cx| match tokens {
                 Ok(Some(tokens)) => {
                     let client = Client::new(cx.http_client(), server, this.device.clone(), tokens);
@@ -413,6 +416,7 @@ impl LibraryWindow {
         let account_id = self.account_id();
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let profiles = client.profiles().await;
+            startup::mark("profiles");
             let launch = profiles.as_ref().ok().and_then(|p| api::launch_profile(p, last.as_deref())).cloned();
             let token = match &launch {
                 Some(profile) if profile.has_pin => {
@@ -468,6 +472,7 @@ impl LibraryWindow {
             if let Err(err) = client.load_server_settings().await {
                 eprintln!("relics: cannot read the Server settings: {err}");
             }
+            startup::mark("settings");
             cx.background_spawn({
                 let client = client.clone();
                 async move {
@@ -1006,6 +1011,10 @@ impl LibraryWindow {
 
 impl Render for LibraryWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A deferred call runs when the window has drawn the frame.
+        if startup::on() {
+            window.defer(cx, |_, _| startup::mark("first-frame"));
+        }
         if let Some(view) = self.player_view.clone().filter(|_| self.player.read(cx).in_view()) {
             // No background and no other screen: the video shows through the Player view.
             return focus_scope("library").size_full().child(view).into_any_element();

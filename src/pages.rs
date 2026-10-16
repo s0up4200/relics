@@ -250,6 +250,7 @@ impl Pages {
         let ticket = self.freshness.libraries().begin();
         self._libraries = cx.spawn(async move |this, cx| {
             let result = client.libraries().await;
+            crate::startup::mark("libraries");
             this.update(cx, |this, cx| {
                 match result {
                     Ok(libraries) if this.freshness.libraries().end(ticket) => {
