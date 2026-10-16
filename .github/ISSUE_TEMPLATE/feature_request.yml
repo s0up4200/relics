@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest a new feature or a change to Relics.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > Before you open an issue, search the existing [issues](https://github.com/s0up4200/relics/issues).
+        >
+        > For a large code contribution, open an issue first, so that we can agree on the change before you write code.
+
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What do you want to do that Relics does not let you do now?
+      placeholder: |
+        I watch with subtitles, and I want Relics to remember my subtitle language for each series.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Proposed solution
+      description: How do you want Relics to work? Screenshots or mockups help.
+
+  - type: textarea
+    attributes:
+      label: Alternatives
+      description: Other solutions or workarounds that you tried.
+
+  - type: checkboxes
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues
+          required: true
