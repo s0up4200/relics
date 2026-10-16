@@ -412,6 +412,10 @@ impl Home {
 
 impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A deferred call runs when the window has drawn the frame.
+        if matches!(self.rows, Rows::Home) && !self.sections.is_empty() && crate::startup::on() {
+            window.defer(cx, |_, _| crate::startup::mark("home-ready"));
+        }
         let viewport = window.viewport_size().width.to_f64() as f32;
         // The list draws only the sections near the viewport. Each row keeps its own sideways scroll.
         let page = list(

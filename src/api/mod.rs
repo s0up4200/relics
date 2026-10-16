@@ -414,9 +414,11 @@ impl Client {
         image_size: impl Fn(&wire::SectionLayoutEntry) -> Rung,
     ) -> Result<Vec<HomeSection>, Error> {
         let layout: wire::SectionLayout = self.call(Method::GET, "home/layout", None).await?;
+        crate::startup::mark("home-layout");
         let smallest = layout.sections.iter().map(&image_size).min().unwrap_or(Rung::Small);
         let path = format!("home/sections?image_size={smallest}");
         let mut sections = self.call::<wire::SectionCollection>(Method::GET, &path, None).await?.sections;
+        crate::startup::mark("home-sections");
         let larger = layout.sections.iter().filter(|entry| {
             image_size(entry) != smallest && sections.iter().any(|s| s.id == entry.id && !s.items.is_empty())
         });
@@ -425,6 +427,7 @@ impl Client {
             async move { (entry.id.clone(), self.call::<wire::Section>(Method::GET, &path, None).await) }
         }))
         .await;
+        crate::startup::mark("home-refetch");
         for (id, section) in again {
             if let (Ok(section), Some(old)) = (section, sections.iter_mut().find(|s| s.id == id)) {
                 old.items = section.items;

@@ -30,6 +30,7 @@ pub mod settings;
 pub mod settings_page;
 pub mod sideways;
 pub mod sign_in;
+pub mod startup;
 pub mod state;
 pub mod text_input;
 pub mod theme;
