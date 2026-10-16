@@ -1002,3 +1002,615 @@ fn a_write_that_rejects_pagination_does_not_leave_loading_on_the_background_relo
     server.release();
     cx.run_until_parked();
 }
+
+fn set_reply(server: &Server, path: &str, body: serde_json::Value) {
+    server.replies.lock().unwrap().insert(path.into(), body.to_string());
+}
+
+fn catalog_reply(ids: &[&str]) -> serde_json::Value {
+    let items: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "content_id": id, "type": "movie", "title": id, "genres": [], "keywords": [], "status": "matched"
+            })
+        })
+        .collect();
+    serde_json::json!({"items": items, "total": ids.len(), "total_exact": true, "window_cursor": "w", "page": {"has_more": false}})
+}
+
+#[gpui::test]
+fn grid_replacement_keeps_the_item_then_clamps_and_clears_the_target(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    set_reply(&server, "catalog/query", catalog_reply(&["a", "b", "c"]));
+    let grid = cx.update(|window, cx| {
+        cx.new(|cx| relics::grid::Grid::new(client, relics::api::wire::CatalogQuery::default(), window, cx))
+    });
+    cx.run_until_parked();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&grid, move |_, event: &relics::home::Open, _| {
+            seen.lock().unwrap().push(event.0.content_id.clone());
+        })
+    });
+    grid.update(cx, |grid, cx| {
+        grid.key(Key::Down, cx);
+    });
+    for ids in [&["b", "a", "c"][..], &["x"], &[]] {
+        set_reply(&server, "catalog/query", catalog_reply(ids));
+        grid.update(cx, |grid, cx| grid.reload(0, cx));
+        cx.run_until_parked();
+        grid.update(cx, |grid, cx| {
+            grid.key(Key::Other("enter"), cx);
+        });
+    }
+    assert_eq!(*opened.lock().unwrap(), ["b", "x"]);
+}
+
+fn home_reply(server: &Server, rows: &[(&str, &[&str], bool)]) {
+    let sections: Vec<_> = rows
+        .iter()
+        .map(|(id, ids, all)| {
+            serde_json::json!({
+                "id": id, "section_type": "recently_added", "title": id, "featured": false,
+                "item_limit": 20, "is_custom": false, "customized": false,
+                "total_count": ids.len() + usize::from(*all), "items": catalog_reply(ids)["items"]
+            })
+        })
+        .collect();
+    set_reply(server, "home/layout", serde_json::json!({"sections": sections}));
+    set_reply(server, "home/sections", serde_json::json!({"sections": sections}));
+}
+
+#[gpui::test]
+fn home_replacement_follows_sections_items_and_view_all(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    home_reply(&server, &[("one", &["a", "b"], true), ("two", &["c"], true)]);
+    let home =
+        cx.update(|window, cx| cx.new(|cx| relics::home::Home::new(client, relics::home::Rows::Home, window, cx)));
+    cx.run_until_parked();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let _item = cx.update(|_, cx| {
+        cx.subscribe(&home, move |_, event: &relics::home::Open, _| {
+            seen.lock().unwrap().push(event.0.content_id.clone());
+        })
+    });
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let seen = queries.clone();
+    let _all = cx.update(|_, cx| {
+        cx.subscribe(&home, move |_, event: &relics::home::OpenGrid, _| {
+            seen.lock().unwrap().push(event.title.clone());
+        })
+    });
+    home.update(cx, |home, cx| {
+        home.key(Key::Right, cx);
+    });
+    home_reply(&server, &[("two", &["c"], true), ("one", &["b", "a"], true)]);
+    home.update(cx, |home, cx| home.reload(0, cx));
+    cx.run_until_parked();
+    home.update(cx, |home, cx| {
+        home.key(Key::Other("enter"), cx);
+        home.key(Key::Right, cx);
+        home.key(Key::Right, cx);
+    });
+    home_reply(&server, &[("one", &["a", "b", "d"], true), ("two", &["c"], true)]);
+    home.update(cx, |home, cx| home.reload(0, cx));
+    cx.run_until_parked();
+    home.update(cx, |home, cx| {
+        home.key(Key::Other("enter"), cx);
+    });
+    assert_eq!(*opened.lock().unwrap(), ["b"]);
+    assert_eq!(*queries.lock().unwrap(), ["one"]);
+    home_reply(&server, &[]);
+    home.update(cx, |home, cx| home.reload(0, cx));
+    cx.run_until_parked();
+    home.update(cx, |home, cx| {
+        home.key(Key::Other("enter"), cx);
+    });
+    assert_eq!(opened.lock().unwrap().len(), 1);
+    assert_eq!(queries.lock().unwrap().len(), 1);
+}
+
+#[gpui::test]
+fn request_replacement_keeps_the_request_and_empty_results_cannot_cancel(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let mut body: serde_json::Value = serde_json::from_str(&common::fixture("list_my_requests_ok.json")).unwrap();
+    body["items"][1]["status"] = "pending".into();
+    set_reply(&server, "requests/mine", body.clone());
+    let requests = cx.update(|_, cx| cx.new(|cx| relics::requests::Requests::new(client, cx)));
+    cx.run_until_parked();
+    body["items"].as_array_mut().unwrap().reverse();
+    set_reply(&server, "requests/mine", body);
+    requests.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    requests.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(server.requests("POST", "requests/r-2/cancel").len(), 1);
+    set_reply(&server, "requests/mine", serde_json::json!({"items":[], "page":{"has_more":false}}));
+    requests.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    requests.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    assert_eq!(server.requests("POST", "requests/").len(), 1);
+}
+
+#[gpui::test]
+fn collection_replacement_follows_group_and_card_and_uses_the_first_remaining_group(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&common::fixture("get_library_collections_ok.json")).unwrap();
+    let mut other = body["groups"][0]["collections"][0].clone();
+    other["id"] = "u2".into();
+    body["groups"][0]["collections"].as_array_mut().unwrap().push(other);
+    set_reply(&server, "library/12/collections", body.clone());
+    let collections = cx.update(|_, cx| {
+        cx.new(|cx| relics::collections::Collections::new(client, relics::collections::Scope::Library("12".into()), cx))
+    });
+    cx.run_until_parked();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&collections, move |_, event: &relics::collections::OpenCollection, _| {
+            seen.lock().unwrap().push(event.id.clone());
+        })
+    });
+    collections.update(cx, |page, cx| {
+        page.key(Key::Right, cx);
+    });
+    body["groups"][0]["sort_order"] = 10000.into();
+    body["groups"][0]["collections"].as_array_mut().unwrap().reverse();
+    set_reply(&server, "library/12/collections", body.clone());
+    collections.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    collections.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    body["groups"] = serde_json::json!([]);
+    set_reply(&server, "library/12/collections", body.clone());
+    collections.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    collections.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    body["ungrouped"] = serde_json::Value::Null;
+    set_reply(&server, "library/12/collections", body);
+    collections.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    collections.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    assert_eq!(*opened.lock().unwrap(), ["u2", "c1"]);
+}
+
+#[gpui::test]
+fn detail_replacement_keeps_chosen_version_and_keyboard_focus_independent(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&common::fixture("list_catalog_item_versions_ok.json")).unwrap();
+    let first = body["items"][0].clone();
+    let mut second = first.clone();
+    second["file_id"] = "121".into();
+    body["items"] = serde_json::json!([first, second]);
+    set_reply(&server, "catalog/items/test-item/versions", body.clone());
+    let detail =
+        cx.update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-item".into(), None, window, cx)));
+    cx.run_until_parked();
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let seen = played.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&detail, move |_, event: &relics::home::Play, _| {
+            seen.lock().unwrap().push(event.0.file_id.clone());
+        })
+    });
+    detail.update(cx, |page, cx| {
+        for key in [Key::Down, Key::Right, Key::Other("enter"), Key::Left] {
+            page.key(key, cx);
+        }
+    });
+    body["items"].as_array_mut().unwrap().reverse();
+    set_reply(&server, "catalog/items/test-item/versions", body);
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("p"), cx);
+        page.key(Key::Other("enter"), cx);
+        page.key(Key::Other("p"), cx);
+    });
+    assert_eq!(*played.lock().unwrap(), [Some("121".into()), Some("120".into())]);
+}
+
+#[gpui::test]
+fn detail_replacement_keeps_action_identity_when_play_becomes_resume(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let mut item: serde_json::Value = serde_json::from_str(&common::fixture("get_catalog_item_ok.json")).unwrap();
+    item["position_seconds"] = serde_json::Value::Null;
+    set_reply(&server, "catalog/items/test-item?", item.clone());
+    let detail =
+        cx.update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-item".into(), None, window, cx)));
+    cx.run_until_parked();
+    let played = Arc::new(Mutex::new(Vec::new()));
+    let seen = played.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&detail, move |_, event: &relics::home::Play, _| {
+            seen.lock().unwrap().push(event.0.start_over);
+        })
+    });
+    item["position_seconds"] = 20.into();
+    set_reply(&server, "catalog/items/test-item?", item.clone());
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+        for _ in 0..3 {
+            page.key(Key::Right, cx);
+        }
+    });
+    item["position_seconds"] = serde_json::Value::Null;
+    set_reply(&server, "catalog/items/test-item?", item);
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(*played.lock().unwrap(), [false]);
+    assert_eq!(
+        server.requests("PUT", "favorites/test-item").len() + server.requests("DELETE", "favorites/test-item").len(),
+        1
+    );
+}
+
+#[gpui::test]
+fn detail_replacement_keeps_chosen_season_focus_and_menu_together(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let mut seasons: serde_json::Value = serde_json::from_str(&common::fixture("list_series_seasons_ok.json")).unwrap();
+    let mut second = seasons["items"][0].clone();
+    second["season_number"] = 2.into();
+    second["content_id"] = "season:second".into();
+    seasons["items"].as_array_mut().unwrap().push(second);
+    set_reply(&server, "catalog/series/test-series/seasons?", seasons.clone());
+    let episodes: serde_json::Value = serde_json::from_str(&common::fixture("list_season_episodes_ok.json")).unwrap();
+    set_reply(&server, "catalog/series/test-series/seasons/2/episodes", episodes);
+    let detail = cx.update(|window, cx| {
+        cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), Some(2), window, cx))
+    });
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        for key in [Key::Down, Key::Left, Key::Other("o")] {
+            page.key(key, cx);
+        }
+    });
+    seasons["items"].as_array_mut().unwrap().reverse();
+    set_reply(&server, "catalog/series/test-series/seasons?", seasons.clone());
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/series/test-series/seasons/1/episodes"), 0);
+    assert_eq!(server.count("catalog/series/test-series/seasons/2/episodes"), 2);
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(server.requests("POST", "watched/series:severance-S01").len(), 1);
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("o"), cx);
+    });
+    seasons["items"].as_array_mut().unwrap().truncate(1);
+    set_reply(&server, "catalog/series/test-series/seasons?", seasons);
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(server.requests("POST", "watched/").len(), 1, "the removed season closes its menu");
+}
+
+#[gpui::test]
+fn episode_replacement_keeps_menu_identity_and_empty_rows_return_to_play(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let path = "catalog/series/test-series/seasons/1/episodes";
+    let mut episodes: serde_json::Value =
+        serde_json::from_str(&common::fixture("list_season_episodes_ok.json")).unwrap();
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    cx.run_until_parked();
+    let played = Arc::new(Mutex::new(0));
+    let seen = played.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&detail, move |_, _: &relics::home::Play, _| {
+            *seen.lock().unwrap() += 1;
+        })
+    });
+    detail.update(cx, |page, cx| {
+        for key in [Key::Down, Key::Down, Key::Down, Key::Other("o")] {
+            page.key(key, cx);
+        }
+    });
+    episodes["items"].as_array_mut().unwrap().reverse();
+    set_reply(&server, path, episodes.clone());
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        server.requests("POST", "watched/episode:severance-s01e01").len()
+            + server.requests("DELETE", "watched/episode:severance-s01e01").len(),
+        1
+    );
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("o"), cx);
+    });
+    episodes["items"] = serde_json::json!([]);
+    set_reply(&server, path, episodes);
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    assert_eq!(*played.lock().unwrap(), 1, "an empty episode row returns to the hero Play action");
+}
+
+#[gpui::test]
+fn sidebar_replacement_keeps_libraries_and_fixed_entries_and_returns_removed_libraries_home(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = rig(cx);
+    let mut libraries: serde_json::Value = serde_json::from_str(&common::fixture("user_libraries.json")).unwrap();
+    let mut other = libraries["items"][0].clone();
+    other["id"] = "13".into();
+    other["name"] = "Other".into();
+    other["sort_order"] = 1.into();
+    cx.simulate_keystrokes("left down");
+    libraries["items"].as_array_mut().unwrap().insert(0, other);
+    set_reply(&server, "user/libraries", libraries);
+    send(cx, &changes, LiveChange::Resync);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/filters?library_id=12"), 1, "the focused Library follows its id");
+    assert_eq!(server.count("catalog/filters?library_id=13"), 0);
+    set_reply(&server, "user/libraries", serde_json::json!({"items":[]}));
+    cx.executor().advance_clock(Duration::from_secs(6));
+    send(cx, &changes, LiveChange::Resync);
+    cx.simulate_keystrokes("left down enter");
+    cx.run_until_parked();
+    assert!(drawn(cx, "search-field"), "the removed open Library returns to Home, whose next sidebar entry is Search");
+    cx.simulate_keystrokes("1 left down");
+    set_reply(&server, "user/libraries", serde_json::from_str(&common::fixture("user_libraries.json")).unwrap());
+    cx.executor().advance_clock(Duration::from_secs(6));
+    send(cx, &changes, LiveChange::Resync);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(drawn(cx, "search-field"), "Search retains its meaning when a Library appears above it");
+}
+
+fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.debug_bounds(selector).unwrap_or_else(|| panic!("missing {selector}"))
+}
+
+fn wheel(cx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, x: f32, y: f32) {
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: at,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(x), gpui::px(y))),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn home_replacement_preserves_sideways_scroll_and_the_top_section_offset(cx: &mut TestAppContext) {
+    use relics::pages::freshness::Reload;
+    let (pages, cx, server, _, client) = rig(cx);
+    let ids: Vec<_> = (0..14).map(|n| format!("item-{n}")).collect();
+    let ids: Vec<_> = ids.iter().map(String::as_str).collect();
+    home_reply(&server, &[("one", &ids, false), ("two", &ids, false), ("three", &ids, false)]);
+    let home =
+        cx.update(|window, cx| cx.new(|cx| relics::home::Home::new(client, relics::home::Rows::Home, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Home(home.clone()), cx));
+    cx.run_until_parked();
+    let before = bounds(cx, "home-card-one-2");
+    wheel(cx, before.center(), -200., 0.);
+    let sideways = bounds(cx, "home-card-one-2");
+    assert!(sideways.origin.x < before.origin.x, "the first row scrolled sideways");
+    wheel(cx, sideways.center(), 0., -400.);
+    let before = bounds(cx, "home-card-two-2");
+    wheel(cx, before.center(), -150., 0.);
+    let anchor = bounds(cx, "home-card-two-2");
+    home_reply(&server, &[("new", &ids, false), ("one", &ids, false), ("two", &ids, false), ("three", &ids, false)]);
+    home.update(cx, |home, cx| home.reload(0, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        bounds(cx, "home-card-two-2").origin,
+        anchor.origin,
+        "the top section keeps its vertical offset and sideways scroll"
+    );
+    wheel(cx, anchor.center(), 0., 400.);
+    assert_eq!(
+        bounds(cx, "home-card-one-2").origin.x,
+        sideways.origin.x,
+        "the other row retains its own sideways scroll"
+    );
+}
+
+#[gpui::test]
+fn collection_replacement_preserves_each_groups_sideways_scroll(cx: &mut TestAppContext) {
+    use relics::pages::freshness::Reload;
+    let (pages, cx, server, _, client) = rig(cx);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&common::fixture("get_library_collections_ok.json")).unwrap();
+    let card = body["groups"][0]["collections"][0].clone();
+    let cards: Vec<_> = (0..14)
+        .map(|n| {
+            let mut card = card.clone();
+            card["id"] = format!("c{n}").into();
+            card
+        })
+        .collect();
+    body["groups"][0]["collections"] = serde_json::json!(cards);
+    body["ungrouped"]["collections"] = serde_json::json!(cards);
+    set_reply(&server, "library/12/collections", body.clone());
+    let collections = cx.update(|_, cx| {
+        cx.new(|cx| relics::collections::Collections::new(client, relics::collections::Scope::Library("12".into()), cx))
+    });
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Collections(collections.clone()), cx));
+    cx.run_until_parked();
+    let before = bounds(cx, "collection-card-1-Mine-c2");
+    wheel(cx, before.center(), -200., 0.);
+    let first = bounds(cx, "collection-card-1-Mine-c2");
+    assert!(first.origin.x < before.origin.x);
+    let before = bounds(cx, "collection-card-1-Collections-c2");
+    wheel(cx, before.center(), -100., 0.);
+    let second = bounds(cx, "collection-card-1-Collections-c2");
+    assert!(second.origin.x < before.origin.x);
+    body["groups"][0]["sort_order"] = 10000.into();
+    set_reply(&server, "library/12/collections", body);
+    collections.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    assert_eq!(bounds(cx, "collection-card-1-Mine-c2").origin.x, first.origin.x);
+    assert_eq!(bounds(cx, "collection-card-1-Collections-c2").origin.x, second.origin.x);
+}
+
+#[gpui::test]
+fn home_replacement_keeps_missing_targets_positions_then_uses_the_first_card(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    home_reply(&server, &[("one", &["a", "b", "c"], false), ("two", &["x", "y", "z"], false)]);
+    let home =
+        cx.update(|window, cx| cx.new(|cx| relics::home::Home::new(client, relics::home::Rows::Home, window, cx)));
+    cx.run_until_parked();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&home, move |_, event: &relics::home::Open, _| {
+            seen.lock().unwrap().push(event.0.content_id.clone());
+        })
+    });
+    home.update(cx, |page, cx| {
+        page.key(Key::Down, cx);
+        page.key(Key::Right, cx);
+    });
+    for rows in [
+        vec![("one", &["a", "b", "c"][..], false), ("two", &["x", "z"][..], false)],
+        vec![("one", &["a", "b", "c"][..], false), ("three", &["p", "q"][..], false)],
+        vec![("one", &["a"][..], false), ("three", &["p"][..], false)],
+    ] {
+        home_reply(&server, &rows);
+        home.update(cx, |page, cx| page.reload(0, cx));
+        cx.run_until_parked();
+        home.update(cx, |page, cx| {
+            page.key(Key::Other("enter"), cx);
+        });
+    }
+    assert_eq!(*opened.lock().unwrap(), ["z", "q", "a"]);
+}
+
+#[gpui::test]
+fn collection_replacement_clamps_a_removed_card_within_its_group(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let mut body: serde_json::Value =
+        serde_json::from_str(&common::fixture("get_library_collections_ok.json")).unwrap();
+    let mut second = body["groups"][0]["collections"][0].clone();
+    second["id"] = "u2".into();
+    body["groups"][0]["collections"].as_array_mut().unwrap().push(second);
+    set_reply(&server, "library/12/collections", body.clone());
+    let page = cx.update(|_, cx| {
+        cx.new(|cx| relics::collections::Collections::new(client, relics::collections::Scope::Library("12".into()), cx))
+    });
+    cx.run_until_parked();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&page, move |_, event: &relics::collections::OpenCollection, _| {
+            seen.lock().unwrap().push(event.id.clone());
+        })
+    });
+    page.update(cx, |page, cx| {
+        page.key(Key::Right, cx);
+    });
+    body["groups"][0]["collections"].as_array_mut().unwrap().truncate(1);
+    set_reply(&server, "library/12/collections", body);
+    page.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    page.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    assert_eq!(*opened.lock().unwrap(), ["u1"]);
+}
+
+#[gpui::test]
+fn episode_replacement_keeps_the_play_target_and_clamps_a_shorter_row(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    use relics::pages::freshness::Reload;
+    let (_, cx, server, _, client) = rig(cx);
+    let path = "catalog/series/test-series/seasons/1/episodes";
+    let mut episodes: serde_json::Value =
+        serde_json::from_str(&common::fixture("list_season_episodes_ok.json")).unwrap();
+    let mut third = episodes["items"][0].clone();
+    third["content_id"] = "episode:third".into();
+    episodes["items"].as_array_mut().unwrap().push(third);
+    set_reply(&server, path, episodes.clone());
+    let player = cx.update(|_, cx| cx.new(|cx| relics::player::Controller::new(None, cx)));
+    let playback_client = client.clone();
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    cx.run_until_parked();
+    // Episode version requests get a local 404, so the controller cannot reach mpv.
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&detail, move |_, event: &relics::home::Play, cx| {
+            player.update(cx, |player, cx| player.play(playback_client.clone(), event.0.clone(), cx));
+        })
+    });
+    detail.update(cx, |page, cx| {
+        for key in [Key::Down, Key::Down, Key::Down, Key::Down] {
+            page.key(key, cx);
+        }
+    });
+    episodes["items"].as_array_mut().unwrap().swap(0, 1);
+    set_reply(&server, path, episodes.clone());
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert!(server.count("catalog/items/episode:severance-s01e02/versions") > 0);
+    detail.update(cx, |page, cx| {
+        page.key(Key::Down, cx);
+        page.key(Key::Down, cx);
+    });
+    episodes["items"] = serde_json::json!([episodes["items"][1]]);
+    set_reply(&server, path, episodes);
+    detail.update(cx, |page, cx| page.reload(0, cx));
+    cx.run_until_parked();
+    detail.update(cx, |page, cx| {
+        page.key(Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert!(server.count("catalog/items/episode:severance-s01e01/versions") > 0);
+    assert!(server.requests("POST", "playback/start").is_empty(), "the local 404 stops playback before mpv");
+}

@@ -12,10 +12,10 @@ use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
 use crate::api::{Client, wire};
 use crate::filter_panel::bar_pill;
-use crate::grid::kept_focus;
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::pages::loading::{Failure, Loader};
+use crate::selection::kept_index;
 
 /// The most Request to add results that Search shows, as in the web client.
 const LIMIT: usize = 20;
@@ -141,11 +141,7 @@ impl Requests {
             move |this, result, _cx| {
                 match result {
                     Ok((items, next)) => {
-                        this.focus = kept_focus(&this.items, this.focus, &items, |r| r.id.clone());
-                        this.items = items;
-                        this.next = next;
-                        this.status = this.items.is_empty().then(|| "No requests.".into());
-                        this.failed = false;
+                        this.replace(items, next);
                     }
                     // The Library window shows Offline or the sign-in screen.
                     Err(err) => {
@@ -157,6 +153,14 @@ impl Requests {
             Self::load,
         );
         cx.notify();
+    }
+
+    fn replace(&mut self, items: Vec<wire::MediaRequest>, next: Option<String>) {
+        self.focus = kept_index(&self.items, self.focus, &items, |r| r.id.clone());
+        self.items = items;
+        self.next = next;
+        self.status = self.items.is_empty().then(|| "No requests.".into());
+        self.failed = false;
     }
 
     /// Retry after a failed load: the next page again, or the first page.

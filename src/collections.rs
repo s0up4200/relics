@@ -75,9 +75,9 @@ fn kept_focus(focus: Focus, old: &[Group], new: &[Group]) -> Option<Focus> {
         return None;
     };
     let group = old.get(row)?;
-    let row = new.iter().position(|g| g.library_id == group.library_id && g.title == group.title)?;
+    let row = crate::selection::matching(old, row, new, |g| (g.library_id.clone(), g.title.clone()))?;
     let cards = &new[row].cards;
-    let col = crate::grid::kept_focus(&group.cards, col, cards, |card| card.id.clone());
+    let col = crate::selection::kept_index(&group.cards, col, cards, |card| card.id.clone());
     Some(Focus::Card { row, col })
 }
 
@@ -135,27 +135,7 @@ impl Collections {
             move |this, result, _cx| {
                 match result {
                     Ok(groups) => {
-                        this.status = groups.is_empty().then(|| "No collections.".into());
-                        let old = |group: &Group| {
-                            this.groups.iter().position(|g| g.library_id == group.library_id && g.title == group.title)
-                        };
-                        this.row_scrolls = groups
-                            .iter()
-                            .map(|group| old(group).map_or_else(ScrollHandle::new, |i| this.row_scrolls[i].clone()))
-                            .collect();
-                        let focus = kept_focus(this.focus, &this.groups, &groups);
-                        if this.page.item_count() == this.title_items() + groups.len() + 1 {
-                            this.page.remeasure();
-                        }
-                        this.groups = groups;
-                        let rows = this.row_lengths();
-                        this.focus = match focus {
-                            Some(Focus::Card { row, col }) if rows.get(row).is_some_and(|&len| col < len) => {
-                                Focus::Card { row, col }
-                            }
-                            _ => move_focus(Focus::Outside, Key::Right, &rows),
-                        };
-                        this.failed = false;
+                        this.replace(groups);
                     }
                     // The Library window shows Offline or the sign-in screen.
                     Err(err) => {
@@ -167,6 +147,29 @@ impl Collections {
             Self::load,
         );
         cx.notify();
+    }
+
+    fn replace(&mut self, groups: Vec<Group>) {
+        self.status = groups.is_empty().then(|| "No collections.".into());
+        self.row_scrolls = groups
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                crate::selection::matching(&groups, i, &self.groups, |g| (g.library_id.clone(), g.title.clone()))
+                    .map_or_else(ScrollHandle::new, |i| self.row_scrolls[i].clone())
+            })
+            .collect();
+        let focus = kept_focus(self.focus, &self.groups, &groups);
+        if self.page.item_count() == self.title_items() + groups.len() + 1 {
+            self.page.remeasure();
+        }
+        self.groups = groups;
+        let rows = self.row_lengths();
+        self.focus = match focus {
+            Some(Focus::Card { row, col }) if rows.get(row).is_some_and(|&len| col < len) => Focus::Card { row, col },
+            _ => move_focus(Focus::Outside, Key::Right, &rows),
+        };
+        self.failed = false;
     }
 
     /// The Collections page has its title as the first item of the list.
@@ -238,6 +241,9 @@ impl Collections {
         };
         div()
             .id(("collection-card", row * 10_000 + col))
+            .debug_selector(|| {
+                format!("collection-card-{}-{}-{}", self.groups[row].library_id, self.groups[row].title, card.id)
+            })
             .clickable()
             .w(px(POSTER_WIDTH))
             .flex_none()
