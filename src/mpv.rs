@@ -1,17 +1,105 @@
-//! The mpv adapter. It is the only module that may hold a `libmpv2::Mpv` (clippy.toml
-//! blocks the type everywhere else). It carries out the commands of the Playback
-//! session and turns mpv events into Playback session inputs.
+//! The mpv adapter. It is the only module that may hold a `libmpv2::Mpv` or a `Player` (clippy.toml blocks the
+//! types everywhere else). It carries out the commands of the Playback session and turns mpv events into
+//! Playback session inputs. `InView` is the media of the controller (`player::Media`).
 #![allow(clippy::disallowed_types)]
 
 use std::ffi::c_void;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use futures::channel::mpsc::{self, UnboundedReceiver};
 use libmpv2::events::{Event, PropertyData};
 use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
 use libmpv2::{Format, Mpv, mpv_end_file_reason};
 
 use crate::playback::{Input, tracks};
+use crate::player::{Handle, Media};
+use crate::settings::LocalSettings;
+use crate::video::Surface;
+
+/// The media of the Player view. Each handle plays with no window, and the render thread of the Player view
+/// draws its video in the video surface of the Library window.
+pub struct InView(pub Rc<Surface>);
+
+impl Media for InView {
+    fn open(&self) -> Result<(Box<dyn Handle>, UnboundedReceiver<Input>), String> {
+        // Each new handle reads the hardware decoding Local setting again.
+        let hwdec = LocalSettings::load(&LocalSettings::dir()).hwdec();
+        let (tx, rx) = mpsc::unbounded();
+        let player = Player::open(hwdec, &[("vo", "libmpv")], move |input| drop(tx.unbounded_send(input)))
+            .map_err(|err| err.to_string())?;
+        self.0.start(player.video())?;
+        Ok((Box::new(Open { player, video: self.0.clone() }), rx))
+    }
+
+    fn media_keys(&self) -> bool {
+        true
+    }
+}
+
+/// A handle of `InView`.
+struct Open {
+    player: Player,
+    video: Rc<Surface>,
+}
+
+impl Drop for Open {
+    /// The render thread stops before mpv, and before the window can close its Wayland connection.
+    fn drop(&mut self) {
+        self.video.stop();
+    }
+}
+
+impl Handle for Open {
+    fn load(&self, url: &str, headers: &[(String, String)], start: f64, aid: Option<i64>) -> anyhow::Result<()> {
+        Ok(self.player.load(url, headers, start, aid)?)
+    }
+
+    fn add_subtitle(&self, url: &str, title: &str, language: &str) -> anyhow::Result<()> {
+        Ok(self.player.add_subtitle(url, title, language)?)
+    }
+
+    fn select_subtitle(&self, sid: Option<i64>) -> anyhow::Result<()> {
+        Ok(self.player.select_subtitle(sid)?)
+    }
+
+    fn select_audio(&self, aid: i64) -> anyhow::Result<()> {
+        Ok(self.player.select_audio(aid)?)
+    }
+
+    fn seek(&self, position: f64) -> anyhow::Result<()> {
+        Ok(self.player.seek(position)?)
+    }
+
+    fn set_pause(&self, paused: bool) -> anyhow::Result<()> {
+        Ok(self.player.set_pause(paused)?)
+    }
+
+    fn add_volume(&self, delta: f64) -> anyhow::Result<()> {
+        Ok(self.player.add_volume(delta)?)
+    }
+
+    fn toggle_mute(&self) -> anyhow::Result<()> {
+        Ok(self.player.toggle_mute()?)
+    }
+
+    fn volume(&self) -> anyhow::Result<(f64, bool)> {
+        Ok(self.player.volume()?)
+    }
+
+    fn sub_delay(&self) -> anyhow::Result<f64> {
+        Ok(self.player.sub_delay()?)
+    }
+
+    fn add_sub_delay(&self, delta: f64) -> anyhow::Result<()> {
+        Ok(self.player.add_sub_delay(delta)?)
+    }
+
+    fn set_sub_delay(&self, seconds: f64) -> anyhow::Result<()> {
+        Ok(self.player.set_sub_delay(seconds)?)
+    }
+}
 
 pub use libmpv2::Error;
 

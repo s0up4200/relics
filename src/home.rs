@@ -19,7 +19,7 @@ use crate::pages::loading::{Failure, Loader};
 use crate::sideways::Row;
 
 /// The user pressed p on a card, or Play on the detail page.
-pub struct Play(pub crate::player::PlayItem);
+pub struct Play(pub crate::playback::playing::PlayItem);
 
 /// The user pressed Enter on a card, or clicked it.
 pub struct Open(pub wire::CatalogItem);

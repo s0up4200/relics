@@ -9,6 +9,7 @@ use crate::api::types::{Decision, Delivery, Marker, MarkerKind};
 use crate::api::wire;
 use crate::settings::{IntroSkipMode, ServerSettings};
 
+pub mod playing;
 pub mod subtitles;
 pub mod tracks;
 
@@ -205,10 +206,6 @@ pub enum Command {
     SelectSubtitle(Option<i64>),
     /// Play the audio track with this mpv track id.
     SelectAudio(i64),
-    /// Draw these Markers, in player time, on the seek bar.
-    ShowMarkers(Vec<Marker>),
-    /// Show the Skip prompt with this label. An empty label hides it.
-    ShowPrompt(String),
     /// Seek to this player position.
     Seek(f64),
     /// Play the next episode in the same Player view. The session has already ended.
@@ -224,10 +221,6 @@ pub enum Command {
     /// Start the file version `file_id` of the same Item at this source position, in the same Player view. The
     /// session has already ended. The replan request names no file, so a version switch is a new start.
     PlayVersion { file_id: String, position: Option<f64> },
-    /// Show the Up Next card with this many seconds left before the next Item plays. `None` hides it.
-    UpNext(Option<u64>),
-    /// Show or hide the Still watching prompt.
-    StillWatching(bool),
 }
 
 /// The recovery chain: a failure starts it, and each next failure goes one step on.
@@ -300,8 +293,8 @@ pub struct Session {
     quality: String,
     /// The step of a quality change replan that runs.
     changing: Option<String>,
-    /// The Up Next card shows, and the next Item plays at this time.
-    up_next: Option<SystemTime>,
+    /// The Up Next card shows, the next Item plays at this time, and the card shows this many seconds left.
+    up_next: Option<(SystemTime, u64)>,
     /// The user cancelled the Up Next card, so the next Item does not play by itself.
     cancelled: bool,
     /// How many Items in a row played by themselves, with no input of the user, up to this one.
@@ -312,6 +305,7 @@ pub struct Session {
 
 /// The Skip prompt that shows now.
 struct Prompt {
+    label: String,
     action: Action,
     until: SystemTime,
     /// The prompt stays when the position leaves its Marker. The "Watch intro" prompt shows after the skip.
@@ -487,7 +481,7 @@ impl Session {
                 // The user turned the subtitles off in the Track picker.
                 let off = self.carry.subtitle == Some(Choice::Off);
                 let subtitle = self.plan.as_ref().and_then(|plan| plan.subtitle.clone()).filter(|_| !off);
-                let mut commands: Vec<Command> = [Some(self.show_markers()), subtitle].into_iter().flatten().collect();
+                let mut commands: Vec<Command> = subtitle.into_iter().collect();
                 commands.extend(self.play_carry());
                 commands
             }
@@ -498,11 +492,15 @@ impl Session {
                 {
                     self.chain = Chain::Healthy;
                 }
-                let mut commands = self.enter(position, now);
+                let commands = self.enter(position, now);
                 if !self.ended {
-                    commands.extend(self.up_next(position, now));
+                    self.count_down(position, now);
                 }
                 commands
+            }
+            Input::Seeked(position) if self.loaded => {
+                self.position = Some(position);
+                Vec::new()
             }
             Input::Duration(duration) if self.loaded => {
                 self.duration = Some(duration);
@@ -513,27 +511,23 @@ impl Session {
                 Vec::new()
             }
             Input::Tick => {
-                let mut commands = Vec::new();
-                if let Some(until) = self.up_next {
+                if let Some((until, _)) = self.up_next {
                     if now >= until {
                         return self.auto_advance(self.source_position());
                     }
                     let left = until.duration_since(now).unwrap_or_default().as_secs_f64().ceil() as u64;
-                    commands.push(Command::UpNext(Some(left)));
+                    self.up_next = Some((until, left));
                 }
                 if self.prompt.as_ref().is_some_and(|prompt| now >= prompt.until) {
                     self.prompt = None;
-                    commands.push(Command::ShowPrompt(String::new()));
                 }
-                commands.extend(self.report(now));
+                let mut commands = self.report(now);
                 commands.extend(self.renew(now));
                 commands
             }
             Input::Action if self.chain == Chain::Lost => {
                 self.chain = Chain::Healthy;
-                let mut commands = vec![Command::ShowPrompt(String::new())];
-                commands.extend(self.recover());
-                commands
+                self.recover()
             }
             Input::Action if self.still_watching.is_some() => {
                 let position = self.still_watching.unwrap_or_default();
@@ -542,17 +536,16 @@ impl Session {
                 commands
             }
             Input::Action if self.up_next.is_some() => self.play_next(self.source_position()),
-            Input::CancelUpNext => match self.up_next.take() {
-                Some(_) => {
+            Input::CancelUpNext => {
+                if self.up_next.take().is_some() {
                     self.cancelled = true;
-                    vec![Command::UpNext(None)]
                 }
-                None => Vec::new(),
-            },
+                Vec::new()
+            }
             Input::Action => match self.prompt.take() {
                 Some(Prompt { action: Action::Seek { to, marker }, .. }) => {
                     self.resolved.push(marker);
-                    vec![Command::Seek(to), Command::ShowPrompt(String::new())]
+                    vec![Command::Seek(to)]
                 }
                 Some(prompt @ Prompt { action: Action::Next, .. }) => {
                     // finish() hides the prompt.
@@ -689,6 +682,37 @@ impl Session {
     /// MPRIS `CanGoPrevious`: the session plays and the Item has a previous episode.
     pub fn can_go_previous(&self) -> bool {
         self.has_previous && !self.ended
+    }
+
+    /// The player position, once the file of this session plays.
+    pub fn position(&self) -> Option<f64> {
+        self.position
+    }
+
+    /// The Markers of the file in player time, for the seek bar of the Player view.
+    pub fn markers(&self) -> &[Marker] {
+        self.plan.as_ref().map_or(&[], |plan| &plan.markers)
+    }
+
+    /// The label of the Skip prompt that shows, or the `LOST` text when the recovery chain gave up. Empty when
+    /// none shows.
+    pub fn prompt(&self) -> &str {
+        match &self.prompt {
+            _ if self.ended => "",
+            Some(prompt) => &prompt.label,
+            None if self.chain == Chain::Lost => LOST,
+            None => "",
+        }
+    }
+
+    /// The seconds left before the next Item plays, while the Up Next card shows.
+    pub fn up_next(&self) -> Option<u64> {
+        self.up_next.map(|(_, left)| left)
+    }
+
+    /// The Still watching prompt shows.
+    pub fn still_watching(&self) -> bool {
+        self.still_watching.is_some()
     }
 
     /// Makes `plan` the plan of the session. `markers` are in source time.
@@ -846,14 +870,11 @@ impl Session {
         commands
     }
 
+    /// The recovery chain gave up. The Player view shows the `LOST` text as the prompt.
     fn lose(&mut self) -> Vec<Command> {
         self.chain = Chain::Lost;
         self.prompt = None;
-        vec![Command::ShowPrompt(LOST.into())]
-    }
-
-    fn show_markers(&self) -> Command {
-        Command::ShowMarkers(self.plan.as_ref().map(|plan| plan.markers.clone()).unwrap_or_default())
+        Vec::new()
     }
 
     /// The skip state machine. It acts when the position enters a Marker that is not resolved.
@@ -865,20 +886,23 @@ impl Session {
         }
         self.inside = inside;
         let Some(index) = inside.filter(|index| !self.resolved.contains(index)) else {
-            return self.hide_marker_prompt();
+            self.hide_marker_prompt();
+            return Vec::new();
         };
         let Marker { kind, start, end } = markers[index].clone();
-        let mut commands = self.hide_marker_prompt();
+        self.hide_marker_prompt();
+        let mut commands = Vec::new();
         let to_end = self.player_duration().is_some_and(|duration| end >= duration - CREDITS_TO_END_SECONDS);
         let skip = Action::Seek { to: end, marker: index };
         match kind {
             MarkerKind::Intro => match self.settings.intro_skip_mode {
                 IntroSkipMode::Never => {}
-                IntroSkipMode::Ask => commands.push(self.show("Skip intro", skip, false, now)),
+                IntroSkipMode::Ask => self.show("Skip intro", skip, false, now),
                 IntroSkipMode::Always => {
                     self.resolved.push(index);
                     let undo = Action::Seek { to: start, marker: index };
-                    commands.extend([Command::Seek(end), self.show("Watch intro", undo, true, now)]);
+                    commands.push(Command::Seek(end));
+                    self.show("Watch intro", undo, true, now);
                 }
             },
             // With autoplay, the Up Next card shows in these credits.
@@ -887,39 +911,34 @@ impl Session {
                     commands.extend(self.auto_advance(self.source_position()));
                 }
             }
-            MarkerKind::Credits if to_end && self.has_next => {
-                commands.push(self.show("Next episode", Action::Next, false, now))
-            }
+            MarkerKind::Credits if to_end && self.has_next => self.show("Next episode", Action::Next, false, now),
             MarkerKind::Credits if !to_end && self.settings.auto_skip_credits => {
                 self.resolved.push(index);
                 commands.push(Command::Seek(end));
             }
-            MarkerKind::Credits => commands.push(self.show("Skip credits", skip, false, now)),
+            MarkerKind::Credits => self.show("Skip credits", skip, false, now),
             MarkerKind::Recap if self.settings.auto_skip_recap => {
                 self.resolved.push(index);
                 commands.push(Command::Seek(end));
             }
-            MarkerKind::Recap => commands.push(self.show("Skip recap", skip, false, now)),
-            MarkerKind::Preview => commands.push(self.show("Skip preview", skip, false, now)),
+            MarkerKind::Recap => self.show("Skip recap", skip, false, now),
+            MarkerKind::Preview => self.show("Skip preview", skip, false, now),
             MarkerKind::Unknown(_) => {}
         }
         commands
     }
 
     /// Hides the prompt of the Marker that the position left.
-    fn hide_marker_prompt(&mut self) -> Vec<Command> {
+    fn hide_marker_prompt(&mut self) {
         if self.prompt.as_ref().is_some_and(|prompt| !prompt.stays) {
             self.prompt = None;
-            return vec![Command::ShowPrompt(String::new())];
         }
-        Vec::new()
     }
 
     // ponytail: the prompt timer runs on during a pause. The server design freezes it; add a pause
     // input to the timer if users miss the prompt.
-    fn show(&mut self, label: &str, action: Action, stays: bool, now: SystemTime) -> Command {
-        self.prompt = Some(Prompt { action, until: now + PROMPT_TIME, stays });
-        Command::ShowPrompt(label.into())
+    fn show(&mut self, label: &str, action: Action, stays: bool, now: SystemTime) {
+        self.prompt = Some(Prompt { label: label.into(), action, until: now + PROMPT_TIME, stays });
     }
 
     /// The next Item plays at the end: the next pick of a shuffle, or the next episode when the Server settings
@@ -930,7 +949,7 @@ impl Session {
 
     /// Shows the Up Next card when the position enters the end of the file, and hides it when the position leaves.
     /// The end starts at the end credits, else `UP_NEXT_TIME` before the end of the file.
-    fn up_next(&mut self, position: f64, now: SystemTime) -> Vec<Command> {
+    fn count_down(&mut self, position: f64, now: SystemTime) {
         let markers = self.plan.as_ref().map_or(&[][..], |plan| &plan.markers);
         let start = self.player_duration().map(|duration| {
             let credits = markers.iter().filter(|marker| {
@@ -943,15 +962,9 @@ impl Session {
             && self.still_watching.is_none()
             && start.is_some_and(|start| position >= start);
         match (inside, self.up_next) {
-            (true, None) => {
-                self.up_next = Some(now + UP_NEXT_TIME);
-                vec![Command::UpNext(Some(UP_NEXT_TIME.as_secs()))]
-            }
-            (false, Some(_)) => {
-                self.up_next = None;
-                vec![Command::UpNext(None)]
-            }
-            _ => Vec::new(),
+            (true, None) => self.up_next = Some((now + UP_NEXT_TIME, UP_NEXT_TIME.as_secs())),
+            (false, Some(_)) => self.up_next = None,
+            _ => {}
         }
     }
 
@@ -962,9 +975,8 @@ impl Session {
             self.auto_plays += 1;
             return self.play_next(position);
         }
-        self.still_watching = Some(position);
-        let hide = self.up_next.take().map(|_| Command::UpNext(None));
-        hide.into_iter().chain([Command::SetPause(true), Command::StillWatching(true)]).collect()
+        (self.still_watching, self.up_next) = (Some(position), None);
+        vec![Command::SetPause(true)]
     }
 
     /// The final position of a stop report: the position of the Still watching prompt while it shows.
@@ -1001,21 +1013,12 @@ impl Session {
     /// Ends the session with a stop report that carries `position` as the final sample.
     fn finish(&mut self, position: Option<f64>, close_player: bool) -> Vec<Command> {
         self.ended = true;
+        (self.prompt, self.up_next, self.still_watching) = (None, None, None);
         let Some(session_id) = self.plan.as_ref().map(|plan| plan.session_id.clone()) else {
             return Vec::new();
         };
-        let mut commands = Vec::new();
-        if self.prompt.take().is_some() || self.chain == Chain::Lost {
-            commands.push(Command::ShowPrompt(String::new()));
-        }
-        if self.up_next.take().is_some() {
-            commands.push(Command::UpNext(None));
-        }
-        if self.still_watching.take().is_some() {
-            commands.push(Command::StillWatching(false));
-        }
         let sample = position.map(|position| self.sample(position));
-        commands.push(Command::Stop { session_id, sample });
+        let mut commands = vec![Command::Stop { session_id, sample }];
         if close_player {
             commands.push(Command::ClosePlayer);
         }

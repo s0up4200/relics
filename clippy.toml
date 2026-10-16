@@ -1,7 +1,8 @@
-# Only the mpv adapter (src/mpv.rs) may hold a libmpv handle. Only the live module (src/api/live.rs) may use the
-# events socket.
+# Only the mpv adapter (src/mpv.rs) may hold a libmpv handle or its Player, so the controller plays through the
+# player::Media interface that the tests also use. Only the live module (src/api/live.rs) may use the events socket.
 disallowed-types = [
     { path = "libmpv2::Mpv", reason = "only the mpv adapter in src/mpv.rs may use libmpv" },
+    { path = "relics::mpv::Player", reason = "play through player::Media; only the mpv adapter and its tests use mpv::Player" },
     { path = "async_tungstenite::WebSocketStream", reason = "use Client::live_updates for the events socket" },
     { path = "async_tungstenite::tungstenite::Message", reason = "use Client::live_updates for the events socket" },
 ]
