@@ -646,6 +646,45 @@ fn events_of_a_closed_handle_do_not_reach_the_next_item(cx: &mut TestAppContext)
     assert_eq!(rig.fake.count(|op| *op == Op::Open), 2, "the episode plays on a new handle");
 }
 
+// Issue #115: the handle plays the old file on until the next Item loads its own file, and the events of the
+// handle name no file. So the session of the next Item gets the events of the old file until then.
+
+#[gpui::test]
+#[ignore = "fault found in #115; the fix needs its own spec"]
+fn the_end_of_the_old_file_does_not_end_the_next_item_before_it_loads(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.play(episode(1), cx);
+    rig.loaded(3420.0, 3412.0, cx);
+    rig.server.hold(&["playback/start"]);
+    rig.step(Input::Action, cx);
+    // Play now on the Up Next card. The episode plays on to its end before the start reply of the next episode.
+    rig.events([Input::Position(3419.9), Input::EndOfFile], cx);
+    rig.server.release();
+    cx.run_until_parked();
+    assert_eq!(rig.server.started(), ["episode:severance-s01e01", "episode:severance-s01e02"]);
+    assert_eq!(rig.fake.loads(), [stream(1), stream(2)], "the next episode loads");
+}
+
+#[gpui::test]
+#[ignore = "fault found in #115; the fix needs its own spec"]
+fn the_file_of_the_old_item_does_not_set_the_position_of_the_next_item(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.play(movie(), cx);
+    rig.server.hold(&["playback/start"]);
+    rig.play(episode(1), cx);
+    // The movie file loads after the episode replaced the movie, before the start reply of the episode.
+    rig.loaded(7200.0, 300.0, cx);
+    assert_eq!(rig.read(cx, Controller::position), None);
+    rig.server.release();
+    cx.run_until_parked();
+    rig.events([Input::LoadFailed], cx);
+    assert_eq!(
+        rig.fake.ops().last(),
+        Some(&Op::Load { url: stream(2), start: 12.5 }),
+        "the recovery reloads the episode at its own start, not at the position of the movie"
+    );
+}
+
 #[gpui::test]
 fn the_pages_reload_only_after_the_stop_report_ends_also_when_it_fails(cx: &mut TestAppContext) {
     let rig = rig(cx);
