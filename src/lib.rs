@@ -25,13 +25,14 @@ pub mod release;
 pub mod requests;
 pub mod search;
 pub mod secrets;
+pub mod selection;
 pub mod settings;
 pub mod settings_page;
 pub mod sideways;
 pub mod sign_in;
 pub mod state;
-pub mod theme;
 pub mod text_input;
+pub mod theme;
 pub mod video;
 
 pub const BUILD_IDENTITY: &str = concat!("Relics ", env!("CARGO_PKG_VERSION"), " (", env!("RELICS_REVISION"), ")");

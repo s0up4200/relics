@@ -20,6 +20,7 @@ use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::pages::loading::{Failure, Loader};
 use crate::player::start_shuffle;
+use crate::selection::kept_index;
 
 pub const POSTER_WIDTH: f32 = 150.;
 pub const POSTER_HEIGHT: f32 = 225.;
@@ -64,14 +65,6 @@ pub fn move_focus(index: usize, key: Key, len: usize, columns: usize) -> Move {
         Key::Down if index / columns < (len.max(1) - 1) / columns => Move::To((index + columns).min(len - 1)),
         _ => Move::Stay,
     }
-}
-
-/// The focus after a reload of a list: the place in `new` of the entry at `focus` in `old`, found by `key`. When the
-/// entry is gone, the same place, but not past the last entry.
-pub fn kept_focus<T, K: PartialEq>(old: &[T], focus: usize, new: &[T], key: impl Fn(&T) -> K) -> usize {
-    old.get(focus)
-        .and_then(|entry| new.iter().position(|e| key(e) == key(entry)))
-        .unwrap_or_else(|| focus.min(new.len().saturating_sub(1)))
 }
 
 /// The placeholder of the poster of `item`, from its thumbhash.
@@ -246,18 +239,22 @@ impl Grid {
             },
             |this, result, cx| match result {
                 Ok(paging) => {
-                    this.drop_thumbs(cx);
-                    this.thumbs = paging.items.iter().map(thumb).collect();
-                    this.focus = kept_focus(&this.paging.items, this.focus, &paging.items, |i| i.content_id.clone());
-                    this.paging = paging;
-                    this.error = None;
-                    this.artwork.update(cx, |artwork, _| artwork.retry_failed());
+                    this.replace(paging, cx);
                 }
                 Err(err) => this.error = Some(err.to_string()),
             },
             Self::reload,
         );
         cx.notify();
+    }
+
+    fn replace(&mut self, paging: Paging, cx: &mut Context<Self>) {
+        self.drop_thumbs(cx);
+        self.thumbs = paging.items.iter().map(thumb).collect();
+        self.focus = kept_index(&self.paging.items, self.focus, &paging.items, |i| i.content_id.clone());
+        self.paging = paging;
+        self.error = None;
+        self.artwork.update(cx, |artwork, _| artwork.retry_failed());
     }
 
     fn near_end(&self) -> bool {
@@ -559,7 +556,7 @@ impl Render for GridPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Move, columns, kept_focus, move_focus, near_end, row_cards};
+    use super::{Move, columns, move_focus, near_end, row_cards};
     use crate::api::wire;
     use crate::keys::Key;
 
@@ -581,16 +578,6 @@ mod tests {
         let mut paging = crate::browse::Paging::default();
         paging.add(items(&["a"]), Some(2), Some(wire::PageInfo { has_more: true, next_cursor: Some("c".into()) }));
         assert!(paging.loaded(), "a first page with more to come");
-    }
-
-    #[test]
-    fn the_focus_stays_on_its_item_after_a_reload() {
-        let old = items(&["a", "b", "c", "d"]);
-        let id = |i: &wire::CatalogItem| i.content_id.clone();
-        assert_eq!(kept_focus(&old, 2, &items(&["new", "a", "b", "c", "d"]), id), 3, "the Item moved one place on");
-        assert_eq!(kept_focus(&old, 2, &items(&["a", "b", "d", "e"]), id), 2, "a gone Item keeps the place");
-        assert_eq!(kept_focus(&old, 3, &items(&["a", "b"]), id), 1, "a gone Item stops at the last card");
-        assert_eq!(kept_focus(&old, 1, &[], id), 0, "an empty grid");
     }
 
     #[test]

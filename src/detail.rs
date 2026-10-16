@@ -24,6 +24,7 @@ use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::pages::loading::{Failure, Loader};
 use crate::player::{PlayItem, start_shuffle};
 use crate::search::OpenPerson;
+use crate::selection::matching as kept;
 use crate::sideways::Row;
 
 const EPISODE_WIDTH: f32 = 250.;
@@ -223,41 +224,7 @@ impl Detail {
             move |this, result, cx| {
                 match result {
                     Ok((item, seasons, versions)) => {
-                        let thumbs = [&item.backdrop_thumbhash, &item.poster_thumbhash]
-                            .into_iter()
-                            .chain(item.cast.iter().map(|c| &c.photo_thumbhash))
-                            .chain(item.crew.iter().map(|c| &c.photo_thumbhash))
-                            .map(|hash| hash.as_deref().and_then(artwork::thumbhash))
-                            .collect();
-                        artwork::replace_previews(&mut this.thumbs, thumbs, cx);
-                        let posters = seasons
-                            .iter()
-                            .map(|s| s.poster_thumbhash.as_deref().and_then(artwork::thumbhash))
-                            .collect();
-                        artwork::replace_previews(&mut this.season_thumbs, posters, cx);
-                        let reload = this.item.is_some();
-                        let listed = this.listed_season();
-                        let old_actions = this.item.as_ref().map(|old| actions(old, &this.seasons)).unwrap_or_default();
-                        if let Some(Mark::Season(i)) = this.menu {
-                            this.menu = kept(&this.seasons, i, &seasons, |s| s.season_number).map(Mark::Season);
-                        }
-                        this.focus = kept_focus(
-                            this.focus,
-                            (&old_actions, &actions(&item, &seasons)),
-                            (&this.versions, &versions),
-                            (&this.seasons, &seasons),
-                        );
-                        let chosen = this.seasons.get(this.season).map(|s| s.season_number);
-                        let number = this.wanted_season.take().or(chosen).or(item.play_season_number);
-                        this.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
-                        this.seasons = seasons;
-                        this.version = kept_version(&this.versions, this.version, &versions);
-                        this.versions = versions;
-                        this.item = Some(item);
-                        this.focus = this.rows().clamp(this.focus);
-                        this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        // The old episodes stay until the new ones come, unless the season changed or is gone.
-                        this.load_episodes(!reload || this.listed_season() != listed, cx);
+                        this.replace(item, seasons, versions, cx);
                     }
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
@@ -266,6 +233,47 @@ impl Detail {
             Self::load,
         );
         self.load_similar(cx);
+    }
+
+    fn replace(
+        &mut self,
+        item: wire::CatalogItemDetail,
+        seasons: Vec<wire::Season>,
+        versions: Vec<wire::FileVersion>,
+        cx: &mut Context<Self>,
+    ) {
+        let thumbs = [&item.backdrop_thumbhash, &item.poster_thumbhash]
+            .into_iter()
+            .chain(item.cast.iter().map(|c| &c.photo_thumbhash))
+            .chain(item.crew.iter().map(|c| &c.photo_thumbhash))
+            .map(|hash| hash.as_deref().and_then(artwork::thumbhash))
+            .collect();
+        artwork::replace_previews(&mut self.thumbs, thumbs, cx);
+        let posters = seasons.iter().map(|s| s.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
+        artwork::replace_previews(&mut self.season_thumbs, posters, cx);
+        let reload = self.item.is_some();
+        let listed = self.listed_season();
+        let old_actions = self.item.as_ref().map(|old| actions(old, &self.seasons)).unwrap_or_default();
+        if let Some(Mark::Season(i)) = self.menu {
+            self.menu = kept(&self.seasons, i, &seasons, |s| s.season_number).map(Mark::Season);
+        }
+        self.focus = kept_focus(
+            self.focus,
+            (&old_actions, &actions(&item, &seasons)),
+            (&self.versions, &versions),
+            (&self.seasons, &seasons),
+        );
+        let chosen = self.seasons.get(self.season).map(|s| s.season_number);
+        let number = self.wanted_season.take().or(chosen).or(item.play_season_number);
+        self.season = seasons.iter().position(|s| Some(s.season_number) == number).unwrap_or(0);
+        self.seasons = seasons;
+        self.version = kept_version(&self.versions, self.version, &versions);
+        self.versions = versions;
+        self.item = Some(item);
+        self.focus = self.rows().clamp(self.focus);
+        self.artwork.update(cx, |artwork, _| artwork.retry_failed());
+        // The old episodes stay until the new ones come, unless the season changed or is gone.
+        self.load_episodes(!reload || self.listed_season() != listed, cx);
     }
 
     /// The series id and the season number of the episodes that the page lists.
@@ -278,10 +286,7 @@ impl Detail {
     fn load_episodes(&mut self, clear: bool, cx: &mut Context<Self>) {
         if clear {
             self.episode_load.clear();
-            artwork::replace_previews(&mut self.episode_thumbs, Vec::new(), cx);
-            self.episodes.clear();
-            // The focus can be on an episode that is gone.
-            self.focus = self.rows().clamp(self.focus);
+            self.replace_episodes(Vec::new(), cx);
         }
         let Some((id, season)) = self.listed_season() else {
             // A load of a season that is gone must not fill the row again.
@@ -305,30 +310,29 @@ impl Detail {
                 }
                 accepted
             },
-            |this, result, cx| {
-                match result {
-                    Ok(episodes) => {
-                        let thumbs = episodes
-                            .iter()
-                            .map(|e| e.still_thumbhash.as_deref().and_then(artwork::thumbhash))
-                            .collect();
-                        artwork::replace_previews(&mut this.episode_thumbs, thumbs, cx);
-                        if let Focus::Episode(i) = this.focus {
-                            let kept = kept(&this.episodes, i, &episodes, |episode| episode.content_id.clone());
-                            this.focus = Focus::Episode(kept.unwrap_or(i));
-                        }
-                        // The menu of a card goes with its episode, and closes when the episode is gone.
-                        if let Some(Mark::Episode(i)) = this.menu {
-                            this.menu = kept(&this.episodes, i, &episodes, |e| e.content_id.clone()).map(Mark::Episode);
-                        }
-                        this.episodes = episodes;
-                        this.focus = this.rows().clamp(this.focus);
-                    }
-                    Err(err) => this.episode_error = Some(err.to_string()),
+            |this, result, cx| match result {
+                Ok(episodes) => {
+                    this.replace_episodes(episodes, cx);
                 }
+                Err(err) => this.episode_error = Some(err.to_string()),
             },
             Self::retry_episodes,
         );
+    }
+
+    fn replace_episodes(&mut self, episodes: Vec<wire::Episode>, cx: &mut Context<Self>) {
+        let thumbs = episodes.iter().map(|e| e.still_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
+        artwork::replace_previews(&mut self.episode_thumbs, thumbs, cx);
+        if let Focus::Episode(i) = self.focus {
+            let kept = kept(&self.episodes, i, &episodes, |episode| episode.content_id.clone());
+            self.focus = Focus::Episode(kept.unwrap_or(i));
+        }
+        // The menu of a card goes with its episode, and closes when the episode is gone.
+        if let Some(Mark::Episode(i)) = self.menu {
+            self.menu = kept(&self.episodes, i, &episodes, |e| e.content_id.clone()).map(Mark::Episode);
+        }
+        self.episodes = episodes;
+        self.focus = self.rows().clamp(self.focus);
     }
 
     fn retry_episodes(&mut self, cx: &mut Context<Self>) {
@@ -1270,12 +1274,6 @@ impl Render for Detail {
 /// The place in `versions` of the file that `old[chosen]` plays. The first version when that file is gone.
 pub fn kept_version(old: &[wire::FileVersion], chosen: usize, versions: &[wire::FileVersion]) -> usize {
     kept(old, chosen, versions, |version| version.file_id.clone()).unwrap_or(0)
-}
-
-/// The place in `new` of `old[index]`, matched by `key`. `None` when it is gone.
-fn kept<T, K: PartialEq>(old: &[T], index: usize, new: &[T], key: impl Fn(&T) -> K) -> Option<usize> {
-    let wanted = key(old.get(index)?);
-    new.iter().position(|item| key(item) == wanted)
 }
 
 /// The focus after a reload with new actions, versions and seasons. A focused button or pill moves with its action,

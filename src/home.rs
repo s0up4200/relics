@@ -85,11 +85,13 @@ pub fn kept_focus(focus: Focus, old: &[HomeSection], new: &[HomeSection]) -> Foc
     let Some(section) = old.get(row) else {
         return focus;
     };
-    let Some(row) = new.iter().position(|s| s.id == section.id) else {
+    let Some(row) = crate::selection::matching(old, row, new, |s| s.id.clone()) else {
         return focus;
     };
     let col = match section.items.get(col) {
-        Some(item) => new[row].items.iter().position(|i| i.content_id == item.content_id).unwrap_or(col),
+        Some(_) => {
+            crate::selection::matching(&section.items, col, &new[row].items, |i| i.content_id.clone()).unwrap_or(col)
+        }
         None => new[row].items.len(),
     };
     Focus::Card { row, col }
@@ -99,10 +101,10 @@ pub fn kept_focus(focus: Focus, old: &[HomeSection], new: &[HomeSection]) -> Foc
 /// the view stays there, also when a section above it comes or goes. When that section goes, the section that takes
 /// its place shows from its start.
 pub fn kept_top(top: ListOffset, old: &[HomeSection], new: &[HomeSection]) -> ListOffset {
-    let Some(section) = old.get(top.item_ix) else {
+    let Some(_) = old.get(top.item_ix) else {
         return top;
     };
-    match new.iter().position(|s| s.id == section.id) {
+    match crate::selection::matching(old, top.item_ix, new, |s| s.id.clone()) {
         Some(item_ix) => ListOffset { item_ix, ..top },
         None => ListOffset { offset_in_item: px(0.), ..top },
     }
@@ -198,62 +200,67 @@ impl Home {
                     Rows::Library(id) => client.library_rows(&id, size).await,
                 }
             },
-            move |this, result, cx| {
-                match result {
-                    Ok(mut sections) => {
-                        sections.sort_by_key(|s| !s.featured);
-                        let first_load = this.sections.is_empty();
-                        let thumbs = sections.iter().map(|s| s.items.iter().map(|i| thumb(s, i)).collect()).collect();
-                        for mut row in std::mem::replace(&mut this.thumbs, thumbs) {
-                            artwork::replace_previews(&mut row, Vec::new(), cx);
-                        }
-                        // A reload keeps the scroll position of each section and the focus.
-                        this.row_scrolls = sections
-                            .iter()
-                            .map(|section| {
-                                let old = this.sections.iter().position(|s| s.id == section.id);
-                                old.and_then(|i| this.row_scrolls.get(i).cloned()).unwrap_or_else(ScrollHandle::new)
-                            })
-                            .collect();
-                        let focus = kept_focus(this.focus, &this.sections, &sections);
-                        let old_top = this.page.logical_scroll_top();
-                        let top = kept_top(old_top, &this.sections, &sections);
-                        if let (Focus::Card { row, col }, true) = (focus, focus != this.focus) {
-                            cards(&sections[row]).reveal(&this.row_scrolls[row], col);
-                        }
-                        this.focus = focus;
-                        this.sections = sections;
-                        this.status = None;
-                        this.failed = false;
-                        let rows = this.row_lengths();
-                        let lost = match this.focus {
-                            Focus::Card { row, col } => rows.get(row).is_none_or(|&cards| col >= cards),
-                            Focus::Outside => first_load,
-                        };
-                        if lost {
-                            this.focus = move_focus(Focus::Outside, Key::Right, &rows);
-                        }
-                        this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                        let count = this.sections.len() + 1;
-                        if this.page.item_count() == count
-                            && (top.item_ix, top.offset_in_item) == (old_top.item_ix, old_top.offset_in_item)
-                        {
-                            this.page.remeasure();
-                        } else {
-                            this.page.reset(count);
-                            this.page.scroll_to(top);
-                        }
-                    }
-                    Err(err) => {
-                        this.status = Some(err.to_string());
-                        this.failed = true;
-                        let status = this.sections.len();
-                        this.page.remeasure_items(status..status + 1);
-                    }
+            move |this, result, cx| match result {
+                Ok(sections) => {
+                    this.replace(sections, cx);
+                }
+                Err(err) => {
+                    this.status = Some(err.to_string());
+                    this.failed = true;
+                    let status = this.sections.len();
+                    this.page.remeasure_items(status..status + 1);
                 }
             },
             Self::load,
         );
+    }
+
+    fn replace(&mut self, mut sections: Vec<HomeSection>, cx: &mut Context<Self>) {
+        sections.sort_by_key(|s| !s.featured);
+        let first_load = self.sections.is_empty();
+        let thumbs = sections.iter().map(|s| s.items.iter().map(|i| thumb(s, i)).collect()).collect();
+        for mut row in std::mem::replace(&mut self.thumbs, thumbs) {
+            artwork::replace_previews(&mut row, Vec::new(), cx);
+        }
+        // A reload keeps the scroll position of each section and the focus.
+        self.row_scrolls = sections
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let old = crate::selection::matching(&sections, i, &self.sections, |s| s.id.clone());
+                old.and_then(|i| self.row_scrolls.get(i).cloned()).unwrap_or_else(ScrollHandle::new)
+            })
+            .collect();
+        let focus = kept_focus(self.focus, &self.sections, &sections);
+        let old_top = self.page.logical_scroll_top();
+        let top = kept_top(old_top, &self.sections, &sections);
+        if let (Focus::Card { col: old, .. }, Focus::Card { row, col }) = (self.focus, focus)
+            && old != col
+        {
+            cards(&sections[row]).reveal(&self.row_scrolls[row], col);
+        }
+        self.focus = focus;
+        self.sections = sections;
+        self.status = None;
+        self.failed = false;
+        let rows = self.row_lengths();
+        let lost = match self.focus {
+            Focus::Card { row, col } => rows.get(row).is_none_or(|&cards| col >= cards),
+            Focus::Outside => first_load,
+        };
+        if lost {
+            self.focus = move_focus(Focus::Outside, Key::Right, &rows);
+        }
+        self.artwork.update(cx, |artwork, _| artwork.retry_failed());
+        let count = self.sections.len() + 1;
+        if self.page.item_count() == count
+            && (top.item_ix, top.offset_in_item) == (old_top.item_ix, old_top.offset_in_item)
+        {
+            self.page.remeasure();
+        } else {
+            self.page.reset(count);
+            self.page.scroll_to(top);
+        }
     }
 
     /// The number of focus stops in each row: the cards, and "View all" after them.
@@ -300,6 +307,7 @@ impl Home {
     fn card_target(&self, row: usize, col: usize, card: impl IntoElement, cx: &Context<Self>) -> AnyElement {
         div()
             .id(("home-card", row * 10_000 + col))
+            .debug_selector(|| format!("home-card-{}-{col}", self.sections[row].id))
             .flex_none()
             .clickable()
             .child(card)

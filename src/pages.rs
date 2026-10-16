@@ -93,7 +93,7 @@ fn relist(page: &Entity<LibraryPage>, libraries: &[wire::UserLibrary], cx: &mut 
 /// below the Libraries. Home when the Library is gone.
 fn kept_row(row: usize, old: &[wire::UserLibrary], new: &[wire::UserLibrary]) -> usize {
     match row.checked_sub(1).map(|i| old.get(i)) {
-        Some(Some(library)) => new.iter().position(|l| l.id == library.id).map_or(0, |i| i + 1),
+        Some(Some(_)) => crate::selection::matching(old, row - 1, new, |l| l.id.clone()).map_or(0, |i| i + 1),
         Some(None) => row - old.len() + new.len(),
         None => 0,
     }
@@ -253,16 +253,7 @@ impl Pages {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(libraries) if this.freshness.libraries().end(ticket) => {
-                        // A removed Library, or one with another type, opens fresh next time.
-                        this.library_pages.retain(|_, page| relist(page, &libraries, cx));
-                        this.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
-                        let removed = matches!(&this.page, Page::Library(page) if !relist(page, &libraries, cx));
-                        this.sidebar = this.sidebar.map(|row| kept_row(row, &this.libraries, &libraries));
-                        this.libraries = libraries;
-                        if removed {
-                            this.back.clear();
-                            this.show(Page::Home(this.home.clone()), cx);
-                        }
+                        this.replace_libraries(libraries, cx);
                     }
                     Ok(_) => {}
                     // The sidebar shows Home only. It reads the list again when it gets the focus.
@@ -278,6 +269,19 @@ impl Pages {
             })
             .ok();
         });
+    }
+
+    fn replace_libraries(&mut self, libraries: Vec<wire::UserLibrary>, cx: &mut Context<Self>) {
+        // A removed Library, or one with another type, opens fresh next time.
+        self.library_pages.retain(|_, page| relist(page, &libraries, cx));
+        self.back.retain(|page| !matches!(page, Page::Library(page) if !relist(page, &libraries, cx)));
+        let removed = matches!(&self.page, Page::Library(page) if !relist(page, &libraries, cx));
+        self.sidebar = self.sidebar.map(|row| kept_row(row, &self.libraries, &libraries));
+        self.libraries = libraries;
+        if removed {
+            self.back.clear();
+            self.show(Page::Home(self.home.clone()), cx);
+        }
     }
 
     fn listen<T: EventEmitter<Play> + EventEmitter<Open>>(
