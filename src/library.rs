@@ -232,6 +232,11 @@ impl LibraryWindow {
         let enabled = !isolated && LocalSettings::load(&crate::settings::directory(cx)).check_releases;
         let release = cx.new(|cx| ReleaseCheck::new(http, enabled, cx));
         let release_changed = cx.observe(&release, |_, _, cx| cx.notify());
+        // GPUI draws the window once before it opens, but shows that frame only when the compositor asks for the
+        // first frame. A next-frame callback runs at that request, before the frame shows.
+        if startup::on() {
+            window.on_next_frame(|_, _| startup::mark("first-frame"));
+        }
         let mut this = Self {
             state,
             state_dir,
@@ -1011,10 +1016,6 @@ impl LibraryWindow {
 
 impl Render for LibraryWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A deferred call runs when the window has drawn the frame.
-        if startup::on() {
-            window.defer(cx, |_, _| startup::mark("first-frame"));
-        }
         if let Some(view) = self.player_view.clone().filter(|_| self.player.read(cx).in_view()) {
             // No background and no other screen: the video shows through the Player view.
             return focus_scope("library").size_full().child(view).into_any_element();
