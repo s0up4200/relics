@@ -17,7 +17,7 @@ use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button, focus_scope, input};
 
 use crate::accounts::{AccountChoice, AccountPicker};
-use crate::api::{self, Client, Device, Error, Pending, Server, Trouble, Url, wire};
+use crate::api::{self, Client, Device, Error, Pending, Server, Tokens, Trouble, Url, wire};
 use crate::click::Clickable as _;
 use crate::home;
 use crate::pages::freshness::Change;
@@ -49,7 +49,13 @@ pub fn retry_delay(attempt: u32) -> Duration {
 pub struct LibraryWindow {
     state: State,
     state_dir: PathBuf,
-    save_secrets: bool,
+    /// A test session. It reads the tokens from `tokens`, saves no PIN token, and has no video, no release check and
+    /// no Live updates socket for the pages that it opens. A token refresh and a sign-out still use the Secret
+    /// Service.
+    isolated: bool,
+    /// The tokens of each saved Account of a test session, keyed by Server id and Account id. A test session reads
+    /// them in place of the Secret Service.
+    tokens: HashMap<(String, String), Tokens>,
     device: Device,
     screen: Screen,
     url: Entity<InputState>,
@@ -77,6 +83,9 @@ pub struct LibraryWindow {
     offline: bool,
     /// Probes the Server while it is Offline.
     probe: Option<Task<()>>,
+    /// Waits for the progress sync after the Server answers again, and then reloads the pages. A switch to another
+    /// Profile or Active server cancels the reload, so that it cannot reload the pages that replace them.
+    recovery: Option<Task<()>>,
     /// The server refused the sign-in during playback. The sign-in screen shows when the player closes.
     sign_in_waits: bool,
     _troubles: Option<Task<()>>,
@@ -137,6 +146,8 @@ pub struct Session {
     pub client: Arc<Client>,
     pub pages: Entity<Pages>,
     pub profiles: Vec<wire::Profile>,
+    /// The tokens of each saved Account, keyed by Server id and Account id, in place of the Secret Service.
+    pub tokens: HashMap<(String, String), Tokens>,
 }
 
 impl LibraryWindow {
@@ -172,17 +183,20 @@ impl LibraryWindow {
             }
         });
         let isolated = session.is_some();
-        let (state, state_dir, browsing) = match session {
-            Some(session) => {
-                (session.state, session.directory, Some((session.client, session.pages, session.profiles)))
-            }
+        let (state, state_dir, tokens, browsing) = match session {
+            Some(session) => (
+                session.state,
+                session.directory,
+                session.tokens,
+                Some((session.client, session.pages, session.profiles)),
+            ),
             None => {
                 let dir = State::dir();
                 let state = State::load(&dir).unwrap_or_else(|err| {
                     eprintln!("relics: cannot read the state in {}: {err}", dir.display());
                     State::fresh()
                 });
-                (state, dir, None)
+                (state, dir, HashMap::new(), None)
             }
         };
         let device =
@@ -240,7 +254,8 @@ impl LibraryWindow {
         let mut this = Self {
             state,
             state_dir,
-            save_secrets: !isolated,
+            isolated,
+            tokens,
             device,
             screen: Screen::Connect,
             url,
@@ -259,6 +274,7 @@ impl LibraryWindow {
             client: None,
             offline: false,
             probe: None,
+            recovery: None,
             sign_in_waits: false,
             _troubles: None,
             _pages: Vec::new(),
@@ -322,9 +338,13 @@ impl LibraryWindow {
             return;
         };
         let account_id = account.id.clone();
+        let saved = self.isolated.then(|| self.tokens.get(&(server.id.clone(), account_id.clone())).cloned());
         self.set_screen(Screen::Message(format!("Signing in to {}…", server.name)), cx);
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
-            let tokens = secrets::load(&server.id, &account_id).await;
+            let tokens = match saved {
+                Some(saved) => Ok(saved),
+                None => secrets::load(&server.id, &account_id).await,
+            };
             startup::mark("keyring");
             this.update_in(cx, |this, window, cx| match tokens {
                 Ok(Some(tokens)) => {
@@ -494,6 +514,11 @@ impl LibraryWindow {
                         pages.update(cx, |pages, cx| pages.refresh(&[Change::All], cx));
                         pages
                     }
+                    // A test session controls the Live updates of the pages that it starts with, and opens no socket.
+                    _ if this.isolated => cx.new(|cx| {
+                        let changes = futures::stream::pending().boxed();
+                        Pages::with_changes(client.clone(), profile.name.clone(), changes, window, cx)
+                    }),
                     _ => cx.new(|cx| Pages::new(client.clone(), profile.name.clone(), window, cx)),
                 };
                 this.show_pages(client, pages, window, cx);
@@ -578,7 +603,7 @@ impl LibraryWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.save_secrets
+        if !self.isolated
             && let Some(token) = token.clone()
         {
             let (server_id, account_id, profile_id) =
@@ -599,6 +624,7 @@ impl LibraryWindow {
             _ if self.menu_back.is_some() && current.as_deref() == Some(&*profile.id) => self.back_to_pages(window, cx),
             _ => {
                 self.menu_back = None;
+                self.recovery = None;
                 self.stop_playback(cx).detach();
                 self.open_profile(client, profile.clone(), token.clone(), window, cx);
             }
@@ -741,6 +767,7 @@ impl LibraryWindow {
         self.parked = None;
         self.opening = None;
         self.probe = None;
+        self.recovery = None;
         self.offline = false;
         self._troubles = None;
         self._pin_requests = None;
@@ -879,31 +906,37 @@ impl LibraryWindow {
                 }
                 attempt = attempt.saturating_add(1);
             }
-            let sync = cx.background_spawn({
+            // A switch cancels only the reload. The sync goes on, because the Server can already have its request.
+            let (synced, sync_done) = oneshot::channel();
+            cx.background_spawn({
                 let client = client.clone();
                 async move {
                     // A failed sync keeps the positions for the next sync.
                     if let Err(err) = client.sync_progress().await {
                         eprintln!("relics: progress sync failed: {err}");
                     }
+                    synced.send(()).ok();
                 }
-            });
+            })
+            .detach();
             this.update_in(cx, |this, window, cx| {
                 this.offline = false;
                 // This task ends here, so it must not drop itself.
                 if let Some(probe) = this.probe.take() {
                     probe.detach();
                 }
+                // The pages reload after the attempt to give the Server the positions of the stop reports that
+                // failed offline, also when it failed.
+                this.recovery = Some(cx.spawn(async move |this, cx| {
+                    sync_done.await.ok();
+                    this.update(cx, |this, cx| this.refresh_pages(cx)).ok();
+                }));
                 if matches!(this.screen, Screen::Unreachable(_)) {
                     this.open_account(client, window, cx);
                 }
                 cx.notify();
             })
             .ok();
-            // The pages reload after the attempt to give the Server the positions of the stop reports that failed
-            // offline, also when it failed.
-            sync.await;
-            this.update(cx, |this, cx| this.refresh_pages(cx)).ok();
         }));
     }
 
