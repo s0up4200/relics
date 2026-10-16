@@ -48,6 +48,7 @@ pub fn retry_delay(attempt: u32) -> Duration {
 pub struct LibraryWindow {
     state: State,
     state_dir: PathBuf,
+    save_secrets: bool,
     device: Device,
     screen: Screen,
     url: Entity<InputState>,
@@ -128,10 +129,35 @@ enum Status {
     Failed(String),
 }
 
+/// An existing signed-in session, with isolated saved state for recovery tests.
+pub struct Session {
+    pub state: State,
+    pub directory: PathBuf,
+    pub client: Arc<Client>,
+    pub pages: Entity<Pages>,
+    pub profiles: Vec<wire::Profile>,
+}
+
 impl LibraryWindow {
     /// `links` are the Browser sign-in links that other processes hand off. `link` is the return link that
     /// started this process when no app waited for it.
     pub fn new(
+        links: Option<mpsc::UnboundedReceiver<String>>,
+        link: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::build(None, links, link, window, cx)
+    }
+
+    /// Start at the real browsing screen without desktop or sign-in startup services.
+    pub fn with_session(session: Session, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::settings::use_directory(session.directory.clone(), cx);
+        Self::build(Some(session), None, None, window, cx)
+    }
+
+    fn build(
+        session: Option<Session>,
         links: Option<mpsc::UnboundedReceiver<String>>,
         link: Option<String>,
         window: &mut Window,
@@ -144,14 +170,23 @@ impl LibraryWindow {
                 this.connect(window, cx);
             }
         });
-        let state_dir = State::dir();
-        let state = State::load(&state_dir).unwrap_or_else(|err| {
-            eprintln!("relics: cannot read the state in {}: {err}", state_dir.display());
-            State::fresh()
-        });
+        let isolated = session.is_some();
+        let (state, state_dir, browsing) = match session {
+            Some(session) => {
+                (session.state, session.directory, Some((session.client, session.pages, session.profiles)))
+            }
+            None => {
+                let dir = State::dir();
+                let state = State::load(&dir).unwrap_or_else(|err| {
+                    eprintln!("relics: cannot read the state in {}: {err}", dir.display());
+                    State::fresh()
+                });
+                (state, dir, None)
+            }
+        };
         let device =
             Device { id: state.device_id.clone(), name: gethostname::gethostname().to_string_lossy().into_owned() };
-        let video = video::Surface::new(window);
+        let video = if isolated { None } else { video::Surface::new(window) };
         let player = cx.new(|cx| Controller::new(video.clone(), cx));
         let player_view = video.map(|video| cx.new(|cx| PlayerView::new(player.clone(), video, cx)));
         let view_closed = cx.subscribe_in(&player, window, |this, _, _: &ViewClosed, window, cx| {
@@ -191,13 +226,14 @@ impl LibraryWindow {
             }
         });
         // A debug build (`cargo run`) sends no request to GitHub.
-        let http = (!cfg!(debug_assertions)).then(|| cx.http_client());
-        let enabled = LocalSettings::load(&LocalSettings::dir()).check_releases;
+        let http = (!isolated && !cfg!(debug_assertions)).then(|| cx.http_client());
+        let enabled = !isolated && LocalSettings::load(&crate::settings::directory(cx)).check_releases;
         let release = cx.new(|cx| ReleaseCheck::new(http, enabled, cx));
         let release_changed = cx.observe(&release, |_, _, cx| cx.notify());
         let mut this = Self {
             state,
             state_dir,
+            save_secrets: !isolated,
             device,
             screen: Screen::Connect,
             url,
@@ -242,9 +278,17 @@ impl LibraryWindow {
             release,
             _release: release_changed,
         };
-        match link {
-            Some(link) => this.browser_timed_out(&link, window, cx),
-            None => this.restore(window, cx),
+        if let Some((client, pages, profiles)) = browsing {
+            this.profiles = profiles;
+            this.listen_for_pin(&client, window, cx);
+            this.listen_for_trouble(&client, window, cx);
+            this.client = Some(client.clone());
+            this.show_pages(client, pages, window, cx);
+        } else {
+            match link {
+                Some(link) => this.browser_timed_out(&link, window, cx),
+                None => this.restore(window, cx),
+            }
         }
         this
     }
@@ -524,7 +568,9 @@ impl LibraryWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(token) = token.clone() {
+        if self.save_secrets
+            && let Some(token) = token.clone()
+        {
             let (server_id, account_id, profile_id) =
                 (client.server().id.clone(), self.account_id(), profile.id.to_string());
             // When the Secret Service is missing, the PIN token stays only in memory.

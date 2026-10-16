@@ -18,6 +18,7 @@ use crate::filter_panel::bar_pill;
 use crate::home::{Open, Play, card};
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::player::start_shuffle;
 
 pub const POSTER_WIDTH: f32 = 150.;
@@ -130,8 +131,7 @@ pub struct Grid {
     /// The error of the last load, shown with Retry.
     error: Option<String>,
     /// The load of the next page or the reload. A reload waits for the load of the next page.
-    loading: Option<Task<()>>,
-    fresh: Fresh,
+    fresh: Loader,
     image_size: Rung,
     scroll: UniformListScrollHandle,
     artwork: Entity<ArtworkCache>,
@@ -152,8 +152,7 @@ impl Grid {
             active: false,
             columns: 1,
             error: None,
-            loading: None,
-            fresh: Fresh::default(),
+            fresh: Loader::default(),
             image_size: Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()),
             scroll: UniformListScrollHandle::new(),
             artwork: artwork::global(cx),
@@ -168,15 +167,13 @@ impl Grid {
         self.source = query.into();
         self.paging = Paging::default();
         self.focus = 0;
-        self.loading = None;
+        self.fresh.clear();
         self.scroll.0.borrow().base_handle.set_offset(gpui::Point::default());
         self.load_more(cx);
     }
 
     fn drop_thumbs(&mut self, cx: &mut gpui::App) {
-        for thumb in self.thumbs.drain(..).flatten() {
-            cx.drop_image(thumb, None);
-        }
+        artwork::replace_previews(&mut self.thumbs, Vec::new(), cx);
     }
 
     /// The number of Items in the whole result, after the first page came.
@@ -194,82 +191,72 @@ impl Grid {
         let Some(cursor) = self.paging.next_cursor() else {
             return;
         };
-        if self.loading.is_some() {
+        if self.fresh.loading() {
             return;
         }
         self.error = None;
-        // The first page, also after a failed first load, reads the Items again.
-        let ticket = if self.paging.items.is_empty() { self.fresh.begin() } else { self.fresh.more() };
         let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
-        self.loading = Some(cx.spawn(async move |this, cx| {
-            let result = fetch(&client, source, cursor, None, image_size).await;
-            this.update(cx, |this, cx| {
-                this.loading = None;
-                match result {
-                    _ if !this.fresh.end(ticket) => {}
-                    Ok((items, total, page)) => {
-                        this.thumbs.extend(items.iter().map(thumb));
-                        this.paging.add(items, total, page);
-                        this.artwork.update(cx, |artwork, _| artwork.retry_failed());
-                    }
-                    // The Library window shows Offline or the sign-in screen. The grid keeps what it shows.
-                    Err(err) => this.error = Some(err.to_string()),
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Page,
+            async move { fetch(&client, source, cursor, None, image_size).await },
+            |this, result, cx| match result {
+                Ok((items, total, page)) => {
+                    this.thumbs.extend(items.iter().map(thumb));
+                    this.paging.add(items, total, page);
+                    this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                 }
-                if this.fresh.ready() {
-                    this.reload(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
+                Err(err) => this.error = Some(err.to_string()),
+            },
+            Self::reload,
+        );
         cx.notify();
     }
 
     /// Loads the Items again from the first page, as many as the grid has, in pages of up to 100 Items. The new
     /// Items replace the old ones when all pages are in, so the scroll position stays. The focus stays on its Item.
     fn reload(&mut self, cx: &mut Context<Self>) {
+        if !self.fresh.loaded() {
+            self.error = None;
+        }
         // A grid with less than one page has all its Items, or its first load failed. It reloads one full page.
         let want = self.paging.items.len().max(crate::browse::PAGE_SIZE as usize);
-        let ticket = self.fresh.begin();
         let (client, image_size, source) = (self.client.clone(), self.image_size, self.source.clone());
-        self.loading = Some(cx.spawn(async move |this, cx| {
-            let mut paging = Paging::default();
-            let result = async {
-                while paging.items.len() < want
-                    && let Some(cursor) = paging.next_cursor()
-                {
-                    let limit = (want - paging.items.len()).min(RELOAD_PAGE) as u64;
-                    let (items, total, page) = fetch(&client, source.clone(), cursor, Some(limit), image_size).await?;
-                    paging.add(items, total, page);
-                }
-                Ok::<_, crate::api::Error>(())
-            }
-            .await;
-            this.update(cx, |this, cx| {
-                this.loading = None;
-                match result {
-                    _ if !this.fresh.end(ticket) => {}
-                    Ok(()) => {
-                        this.drop_thumbs(cx);
-                        this.thumbs = paging.items.iter().map(thumb).collect();
-                        this.focus =
-                            kept_focus(&this.paging.items, this.focus, &paging.items, |i| i.content_id.clone());
-                        this.paging = paging;
-                        this.error = None;
-                        this.artwork.update(cx, |artwork, _| artwork.retry_failed());
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move {
+                let mut paging = Paging::default();
+                async {
+                    while paging.items.len() < want
+                        && let Some(cursor) = paging.next_cursor()
+                    {
+                        let limit = (want - paging.items.len()).min(RELOAD_PAGE) as u64;
+                        let (items, total, page) =
+                            fetch(&client, source.clone(), cursor, Some(limit), image_size).await?;
+                        paging.add(items, total, page);
                     }
-                    // A grid that loaded keeps what it shows, also "No titles.", with no error. The Library window
-                    // shows Offline or the sign-in screen.
-                    Err(err) if this.paging.loaded() => eprintln!("relics: cannot reload the grid: {err}"),
-                    Err(err) => this.error = Some(err.to_string()),
+                    Ok::<_, crate::api::Error>(paging)
                 }
-                if this.fresh.ready() {
-                    this.reload(cx);
+                .await
+            },
+            |this, result, cx| match result {
+                Ok(paging) => {
+                    this.drop_thumbs(cx);
+                    this.thumbs = paging.items.iter().map(thumb).collect();
+                    this.focus = kept_focus(&this.paging.items, this.focus, &paging.items, |i| i.content_id.clone());
+                    this.paging = paging;
+                    this.error = None;
+                    this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                 }
-                cx.notify();
-            })
-            .ok();
-        }));
+                Err(err) => this.error = Some(err.to_string()),
+            },
+            Self::reload,
+        );
         cx.notify();
     }
 
@@ -353,7 +340,7 @@ impl Render for Grid {
         self.image_size = self.image_size.max(Rung::fit(Kind::Poster, POSTER_WIDTH, window.scale_factor()));
         self.columns = columns(viewport - crate::pages::sidebar_width(viewport, false) - 80.);
         let len = self.paging.items.len();
-        let status = match (&self.error, &self.loading) {
+        let status = match (&self.error, self.fresh.visible_loading()) {
             (Some(error), _) => Some(
                 div()
                     .w_full()
@@ -364,11 +351,12 @@ impl Render for Grid {
                     .child(error.clone())
                     .child(
                         button("grid-retry", "Retry", ButtonVariant::Secondary, cx)
+                            .debug_selector(|| "grid-retry".into())
                             .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
                     )
                     .into_any_element(),
             ),
-            (None, Some(_)) => Some(div().w_full().text_color(t.secondary).child("Loading…").into_any_element()),
+            (None, true) => Some(div().w_full().text_color(t.secondary).child("Loading…").into_any_element()),
             _ => None,
         };
         // The list draws only the visible rows. Each row holds `columns` cards and the gap below it.

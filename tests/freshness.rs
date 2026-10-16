@@ -18,10 +18,14 @@ use relics::api::live::LiveChange;
 use relics::pages::Pages;
 use relics::settings::SubtitleMode;
 
-struct PageWindow(Entity<Pages>);
+struct PageWindow(Entity<Pages>, Option<Entity<relics::library::LibraryWindow>>);
 impl Render for PageWindow {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui_omarchy::focus_scope("test-pages").size_full().child(self.0.clone())
+        let root = gpui_omarchy::focus_scope("test-pages").size_full();
+        match &self.1 {
+            Some(library) => root.child(library.clone()),
+            None => root.child(self.0.clone()),
+        }
     }
 }
 
@@ -35,6 +39,9 @@ struct Server {
     held: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
     /// The subtitle mode of the Profile: the last value that a write sent.
     mode: Arc<Mutex<String>>,
+    empty: Arc<Mutex<Vec<String>>>,
+    pin: Arc<Mutex<bool>>,
+    replies: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl Server {
@@ -66,10 +73,34 @@ impl Server {
         if self.fail.lock().unwrap().iter().any(|p| req.path.starts_with(p.as_str())) {
             return None;
         }
+        if self.empty.lock().unwrap().iter().any(|prefix| req.path.starts_with(prefix)) {
+            return json(200, r#"{"items":[],"page":{"has_more":false}}"#.into());
+        }
+        if *self.pin.lock().unwrap()
+            && req.path.starts_with("catalog/filters")
+            && req.header("x-profile-token").is_none()
+        {
+            return common::problem(403, "profile_verification_required.json");
+        }
+        if let Some(body) = self
+            .replies
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(prefix, body)| req.path.starts_with(prefix).then_some(body.clone()))
+        {
+            return json(200, body);
+        }
         let path = req.path.split('?').next().unwrap();
         match (req.method.as_str(), path) {
+            (_, "system/info") => ok("get_system_info_ok.json"),
+            (_, "sync/progress") => ok("sync_progress_ok.json"),
+            (_, "profiles/p-owner/verify-pin") => ok("verify_profile_pin_ok.json"),
+            (_, "catalog/items/movie:heat-1995/versions") => ok("list_catalog_item_versions_ok.json"),
+            (_, "playback/capabilities") => ok("playback_capability_available.json"),
+            (_, "playback/start") => ok("playback_start_opaque_ids.json"),
             (_, "user/libraries") => ok("user_libraries.json"),
-            (_, "home/layout" | "library/12/layout") => json(200, r#"{"sections":[]}"#.into()),
+            (_, "home/layout" | "home/sections" | "library/12/layout") => json(200, r#"{"sections":[]}"#.into()),
             (_, "catalog/filters") => json(
                 200,
                 r#"{"authors":[],"narrators":[],"series":[],"content_ratings":[],"genres":[],"studios":[],"networks":[],"countries":[],"original_languages":[]}"#.into(),
@@ -102,7 +133,7 @@ impl Server {
             }
             (_, "catalog/series/test-series/seasons") => ok("list_series_seasons_ok.json"),
             (_, "catalog/series/test-series/seasons/1/episodes") => ok("list_season_episodes_ok.json"),
-            ("DELETE", "watched/test-series") => json(204, String::new()),
+            ("DELETE", "watched/test-series" | "watched/test-item") => json(204, String::new()),
             (_, "recommendations/similar/test-item") => ok("list_similar_ok.json"),
             (_, "collections/server") => json(200, r#"{"libraries":[]}"#.into()),
             (_, "library/12/collections") => ok("get_library_collections_ok.json"),
@@ -129,10 +160,18 @@ impl Server {
 
 /// The pages of the Profile `p-owner` on the fake Server, with a stream of Live updates that the test sends.
 fn rig(cx: &mut TestAppContext) -> (Entity<Pages>, &mut VisualTestContext, Server, Changes, Arc<Client>) {
+    make_rig(cx, false)
+}
+
+fn make_rig(
+    cx: &mut TestAppContext,
+    library: bool,
+) -> (Entity<Pages>, &mut VisualTestContext, Server, Changes, Arc<Client>) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         gpui_omarchy::Theme::tokyo_night().apply(cx);
         relics::text_input::init(cx);
+        common::isolate(cx);
     });
     let server = Server { mode: Arc::new(Mutex::new("auto".into())), ..Server::default() };
     let fake = server.clone();
@@ -161,7 +200,33 @@ fn rig(cx: &mut TestAppContext) -> (Entity<Pages>, &mut VisualTestContext, Serve
     let (changes, stream) = mpsc::unbounded();
     let pages_client = client.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        PageWindow(cx.new(|cx| Pages::with_changes(pages_client, "Test".into(), stream.boxed(), window, cx)))
+        let pages = cx.new(|cx| Pages::with_changes(pages_client.clone(), "Test".into(), stream.boxed(), window, cx));
+        let library = library.then(|| {
+            let mut state = relics::state::State::fresh();
+            state.servers.push(relics::state::SavedServer {
+                id: "server-1".into(),
+                url: "https://silo.test/".into(),
+                accounts: vec![relics::state::SavedAccount {
+                    id: "account-1".into(),
+                    username: "Test".into(),
+                    last_profile: Some("p-owner".into()),
+                }],
+            });
+            state.active = Some(("server-1".into(), "account-1".into()));
+            let profiles: relics::api::wire::ProfileCollection =
+                serde_json::from_str(&common::fixture("list_profiles_ok.json")).unwrap();
+            let mut profiles = profiles.items;
+            profiles[0].has_pin = true;
+            let session = relics::library::Session {
+                state,
+                directory: relics::settings::directory(cx),
+                client: pages_client,
+                pages: pages.clone(),
+                profiles,
+            };
+            cx.new(|cx| relics::library::LibraryWindow::with_session(session, window, cx))
+        });
+        PageWindow(pages, library)
     });
     cx.run_until_parked();
     let pages = cx.update(|_, cx| view.read(cx).0.clone());
@@ -467,4 +532,473 @@ fn a_follow_up_load_waits_while_its_page_is_hidden(cx: &mut TestAppContext) {
     pages.update(cx, |pages, cx| pages.set_shown(true, cx));
     cx.run_until_parked();
     assert_eq!(server.count("requests/mine"), 3, "the follow-up runs when the page shows");
+}
+
+fn drawn(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.debug_bounds(selector).is_some()
+}
+
+fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("missing {selector}"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn empty_pages_keep_their_success_after_a_failed_reload(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = rig(cx);
+    *server.empty.lock().unwrap() = vec!["requests/mine".into()];
+    for (row, path, retry) in [
+        (0, "home/layout", "home-retry"),
+        (5, "collections/server", "collections-retry"),
+        (6, "requests/mine", "requests-retry"),
+    ] {
+        server.fail(&[]);
+        open_row(cx, row);
+        cx.run_until_parked();
+        server.fail(&[path]);
+        send(cx, &changes, LiveChange::Resync);
+        assert!(!drawn(cx, retry), "{path}: an empty successful result still belongs to this page");
+    }
+    server.fail(&[]);
+    search(cx, "empty");
+    server.fail(&["catalog/people"]);
+    send(cx, &changes, LiveChange::Resync);
+    assert!(!drawn(cx, "search-retry"));
+    search(cx, "new choice");
+    assert!(drawn(cx, "search-retry"), "success for the previous query cannot hide a new query's failure");
+    let titles = server.requests("POST", "catalog/query").len();
+    click(cx, "search-retry");
+    assert!(drawn(cx, "search-retry"), "Retry can fail again");
+    assert_eq!(server.requests("POST", "catalog/query").len(), titles, "People Retry does not restart titles");
+    server.fail(&[]);
+    server.hold(&["catalog/people"]);
+    click(cx, "search-retry");
+    assert!(drawn(cx, "people-loading"));
+    assert!(!drawn(cx, "search-retry"));
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert!(!drawn(cx, "people-loading"));
+    assert!(!drawn(cx, "search-retry"));
+}
+
+#[gpui::test]
+fn episodes_retry_without_restarting_the_item_or_similar_rows(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    let episodes = "catalog/series/test-series/seasons/1/episodes";
+    server.fail(&[episodes]);
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail), cx));
+    cx.run_until_parked();
+    assert!(drawn(cx, "episodes-retry"));
+    let item = server.count("catalog/items/test-series?");
+    let similar = server.count("recommendations/similar/test-series");
+    server.fail(&[]);
+    click(cx, "episodes-retry");
+    assert!(!drawn(cx, "episodes-retry"));
+    assert_eq!(server.count(episodes), 2);
+    assert_eq!(server.count("catalog/items/test-series?"), item);
+    assert_eq!(server.count("recommendations/similar/test-series"), similar);
+}
+
+fn keep_progress(client: &Client, server: &Server, cx: &mut VisualTestContext) {
+    futures::executor::block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    server.fail(&["playback/11111111-1111-4111-8111-111111111111"]);
+    futures::executor::block_on(client.stop_playback(
+        "11111111-1111-4111-8111-111111111111",
+        Some(&relics::playback::Sample { sequence: 1, position: 75.5, paused: false }),
+    ))
+    .unwrap_err();
+    cx.run_until_parked();
+    server.fail(&[]);
+}
+
+fn recover(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn library_recovery_waits_for_progress_sync_before_refreshing(cx: &mut TestAppContext) {
+    let (_, cx, server, _, client) = make_rig(cx, true);
+    keep_progress(&client, &server, cx);
+    server.hold(&["sync/progress"]);
+    let home = server.count("home/layout");
+    recover(cx);
+    assert_eq!(server.count("system/info"), 1);
+    assert_eq!(server.requests("POST", "sync/progress").len(), 1);
+    assert_eq!(server.count("home/layout"), home, "page refresh waits for the held sync");
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home + 1);
+    let sync = &server.requests("POST", "sync/progress")[0];
+    let body: serde_json::Value = serde_json::from_str(&sync.body).unwrap();
+    assert_eq!(body["items"][0]["position_ms"], 75500);
+    futures::executor::block_on(client.sync_progress()).unwrap();
+    assert_eq!(server.requests("POST", "sync/progress").len(), 1, "successful sync consumed the saved progress");
+}
+
+#[gpui::test]
+fn library_refreshes_after_failed_sync_and_sends_unsent_progress_later(cx: &mut TestAppContext) {
+    let (_, cx, server, _, client) = make_rig(cx, true);
+    keep_progress(&client, &server, cx);
+    server.fail(&["sync/progress"]);
+    server.hold(&["sync/progress"]);
+    let home = server.count("home/layout");
+    recover(cx);
+    assert_eq!(server.count("home/layout"), home);
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home + 1, "failure still ends the recovery attempt");
+    server.fail(&[]);
+    recover(cx);
+    let requests = server.requests("POST", "sync/progress");
+    assert_eq!(requests.len(), 2);
+    let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+    assert_eq!(body["items"][0]["position_ms"], 75500, "failed sync retains progress for recovery");
+}
+
+#[gpui::test]
+fn library_defers_reload_behind_profile_server_and_pin_screens(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = make_rig(cx, true);
+    for menu_keys in ["m enter", "m down enter"] {
+        cx.simulate_keystrokes(menu_keys);
+        let home = server.count("home/layout");
+        for _ in 0..3 {
+            send(cx, &changes, LiveChange::Resync);
+        }
+        assert_eq!(server.count("home/layout"), home);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(server.count("home/layout"), home + 1, "one reload on return from the picker");
+    }
+    *server.pin.lock().unwrap() = true;
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    let filters = server.count("catalog/filters");
+    for _ in 0..3 {
+        send(cx, &changes, LiveChange::Resync);
+    }
+    assert_eq!(server.count("catalog/filters"), filters, "PIN entry hides the pages");
+    assert!(filters > 0, "Search sent the request that asks for a PIN");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_input("1234");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(server.requests("POST", "profiles/p-owner/verify-pin").len(), 1);
+    // The held request retries with the token, then one queued refresh runs.
+    assert_eq!(server.count("catalog/filters"), filters + 2);
+}
+
+#[gpui::test]
+fn grid_retries_the_missing_page_and_keeps_the_first_page(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, _) = rig(cx);
+    open_row(cx, 3);
+    server.fail(&["catalog/query"]);
+    cx.simulate_keystrokes("right");
+    assert!(drawn(cx, "grid-retry"));
+    let before = server.requests("POST", "catalog/query");
+    assert!(before.last().unwrap().body.contains(r#""cursor":"c2""#));
+    server.fail(&[]);
+    click(cx, "grid-retry");
+    let after = server.requests("POST", "catalog/query");
+    assert_eq!(after.len(), before.len() + 1);
+    assert!(after.last().unwrap().body.contains(r#""cursor":"c2""#));
+    // Focus was on b when the next page failed. Enter must still open b.
+    cx.update(|window, cx| pages.update(cx, |pages, cx| pages.focus(window, cx)));
+    cx.simulate_keystrokes("enter");
+    assert_eq!(server.count("catalog/items/b?"), 1);
+}
+
+#[gpui::test]
+fn first_load_retry_retries_only_the_failed_page(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, _) = rig(cx);
+    for (row, path, retry) in [
+        (5, "collections/server", "collections-retry"),
+        (6, "requests/mine", "requests-retry"),
+        (7, "settings/values/effective", "settings-retry"),
+    ] {
+        server.fail(&[path]);
+        cx.update(|window, cx| pages.update(cx, |pages, cx| pages.focus(window, cx)));
+        open_row(cx, row);
+        assert!(drawn(cx, retry), "{path}: first load failed");
+        server.hold(&[path]);
+        click(cx, retry);
+        assert!(!drawn(cx, retry), "Retry clears the failed operation's error while it loads");
+        server.hold(&[]);
+        server.release();
+        cx.run_until_parked();
+        assert!(drawn(cx, retry), "Retry can fail again");
+        server.fail(&[]);
+        click(cx, retry);
+        assert!(!drawn(cx, retry));
+    }
+}
+
+#[gpui::test]
+fn episodes_show_loading_during_retry_and_main_content_stays_available(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    let episodes = "catalog/series/test-series/seasons/1/episodes";
+    server.fail(&[episodes]);
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail), cx));
+    cx.run_until_parked();
+    server.fail(&[]);
+    server.hold(&[episodes]);
+    click(cx, "episodes-retry");
+    assert!(drawn(cx, "episodes-loading"));
+    assert!(!drawn(cx, "detail-retry"));
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert!(!drawn(cx, "episodes-loading"));
+}
+
+#[gpui::test]
+fn an_old_search_failure_cannot_replace_the_new_query(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = rig(cx);
+    search(cx, "old");
+    server.fail(&["catalog/people"]);
+    server.hold(&["catalog/people"]);
+    send(cx, &changes, LiveChange::Resync);
+    server.fail(&[]);
+    server.hold(&[]);
+    search(cx, "person");
+    server.release();
+    cx.run_until_parked();
+    assert!(!drawn(cx, "search-retry"));
+    cx.simulate_keystrokes("enter enter");
+    assert_eq!(server.count("catalog/people/7"), 1, "Enter still opens the new query's Person");
+}
+
+#[gpui::test]
+fn a_season_change_rejects_the_previous_episode_response(cx: &mut TestAppContext) {
+    use relics::keys::Key;
+    let (pages, cx, server, _, client) = rig(cx);
+    let first = "catalog/series/test-series/seasons/1/episodes";
+    let second = "catalog/series/test-series/seasons/2/episodes";
+    let mut seasons: serde_json::Value = serde_json::from_str(&common::fixture("list_series_seasons_ok.json")).unwrap();
+    let mut season = seasons["items"][0].clone();
+    season["season_number"] = 2.into();
+    season["content_id"] = "season:second".into();
+    seasons["items"].as_array_mut().unwrap().push(season);
+    server.replies.lock().unwrap().insert("catalog/series/test-series/seasons?".into(), seasons.to_string());
+    let mut episodes: serde_json::Value =
+        serde_json::from_str(&common::fixture("list_season_episodes_ok.json")).unwrap();
+    episodes["items"][0]["content_id"] = "episode:second".into();
+    episodes["items"][0]["season_number"] = 2.into();
+    server.replies.lock().unwrap().insert(second.into(), episodes.to_string());
+    server.hold(&[first]);
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail.clone()), cx));
+    cx.run_until_parked();
+    assert_eq!(server.count(first), 1);
+    detail.update(cx, |detail, cx| {
+        for key in [Key::Down, Key::Right, Key::Other("enter"), Key::Down, Key::Down] {
+            detail.key(key, cx);
+        }
+    });
+    cx.run_until_parked();
+    assert_eq!(server.count(second), 1);
+    assert!(drawn(cx, "episode-episode:second"));
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert!(drawn(cx, "episode-episode:second"));
+    assert!(!drawn(cx, "episode-episode:severance-s01e01"));
+}
+
+#[gpui::test]
+fn similar_rows_fail_quietly_and_keep_their_last_success(cx: &mut TestAppContext) {
+    let (pages, cx, server, changes, client) = rig(cx);
+    let detail =
+        cx.update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-item".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail.clone()), cx));
+    cx.run_until_parked();
+    detail.update(cx, |detail, cx| {
+        for _ in 0..20 {
+            detail.key(relics::keys::Key::Down, cx);
+        }
+    });
+    assert!(drawn(cx, "similar-card"));
+    server.fail(&["recommendations/similar"]);
+    send(cx, &changes, LiveChange::Resync);
+    assert!(drawn(cx, "similar-card"));
+    assert!(!drawn(cx, "detail-retry"));
+}
+
+#[gpui::test]
+fn a_similar_response_from_before_a_write_cannot_fill_the_row(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    let similar = "recommendations/similar/test-item";
+    server.hold(&[similar]);
+    let detail =
+        cx.update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-item".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail.clone()), cx));
+    cx.run_until_parked();
+    // A working hero action proves that the main Item does not wait for More Like This.
+    detail.update(cx, |detail, cx| {
+        for _ in 0..3 {
+            detail.key(relics::keys::Key::Right, cx);
+        }
+        detail.key(relics::keys::Key::Other("enter"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(server.requests("DELETE", "watched/test-item").len(), 1);
+    server.replies.lock().unwrap().insert(similar.into(), r#"{"items":[]}"#.into());
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/items/test-item?"), 2, "the obsolete child queues a fresh parent load");
+    detail.update(cx, |detail, cx| {
+        for _ in 0..20 {
+            detail.key(relics::keys::Key::Down, cx);
+        }
+    });
+    assert!(!drawn(cx, "similar-card"));
+}
+
+#[gpui::test]
+fn a_successful_home_reload_retries_failed_artwork(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (pages, cx, server, changes, client) = rig(cx);
+    let requests = Arc::new(AtomicUsize::new(0));
+    let seen = requests.clone();
+    let http = FakeHttpClient::create(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        async { anyhow::bail!("artwork is offline") }
+    });
+    cx.update(|_, cx| {
+        let dir = relics::settings::directory(cx).join("retry-artwork");
+        relics::artwork::install(http, dir, cx);
+    });
+    let mut layout: serde_json::Value = serde_json::from_str(&common::fixture("get_home_layout_ok.json")).unwrap();
+    layout["sections"].as_array_mut().unwrap().truncate(1);
+    let mut sections: serde_json::Value = serde_json::from_str(&common::fixture("list_home_sections_ok.json")).unwrap();
+    sections["sections"].as_array_mut().unwrap().truncate(1);
+    for item in sections["sections"][0]["items"].as_array_mut().unwrap() {
+        for key in ["poster_url", "backdrop_url", "still_url"] {
+            item[key] = "https://artwork.test/image.webp".into();
+        }
+    }
+    server.replies.lock().unwrap().insert("home/layout".into(), layout.to_string());
+    server.replies.lock().unwrap().insert("home/sections".into(), sections.to_string());
+    let home =
+        cx.update(|window, cx| cx.new(|cx| relics::home::Home::new(client, relics::home::Rows::Home, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Home(home), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    let first = requests.load(Ordering::SeqCst);
+    assert!(first > 0, "the visible artwork failed through its separate fake client");
+    server.fail(&["home/layout"]);
+    send(cx, &changes, LiveChange::Resync);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    assert_eq!(requests.load(Ordering::SeqCst), first, "a failed page load does not retry artwork");
+    server.fail(&[]);
+    send(cx, &changes, LiveChange::Resync);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    assert!(requests.load(Ordering::SeqCst) > first, "the existing successful-load trigger retries artwork");
+}
+
+#[gpui::test]
+fn optional_search_failures_keep_request_results_and_leave_the_page_usable(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = rig(cx);
+    let row = serde_json::json!({"page":1,"total_pages":1,"total_results":1,"results":[{
+        "availability":"missing","in_watchlist":false,"media_type":"movie","title":"Missing movie","tmdb_id":42,
+        "request":{"requestable":true,"following":false,"requested_by_viewer":false}
+    }]});
+    server.replies.lock().unwrap().insert("requests/search".into(), row.to_string());
+    search(cx, "missing");
+    assert!(drawn(cx, "request-row"));
+    server.fail(&["requests/search", "requests/status", "catalog/filters"]);
+    send(cx, &changes, LiveChange::Resync);
+    assert!(drawn(cx, "request-row"), "optional reload failures keep the request results");
+    assert!(!drawn(cx, "search-retry"));
+    // A different query has no previous optional row to retain.
+    search(cx, "another");
+    assert!(!drawn(cx, "request-row"));
+    assert!(!drawn(cx, "search-retry"), "a failed optional first load does not become a page error");
+}
+
+#[gpui::test]
+fn a_filter_change_rejects_the_held_grid_response(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    let query = relics::browse::Browse::default().query("12", false);
+    server.hold(&["catalog/query"]);
+    let page =
+        cx.update(|window, cx| cx.new(|cx| relics::grid::GridPage::new(client, "Filtered".into(), query, window, cx)));
+    let grid = page.read_with(cx, |page, _| page.grid.clone());
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Grid(page), cx));
+    cx.run_until_parked();
+    server.hold(&[]);
+    let new = serde_json::json!({"items":[{"content_id":"new-filter","type":"movie","title":"New filter","genres":[],"keywords":[],"status":"matched"}],"total":1,"total_exact":true,"window_cursor":"new","page":{"has_more":false}});
+    server.replies.lock().unwrap().insert("catalog/query".into(), new.to_string());
+    let mut browse = relics::browse::Browse::default();
+    browse.filters.genres = vec!["Crime".into()];
+    grid.update(cx, |grid, cx| grid.set_query(browse.query("12", false), cx));
+    cx.run_until_parked();
+    server.release();
+    cx.run_until_parked();
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let _opened = cx.update(|_, cx| {
+        cx.subscribe(&grid, move |_, event: &relics::home::Open, _| {
+            seen.lock().unwrap().push(event.0.content_id.clone());
+        })
+    });
+    grid.update(cx, |grid, cx| grid.key(relics::keys::Key::Other("enter"), cx));
+    cx.run_until_parked();
+    assert_eq!(*opened.lock().unwrap(), ["new-filter"]);
+}
+
+#[gpui::test]
+fn a_previous_items_held_reply_does_not_hide_the_current_items_failure(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    server.hold(&["catalog/items/test-item"]);
+    let previous = cx.update(|window, cx| {
+        cx.new(|cx| relics::detail::Detail::new(client.clone(), "test-item".into(), None, window, cx))
+    });
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(previous), cx));
+    cx.run_until_parked();
+    server.fail(&["catalog/items/test-series"]);
+    let current = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(current), cx));
+    cx.run_until_parked();
+    assert!(drawn(cx, "detail-retry"));
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert!(drawn(cx, "detail-retry"));
+}
+
+#[gpui::test]
+fn a_write_that_rejects_pagination_does_not_leave_loading_on_the_background_reload(cx: &mut TestAppContext) {
+    let (_, cx, server, _, _) = rig(cx);
+    let mut first: serde_json::Value = serde_json::from_str(&common::fixture("list_my_requests_ok.json")).unwrap();
+    first["page"] = serde_json::json!({"has_more":true,"next_cursor":"c2"});
+    server.replies.lock().unwrap().insert("requests/mine".into(), first.to_string());
+    open_row(cx, 6);
+    server.hold(&["requests/mine"]);
+    cx.simulate_keystrokes("down up enter");
+    assert_eq!(server.requests("POST", "requests/r-2/cancel").len(), 1);
+    server.replies.lock().unwrap().insert("requests/mine".into(), common::fixture("list_my_requests_ok.json"));
+    server.release();
+    cx.run_until_parked();
+    assert_eq!(server.count("requests/mine"), 3, "the rejected next page queues a reload after the write");
+    assert!(!drawn(cx, "requests-status"), "the completed next page cannot leave loading text on a background reload");
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
 }

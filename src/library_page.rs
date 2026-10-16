@@ -22,6 +22,7 @@ use crate::grid::{Grid, Move};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Moved, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::player::start_shuffle;
 
 /// A Shows library: its grid lists series, or episodes in Episodes mode.
@@ -74,9 +75,8 @@ pub struct LibraryPage {
     /// Why the last Shuffle failed.
     shuffle_error: Option<String>,
     /// The filter values.
-    fresh: Fresh,
+    fresh: Loader,
     _shuffle: Task<()>,
-    _facets: Task<()>,
     _events: Vec<Subscription>,
 }
 
@@ -130,9 +130,8 @@ impl LibraryPage {
             menu: None,
             active: false,
             shuffle_error: None,
-            fresh: Fresh::default(),
+            fresh: Loader::default(),
             _shuffle: Task::ready(()),
-            _facets: Task::ready(()),
             _events: events,
         };
         page.load_facets(cx);
@@ -142,29 +141,23 @@ impl LibraryPage {
     /// Loads the filter values of the Library.
     fn load_facets(&mut self, cx: &mut Context<Self>) {
         let (client, id) = (self.client.clone(), self.library.id.to_string());
-        let ticket = self.fresh.begin();
-        self._facets = cx.spawn(async move |this, cx| {
-            let result = client.filters(Some(&id)).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    _ if !this.fresh.end(ticket) => {}
-                    Ok(filters) => {
-                        this.facets = filters.into();
-                        if let Some(menu) = &mut this.menu {
-                            menu.facets = this.facets.clone();
-                        }
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Quiet,
+            async move { client.filters(Some(&id)).await },
+            move |this, result, _cx| match result {
+                Ok(filters) => {
+                    this.facets = filters.into();
+                    if let Some(menu) = &mut this.menu {
+                        menu.facets = this.facets.clone();
                     }
-                    // The filter panel works without the values: it has no genre, language, studio, network or
-                    // country section then.
-                    Err(err) => eprintln!("relics: cannot read the filter values of library {id}: {err}"),
                 }
-                if this.fresh.ready() {
-                    this.load_facets(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+                Err(_) => unreachable!("optional failures stay in the loader"),
+            },
+            Self::load_facets,
+        );
     }
 
     /// The views of the tabs that the user opened, each with true when its tab is selected.

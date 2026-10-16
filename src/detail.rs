@@ -21,6 +21,7 @@ use crate::grid::Move;
 use crate::home::{Open, Play, badge_label, card, progress, progress_bar};
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::player::{PlayItem, start_shuffle};
 use crate::search::OpenPerson;
 use crate::sideways::Row;
@@ -55,7 +56,7 @@ pub struct Detail {
     focus: Focus,
     /// The page has the keyboard focus, so the focused control shows the focus ring.
     pub active: bool,
-    fresh: Fresh,
+    fresh: Loader,
     columns: usize,
     /// The error of the last request, shown with Retry.
     error: Option<String>,
@@ -89,9 +90,9 @@ pub struct Detail {
     // ponytail: read once; a move to a larger scale keeps it until the page opens again.
     image_size: Rung,
     episode_size: Rung,
-    _loading: Task<()>,
-    _episodes: Task<()>,
-    _similar: Task<()>,
+    episode_load: Loader,
+    episode_error: Option<String>,
+    similar_load: Loader,
     _shuffle: Task<()>,
 }
 
@@ -121,15 +122,10 @@ impl Detail {
         let viewport = window.viewport_size().width.to_f64() as f32;
         let width = viewport - crate::pages::sidebar_width(viewport, true);
         cx.on_release(|this, cx| {
-            let thumbs = this
-                .thumbs
-                .drain(..)
-                .chain(this.episode_thumbs.drain(..))
-                .chain(this.season_thumbs.drain(..))
-                .chain(this.similar_thumbs.drain(..));
-            for thumb in thumbs.flatten() {
-                cx.drop_image(thumb, None);
-            }
+            artwork::replace_previews(&mut this.thumbs, Vec::new(), cx);
+            artwork::replace_previews(&mut this.episode_thumbs, Vec::new(), cx);
+            artwork::replace_previews(&mut this.season_thumbs, Vec::new(), cx);
+            artwork::replace_previews(&mut this.similar_thumbs, Vec::new(), cx);
         })
         .detach();
         let mut detail = Self {
@@ -144,7 +140,7 @@ impl Detail {
             episodes: Vec::new(),
             focus: Focus::Action(0),
             active: false,
-            fresh: Fresh::default(),
+            fresh: Loader::default(),
             columns: 1,
             error: None,
             notice: None,
@@ -165,9 +161,9 @@ impl Detail {
                 .max(Rung::fit(Kind::Poster, POSTER_WIDTH, scale))
                 .max(Rung::fit(Kind::Profile, CAST_WIDTH, scale)),
             episode_size: Rung::fit(Kind::Still, EPISODE_WIDTH, scale),
-            _loading: Task::ready(()),
-            _episodes: Task::ready(()),
-            _similar: Task::ready(()),
+            episode_load: Loader::default(),
+            episode_error: None,
+            similar_load: Loader::default(),
             _shuffle: Task::ready(()),
         };
         detail.load(cx);
@@ -178,33 +174,44 @@ impl Detail {
     /// it.
     fn load_similar(&mut self, cx: &mut Context<Self>) {
         let (client, id) = (self.client.clone(), self.id.clone());
-        self._similar = cx.spawn(async move |this, cx| {
-            let items = match client.similar(&id).await {
-                Ok(items) => items,
-                Err(err) => return eprintln!("relics: cannot read the Items like {id}: {err}"),
-            };
-            this.update(cx, |this, cx| {
-                let thumbs = items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
-                for old in std::mem::replace(&mut this.similar_thumbs, thumbs).into_iter().flatten() {
-                    cx.drop_image(old, None);
+        let parent = self.fresh.ticket();
+        Loader::run_checked(
+            self,
+            cx,
+            |this| &mut this.similar_load,
+            Failure::Quiet,
+            async move { client.similar(&id).await },
+            move |this, cx| {
+                let accepted = this.fresh.accepts(parent);
+                if this.fresh.ready() {
+                    this.load(cx);
                 }
-                this.similar = items;
-                this.focus = this.rows().clamp(this.focus);
-                cx.notify();
-            })
-            .ok();
-        });
+                accepted
+            },
+            |this, result, cx| {
+                if let Ok(items) = result {
+                    let thumbs =
+                        items.iter().map(|i| i.poster_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
+                    artwork::replace_previews(&mut this.similar_thumbs, thumbs, cx);
+                    this.similar = items;
+                    this.focus = this.rows().clamp(this.focus);
+                }
+            },
+            Self::load_similar,
+        );
     }
 
     /// Loads the Item, the seasons of a series, the episodes of the chosen season or of the season of an episode,
     /// and More Like This. A reload keeps the chosen season and what the page shows.
     fn load(&mut self, cx: &mut Context<Self>) {
         self.error = None;
-        self.load_similar(cx);
         let (client, id, image_size) = (self.client.clone(), self.id.clone(), self.image_size);
-        let ticket = self.fresh.begin();
-        self._loading = cx.spawn(async move |this, cx| {
-            let result: Result<_, Error> = async {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move {
                 let item = client.item(&id, image_size).await?;
                 let (seasons, versions) = if item.type_ == "series" {
                     (client.seasons(&id, image_size).await?, Vec::new())
@@ -212,11 +219,9 @@ impl Detail {
                     (Vec::new(), client.versions(&id).await?)
                 };
                 Ok((item, seasons, versions))
-            }
-            .await;
-            this.update(cx, |this, cx| {
+            },
+            move |this, result, cx| {
                 match result {
-                    _ if !this.fresh.end(ticket) => {}
                     Ok((item, seasons, versions)) => {
                         let thumbs = [&item.backdrop_thumbhash, &item.poster_thumbhash]
                             .into_iter()
@@ -224,16 +229,12 @@ impl Detail {
                             .chain(item.crew.iter().map(|c| &c.photo_thumbhash))
                             .map(|hash| hash.as_deref().and_then(artwork::thumbhash))
                             .collect();
-                        for old in std::mem::replace(&mut this.thumbs, thumbs).into_iter().flatten() {
-                            cx.drop_image(old, None);
-                        }
+                        artwork::replace_previews(&mut this.thumbs, thumbs, cx);
                         let posters = seasons
                             .iter()
                             .map(|s| s.poster_thumbhash.as_deref().and_then(artwork::thumbhash))
                             .collect();
-                        for old in std::mem::replace(&mut this.season_thumbs, posters).into_iter().flatten() {
-                            cx.drop_image(old, None);
-                        }
+                        artwork::replace_previews(&mut this.season_thumbs, posters, cx);
                         let reload = this.item.is_some();
                         let listed = this.listed_season();
                         let old_actions = this.item.as_ref().map(|old| actions(old, &this.seasons)).unwrap_or_default();
@@ -258,18 +259,13 @@ impl Detail {
                         // The old episodes stay until the new ones come, unless the season changed or is gone.
                         this.load_episodes(!reload || this.listed_season() != listed, cx);
                     }
-                    // The page keeps what it shows, with no error.
-                    Err(err) if this.item.is_some() => eprintln!("relics: cannot reload {}: {err}", this.id),
                     // The Library window shows Offline or the sign-in screen. The page shows Retry.
                     Err(err) => this.error = Some(err.to_string()),
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load,
+        );
+        self.load_similar(cx);
     }
 
     /// The series id and the season number of the episodes that the page lists.
@@ -281,33 +277,42 @@ impl Detail {
     /// at once. Otherwise they show until the new ones come.
     fn load_episodes(&mut self, clear: bool, cx: &mut Context<Self>) {
         if clear {
-            for old in self.episode_thumbs.drain(..).flatten() {
-                cx.drop_image(old, None);
-            }
+            self.episode_load.clear();
+            artwork::replace_previews(&mut self.episode_thumbs, Vec::new(), cx);
             self.episodes.clear();
             // The focus can be on an episode that is gone.
             self.focus = self.rows().clamp(self.focus);
         }
         let Some((id, season)) = self.listed_season() else {
             // A load of a season that is gone must not fill the row again.
-            self._episodes = Task::ready(());
+            self.episode_load.clear();
+            self.episode_error = None;
             return;
         };
         let (client, image_size) = (self.client.clone(), self.episode_size);
-        let ticket = self.fresh.ticket();
-        self._episodes = cx.spawn(async move |this, cx| {
-            let result = client.season_episodes(&id, season, image_size).await;
-            this.update(cx, |this, cx| {
+        self.episode_error = None;
+        let parent = self.fresh.ticket();
+        Loader::run_checked(
+            self,
+            cx,
+            |this| &mut this.episode_load,
+            Failure::Retain,
+            async move { client.season_episodes(&id, season, image_size).await },
+            move |this, cx| {
+                let accepted = this.fresh.accepts(parent);
+                if this.fresh.ready() {
+                    this.load(cx);
+                }
+                accepted
+            },
+            |this, result, cx| {
                 match result {
-                    _ if !this.fresh.accepts(ticket) => {}
                     Ok(episodes) => {
                         let thumbs = episodes
                             .iter()
                             .map(|e| e.still_thumbhash.as_deref().and_then(artwork::thumbhash))
                             .collect();
-                        for old in std::mem::replace(&mut this.episode_thumbs, thumbs).into_iter().flatten() {
-                            cx.drop_image(old, None);
-                        }
+                        artwork::replace_previews(&mut this.episode_thumbs, thumbs, cx);
                         if let Focus::Episode(i) = this.focus {
                             let kept = kept(&this.episodes, i, &episodes, |episode| episode.content_id.clone());
                             this.focus = Focus::Episode(kept.unwrap_or(i));
@@ -319,16 +324,15 @@ impl Detail {
                         this.episodes = episodes;
                         this.focus = this.rows().clamp(this.focus);
                     }
-                    Err(err) if !this.episodes.is_empty() => eprintln!("relics: cannot reload the episodes: {err}"),
-                    Err(err) => this.error = Some(err.to_string()),
+                    Err(err) => this.episode_error = Some(err.to_string()),
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::retry_episodes,
+        );
+    }
+
+    fn retry_episodes(&mut self, cx: &mut Context<Self>) {
+        self.load_episodes(false, cx);
     }
 
     fn rows(&self) -> Rows {
@@ -1012,6 +1016,7 @@ impl Detail {
         }
         div()
             .id(("detail-episode", i))
+            .debug_selector(|| format!("episode-{}", episode.content_id))
             .clickable()
             .w(px(EPISODE_WIDTH))
             .flex()
@@ -1155,6 +1160,7 @@ impl Detail {
         let thumb = self.similar_thumbs.get(i).cloned().flatten();
         div()
             .id(("detail-similar", i))
+            .debug_selector(|| "similar-card".into())
             .clickable()
             .flex_none()
             .on_click(cx.listener(move |this, _, _, cx| this.open_similar(i, cx)))
@@ -1179,6 +1185,7 @@ impl Render for Detail {
                     .child(error.clone())
                     .child(
                         button("detail-retry", "Retry", ButtonVariant::Secondary, cx)
+                            .debug_selector(|| "detail-retry".into())
                             .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
                     ),
             ),
@@ -1231,7 +1238,32 @@ impl Render for Detail {
                 .text_color(t.danger)
                 .child(notice)
         });
-        div().relative().size_full().flex().flex_col().children(status).child(page).children(notice)
+        let episode_status = match &self.episode_error {
+            Some(error) => Some(
+                div().px(px(MARGIN)).flex().gap(px(14.)).text_color(t.danger).child(error.clone()).child(
+                    button("episodes-retry", "Retry episodes", ButtonVariant::Secondary, cx)
+                        .debug_selector(|| "episodes-retry".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_episodes(cx))),
+                ),
+            ),
+            None if self.episode_load.visible_loading() => Some(
+                div()
+                    .px(px(MARGIN))
+                    .text_color(t.secondary)
+                    .child("Loading episodes…")
+                    .debug_selector(|| "episodes-loading".into()),
+            ),
+            None => None,
+        };
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(status)
+            .children(episode_status)
+            .child(page)
+            .children(notice)
     }
 }
 

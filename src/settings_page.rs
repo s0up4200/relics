@@ -30,6 +30,7 @@ use crate::choice_list::{Choice, ChoiceList, Outcome};
 use crate::click::Clickable as _;
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::release::ReleaseCheck;
 use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
 use crate::state::Pair;
@@ -82,8 +83,7 @@ pub struct SettingsPage {
     picker: Option<ChoiceList>,
     /// The page has the keyboard focus.
     pub active: bool,
-    fresh: Fresh,
-    _load: Task<()>,
+    fresh: Loader,
     /// The write that runs for each key. A new change of the key drops the old write.
     writes: HashMap<&'static str, Task<()>>,
 }
@@ -120,15 +120,14 @@ impl SettingsPage {
             server: None,
             load_error: None,
             message: None,
-            local: LocalSettings::load(&LocalSettings::dir()),
+            local: LocalSettings::load(&crate::settings::directory(cx)),
             release,
             _release,
             row: 0,
             action: 0,
             picker: None,
             active: true,
-            fresh: Fresh::default(),
-            _load: Task::ready(()),
+            fresh: Loader::default(),
             writes: HashMap::new(),
         };
         page.load(cx);
@@ -138,31 +137,25 @@ impl SettingsPage {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.load_error = None;
         let client = self.client.clone();
-        let ticket = self.fresh.begin();
-        self._load = cx.spawn(async move |this, cx| {
-            let result = client.load_server_settings().await;
-            this.update(cx, |this, cx| {
-                match result {
-                    _ if !this.fresh.end(ticket) => {}
-                    Ok(()) => this.server = Some(client.server_settings()),
-                    // The page keeps the settings that it shows, with no error.
-                    Err(err) if this.server.is_some() => eprintln!("relics: cannot reload the Server settings: {err}"),
-                    Err(err) => this.load_error = Some(err.to_string()),
-                }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move { client.load_server_settings().await.map(|()| client.server_settings()) },
+            move |this, result, _cx| match result {
+                Ok(settings) => this.server = Some(settings),
+                Err(err) => this.load_error = Some(err.to_string()),
+            },
+            Self::load,
+        );
         cx.notify();
     }
 
     /// The page shows again. A newer Settings page can have changed the Local settings, so the page reads them
     /// again, and a toggle here does not write back an old value.
     pub fn shown(&mut self, cx: &mut Context<Self>) {
-        self.local = LocalSettings::load(&LocalSettings::dir());
+        self.local = LocalSettings::load(&crate::settings::directory(cx));
         cx.notify();
     }
 
@@ -255,7 +248,7 @@ impl SettingsPage {
     /// Saves the Local settings. Returns false when the save failed, and shows why.
     fn save_local(&mut self, new: LocalSettings, label: &str, cx: &mut Context<Self>) -> bool {
         cx.notify();
-        match new.save(&LocalSettings::dir()) {
+        match new.save(&crate::settings::directory(cx)) {
             Ok(()) => {
                 self.local = new;
                 self.message = None;
@@ -468,6 +461,7 @@ impl Render for SettingsPage {
                 .collect(),
             None => {
                 let retry = button("settings-retry", "Retry", ButtonVariant::Secondary, &*cx)
+                    .debug_selector(|| "settings-retry".into())
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
                 let failed = self.load_error.is_some();
                 vec![

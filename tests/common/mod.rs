@@ -109,3 +109,24 @@ pub fn jwt(exp: u64) -> String {
     let (header, payload) = (serde_json::json!({ "alg": "HS256" }), serde_json::json!({ "sub": "u1", "exp": exp }));
     format!("{}.{}.sig", part(header), part(payload))
 }
+
+/// Filesystem and artwork isolation for GPUI page and Library-window tests.
+pub struct Storage(pub std::path::PathBuf);
+impl gpui::Global for Storage {}
+impl Drop for Storage {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+pub fn isolate(cx: &mut gpui::App) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-state")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    relics::settings::use_directory(dir.clone(), cx);
+    let (http, _) = http(|_| not_found());
+    relics::artwork::install(http, dir.join("artwork"), cx);
+    cx.set_global(Storage(dir.clone()));
+    dir
+}

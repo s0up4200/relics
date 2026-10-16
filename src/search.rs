@@ -25,6 +25,7 @@ use crate::grid::{Grid, Move};
 use crate::home::{Open, Play};
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::requests;
 
 /// The pause after the last text change before Search sends the text.
@@ -105,7 +106,6 @@ pub struct Search {
     people: Vec<wire::Person>,
     people_thumbs: Vec<Option<Arc<RenderImage>>>,
     people_error: Option<String>,
-    people_loading: bool,
     /// The Server takes requests from this user, so Search shows Request to add.
     requests_on: bool,
     /// The titles of the search that are not on the Server.
@@ -124,12 +124,8 @@ pub struct Search {
     menu: Option<Panel>,
     artwork: Entity<ArtworkCache>,
     /// The people, the Request to add results, the request permission and the filter values, by part number.
-    fresh: [Fresh; 4],
-    _facets: Task<()>,
+    fresh: [Loader; 4],
     _debounce: Task<()>,
-    _people: Task<()>,
-    _requests: Task<()>,
-    _to_add: Task<()>,
     _send: Task<()>,
     _events: Vec<Subscription>,
 }
@@ -199,7 +195,6 @@ impl Search {
             people: Vec::new(),
             people_thumbs: Vec::new(),
             people_error: None,
-            people_loading: false,
             requests_on: false,
             to_add: Vec::new(),
             request_note: None,
@@ -210,11 +205,7 @@ impl Search {
             menu: None,
             artwork: artwork::global(cx),
             fresh: Default::default(),
-            _facets: Task::ready(()),
             _debounce: Task::ready(()),
-            _people: Task::ready(()),
-            _requests: Task::ready(()),
-            _to_add: Task::ready(()),
             _send: Task::ready(()),
             _events: vec![changes],
         };
@@ -226,62 +217,49 @@ impl Search {
     /// Loads the filter values of the whole catalog.
     fn load_facets(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let ticket = self.fresh[FACETS].begin();
-        self._facets = cx.spawn(async move |this, cx| {
-            let result = client.filters(None).await;
-            this.update(cx, |this, cx| {
-                match result {
-                    _ if !this.fresh[FACETS].end(ticket) => {}
-                    Ok(filters) => {
-                        this.facets = filters.into();
-                        if let Some(menu) = &mut this.menu {
-                            menu.facets = this.facets.clone();
-                        }
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh[FACETS],
+            Failure::Quiet,
+            async move { client.filters(None).await },
+            move |this, result, _cx| match result {
+                Ok(filters) => {
+                    this.facets = filters.into();
+                    if let Some(menu) = &mut this.menu {
+                        menu.facets = this.facets.clone();
                     }
-                    // The filter panel works without the values: it has no genre, language, studio, network or
-                    // country section then.
-                    Err(err) => eprintln!("relics: cannot read the filter values of the catalog: {err}"),
                 }
-                if this.fresh[FACETS].ready() {
-                    this.load_facets(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+                Err(_) => unreachable!("optional failures stay in the loader"),
+            },
+            Self::load_facets,
+        );
     }
 
     /// Reads if the Server takes requests from this user. When it starts to, Request to add loads.
     fn load_permission(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let ticket = self.fresh[PERMISSION].begin();
-        self._requests = cx.spawn(async move |this, cx| {
-            let result = client.request_status().await;
-            this.update(cx, |this, cx| {
-                match result {
-                    _ if !this.fresh[PERMISSION].end(ticket) => {}
-                    Ok(status) => {
-                        let on = status.allowed && status.requests_enabled;
-                        if on != std::mem::replace(&mut this.requests_on, on) {
-                            this.load_to_add(cx);
-                        }
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh[PERMISSION],
+            Failure::Quiet,
+            async move { client.request_status().await },
+            move |this, result, cx| match result {
+                Ok(status) => {
+                    let on = status.allowed && status.requests_enabled;
+                    if on != std::mem::replace(&mut this.requests_on, on) {
+                        this.load_to_add(cx);
                     }
-                    // Search works without Request to add.
-                    Err(err) => eprintln!("relics: cannot read the request status: {err}"),
                 }
-                if this.fresh[PERMISSION].ready() {
-                    this.load_permission(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+                Err(_) => unreachable!("optional failures stay in the loader"),
+            },
+            Self::load_permission,
+        );
     }
 
     fn drop_thumbs(&mut self, cx: &mut gpui::App) {
-        for thumb in self.people_thumbs.drain(..).flatten() {
-            cx.drop_image(thumb, None);
-        }
+        artwork::replace_previews(&mut self.people_thumbs, Vec::new(), cx);
     }
 
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -399,17 +377,14 @@ impl Search {
             self._send = Task::ready(());
             self.fresh[TO_ADD].written();
         }
+        self.fresh[PEOPLE].clear();
+        self.fresh[TO_ADD].clear();
         self.shown = text.clone();
         // The old results go away. The bar and its panel stay.
         if !matches!(self.focus, Focus::Bar(_)) {
             self.set_focus(Focus::Field, cx);
         }
         if text.is_empty() {
-            self.people_loading = false;
-            self._people = Task::ready(());
-            self._to_add = Task::ready(());
-            self.fresh[PEOPLE].clear();
-            self.fresh[TO_ADD].clear();
             return;
         }
         let query = query(&text, &self.browse);
@@ -430,21 +405,21 @@ impl Search {
     /// Searches the titles to request for the text that shows. A reload keeps the row until the new one comes.
     fn load_to_add(&mut self, cx: &mut Context<Self>) {
         if !self.requests_on || self.shown.is_empty() {
-            self._to_add = Task::ready(());
             self.fresh[TO_ADD].clear();
             self.to_add.clear();
             return;
         }
         let (client, text) = (self.client.clone(), self.shown.clone());
-        let ticket = self.fresh[TO_ADD].begin();
-        self._to_add = cx.spawn(async move |this, cx| {
-            let result = client.search_requests(&text, 1).await;
-            this.update(cx, |this, cx| {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh[TO_ADD],
+            Failure::Quiet,
+            async move { client.search_requests(&text, 1).await },
+            move |this, result, _cx| {
                 match result {
-                    _ if !this.fresh[TO_ADD].end(ticket) => {}
                     Ok(page) => this.to_add = requests::to_add(page),
-                    // As in the web client, a failed request search hides the row. A reload keeps the row.
-                    Err(err) => eprintln!("relics: cannot search the titles to request: {err}"),
+                    Err(_) => unreachable!("optional failures stay in the loader"),
                 }
                 if let Focus::Request(i) = this.focus {
                     this.focus = match this.to_add.len() {
@@ -452,28 +427,24 @@ impl Search {
                         len => Focus::Request(i.min(len - 1)),
                     };
                 }
-                if this.fresh[TO_ADD].ready() {
-                    this.load_to_add(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load_to_add,
+        );
     }
 
     /// Searches the people for the text that shows. A reload keeps the row until the new one comes.
     fn load_people(&mut self, cx: &mut Context<Self>) {
         let (client, text) = (self.client.clone(), self.shown.clone());
         self.people_error = None;
-        self.people_loading = self.people.is_empty();
-        let ticket = self.fresh[PEOPLE].begin();
-        self._people = cx.spawn(async move |this, cx| {
-            let result = client.people(&text).await;
-            this.update(cx, |this, cx| {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh[PEOPLE],
+            Failure::Retain,
+            async move { client.people(&text).await },
+            move |this, result, cx| {
                 match result {
-                    _ if !this.fresh[PEOPLE].end(ticket) => {}
                     Ok(people) => {
-                        this.people_loading = false;
                         this.drop_thumbs(cx);
                         this.people_thumbs =
                             people.iter().map(|p| p.photo_thumbhash.as_deref().and_then(artwork::thumbhash)).collect();
@@ -486,20 +457,14 @@ impl Search {
                         }
                         this.artwork.update(cx, |artwork, _| artwork.retry_failed());
                     }
-                    Err(err) if !this.people.is_empty() => eprintln!("relics: cannot reload the people: {err}"),
                     // The Library window shows Offline or the sign-in screen. The row shows Retry.
                     Err(err) => {
-                        this.people_loading = false;
                         this.people_error = Some(err.to_string());
                     }
                 }
-                if this.fresh[PEOPLE].ready() {
-                    this.load_people(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load_people,
+        );
     }
 
     fn open_person(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -785,6 +750,7 @@ impl Search {
             .child(
                 div()
                     .id("search-requests")
+                    .debug_selector(|| "request-row".into())
                     .flex()
                     .gap(px(12.))
                     .overflow_x_scroll()
@@ -838,15 +804,17 @@ impl Render for Search {
             ));
         }
         if let Some(error) = &self.people_error {
-            header =
-                header.child(div().flex().items_center().gap(px(14.)).text_color(t.danger).child(error.clone()).child(
-                    button("search-retry", "Retry", ButtonVariant::Secondary, cx).on_click(cx.listener(
-                        |this, _, window, cx| {
-                            let text = this.shown.clone();
-                            this.search(text, window, cx);
-                        },
-                    )),
-                ));
+            header = header.child(
+                div().flex().items_center().gap(px(14.)).text_color(t.danger).child(error.clone()).child(
+                    button("search-retry", "Retry", ButtonVariant::Secondary, cx)
+                        .debug_selector(|| "search-retry".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.load_people(cx))),
+                ),
+            );
+        } else if !self.shown.is_empty() && self.fresh[PEOPLE].visible_loading() {
+            header = header.child(
+                div().text_color(t.secondary).child("Loading people…").debug_selector(|| "people-loading".into()),
+            );
         }
         if !self.people.is_empty() {
             header = header.child(self.people_row(cx));
@@ -858,7 +826,7 @@ impl Render for Search {
         let nothing = titles.is_some_and(|grid| grid.read(cx).is_empty())
             && self.people.is_empty()
             && self.to_add.is_empty()
-            && !self.people_loading
+            && !self.fresh[PEOPLE].visible_loading()
             && self.people_error.is_none();
         let content = match titles {
             _ if nothing => div()

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment,
     ListOffset, ListState, ParentElement, Render, RenderImage, ScrollHandle, StatefulInteractiveElement as _, Styled,
-    Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
+    Subscription, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, Theme, button};
 
@@ -15,6 +15,7 @@ use crate::artwork::{self, ArtworkCache, Kind, Rung};
 use crate::click::Clickable as _;
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::sideways::Row;
 
 /// The user pressed p on a card, or Play on the detail page.
@@ -49,7 +50,7 @@ pub struct Home {
     focus: Focus,
     /// The page has the keyboard focus, so the focused card shows the focus ring.
     pub active: bool,
-    fresh: Fresh,
+    fresh: Loader,
     /// The page list: one item for each section, and the status line as the last item.
     page: ListState,
     row_scrolls: Vec<ScrollHandle>,
@@ -58,7 +59,6 @@ pub struct Home {
     artwork: Entity<ArtworkCache>,
     /// The window scale of the loaded list. Each section has the rung for its cards at this scale.
     scale: f32,
-    _loading: Task<()>,
     _scale: Subscription,
 }
 
@@ -156,8 +156,8 @@ impl Home {
             }
         });
         cx.on_release(|this, cx| {
-            for thumb in this.thumbs.drain(..).flatten().flatten() {
-                cx.drop_image(thumb, None);
+            for mut row in this.thumbs.drain(..) {
+                artwork::replace_previews(&mut row, Vec::new(), cx);
             }
         })
         .detach();
@@ -168,15 +168,14 @@ impl Home {
             thumbs: Vec::new(),
             artwork: artwork::global(cx),
             scale: window.scale_factor(),
-            status: Some("Loading…".into()),
+            status: None,
             failed: false,
             focus: Focus::Outside,
             active: false,
-            fresh: Fresh::default(),
+            fresh: Loader::default(),
             // The overdraw measures the rows near the viewport, so that the focus can scroll to them.
             page: ListState::new(1, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
-            _loading: Task::ready(()),
             _scale: scale,
         };
         home.load(cx);
@@ -187,22 +186,26 @@ impl Home {
     fn load(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let (scale, rows) = (self.scale, self.rows.clone());
-        let ticket = self.fresh.begin();
-        self._loading = cx.spawn(async move |this, cx| {
-            let size = |entry: &wire::SectionLayoutEntry| rung(&entry.section_type, entry.featured, scale);
-            let result = match rows {
-                Rows::Home => client.home(size).await,
-                Rows::Library(id) => client.library_rows(&id, size).await,
-            };
-            this.update(cx, |this, cx| {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move {
+                let size = |entry: &wire::SectionLayoutEntry| rung(&entry.section_type, entry.featured, scale);
+                match rows {
+                    Rows::Home => client.home(size).await,
+                    Rows::Library(id) => client.library_rows(&id, size).await,
+                }
+            },
+            move |this, result, cx| {
                 match result {
-                    _ if !this.fresh.end(ticket) => {}
                     Ok(mut sections) => {
                         sections.sort_by_key(|s| !s.featured);
                         let first_load = this.sections.is_empty();
                         let thumbs = sections.iter().map(|s| s.items.iter().map(|i| thumb(s, i)).collect()).collect();
-                        for old in std::mem::replace(&mut this.thumbs, thumbs).into_iter().flatten().flatten() {
-                            cx.drop_image(old, None);
+                        for mut row in std::mem::replace(&mut this.thumbs, thumbs) {
+                            artwork::replace_previews(&mut row, Vec::new(), cx);
                         }
                         // A reload keeps the scroll position of each section and the focus.
                         this.row_scrolls = sections
@@ -241,9 +244,6 @@ impl Home {
                             this.page.scroll_to(top);
                         }
                     }
-                    // The page keeps what it shows, with no error. The Library window shows Offline or the sign-in
-                    // screen.
-                    Err(err) if !this.sections.is_empty() => eprintln!("relics: cannot reload the rows: {err}"),
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;
@@ -251,13 +251,9 @@ impl Home {
                         this.page.remeasure_items(status..status + 1);
                     }
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load,
+        );
     }
 
     /// The number of focus stops in each row: the cards, and "View all" after them.
@@ -389,17 +385,18 @@ impl Home {
         let t = cx.omarchy();
         div()
             .pb(px(80.))
-            .children(self.status.clone().map(|status| {
+            .children(self.fresh.status(self.status.as_deref(), self.failed).map(|(status, failed)| {
                 let retry = button("home-retry", "Retry", ButtonVariant::Secondary, cx)
+                    .debug_selector(|| "home-retry".into())
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
                 div()
                     .px(px(40.))
                     .flex()
                     .items_center()
                     .gap(px(14.))
-                    .text_color(if self.failed { t.danger } else { t.secondary })
-                    .child(status)
-                    .children(self.failed.then_some(retry))
+                    .text_color(if failed { t.danger } else { t.secondary })
+                    .child(status.to_owned())
+                    .children(failed.then_some(retry))
             }))
             .into_any_element()
     }
@@ -684,5 +681,99 @@ mod tests {
         assert_eq!(move_focus(card(0, 1), Key::Up, &rows), card(0, 1));
         assert_eq!(move_focus(Focus::Outside, Key::Down, &rows), Focus::Outside);
         assert_eq!(move_focus(Focus::Outside, Key::Right, &[]), Focus::Outside);
+    }
+    #[gpui::test]
+    fn page_reload_clear_and_release_drop_rendered_previews(cx: &mut gpui::TestAppContext) {
+        use crate::pages::freshness::Reload;
+        use base64::Engine as _;
+        use gpui::AppContext as _;
+        use http_client::{AsyncBody, FakeHttpClient, Response};
+        use std::sync::{Arc, Mutex};
+
+        struct Root(Option<gpui::Entity<super::Home>>);
+        impl gpui::Render for Root {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                use gpui::{ParentElement as _, Styled as _};
+                gpui::div().size_full().children(self.0.clone())
+            }
+        }
+        let hash = base64::engine::general_purpose::STANDARD.encode(thumbhash::rgba_to_thumb_hash(
+            16,
+            16,
+            &vec![255; 16 * 16 * 4],
+        ));
+        let mut sections: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/silo/list_home_sections_ok.json")).unwrap();
+        for section in sections["sections"].as_array_mut().unwrap() {
+            for item in section["items"].as_array_mut().unwrap() {
+                item["poster_thumbhash"] = hash.clone().into();
+                item["backdrop_thumbhash"] = hash.clone().into();
+                item["poster_url"] = serde_json::Value::Null;
+                item["backdrop_url"] = serde_json::Value::Null;
+                item["still_url"] = serde_json::Value::Null;
+            }
+        }
+        let response = Arc::new(Mutex::new(sections.clone()));
+        let reply = response.clone();
+        let http = FakeHttpClient::create(move |req| {
+            let body = if req.uri().path().ends_with("home/layout") {
+                include_str!("../tests/fixtures/silo/get_home_layout_ok.json").to_string()
+            } else {
+                reply.lock().unwrap().to_string()
+            };
+            async move { Ok(Response::builder().status(200).body(AsyncBody::from(body)).unwrap()) }
+        });
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state")
+            .join(uuid::Uuid::new_v4().to_string());
+        cx.update(|cx| {
+            gpui_omarchy::Theme::tokyo_night().apply(cx);
+            crate::artwork::install(http.clone(), dir.clone(), cx);
+        });
+        let client = Arc::new(crate::api::Client::new(
+            http,
+            crate::api::Server {
+                id: "test".into(),
+                name: "test".into(),
+                url: crate::api::Url::parse("https://silo.test/").unwrap(),
+            },
+            crate::api::Device { id: "test".into(), name: "test".into() },
+            crate::api::Tokens { access_token: "test".into(), refresh_token: "test".into() },
+        ));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            Root(Some(cx.new(|cx| super::Home::new(client, super::Rows::Home, window, cx))))
+        });
+        cx.run_until_parked();
+        let home = root.read_with(cx, |root, _| root.0.clone().unwrap());
+        let preview = |cx: &mut gpui::VisualTestContext| {
+            home.read_with(cx, |home, _| Arc::downgrade(home.thumbs.iter().flatten().flatten().next().unwrap()))
+        };
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let old = preview(cx);
+        home.update(cx, |home, cx| Reload::reload(home, 0, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(old.upgrade().is_none(), "replacement releases the old rendered image");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let old = preview(cx);
+        *response.lock().unwrap() = serde_json::json!({"sections":[]});
+        home.update(cx, |home, cx| Reload::reload(home, 0, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(old.upgrade().is_none(), "an empty result releases its previews");
+        *response.lock().unwrap() = sections;
+        home.update(cx, |home, cx| Reload::reload(home, 0, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let old = preview(cx);
+        drop(home);
+        root.update(cx, |root, cx| {
+            root.0 = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(old.upgrade().is_none(), "page release drops its rendered image");
+        std::fs::remove_dir_all(dir).ok();
     }
 }

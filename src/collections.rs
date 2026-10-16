@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, Context, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    ParentElement, Render, ScrollHandle, StatefulInteractiveElement as _, Styled, Task, Window, div, list, px,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement as _, Styled, Window, div, list, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
 
@@ -16,6 +16,7 @@ use crate::grid::{POSTER_HEIGHT, POSTER_WIDTH};
 use crate::home::{Focus, art, move_focus};
 use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
+use crate::pages::loading::{Failure, Loader};
 use crate::sideways::Row;
 
 const CARDS: Row = Row { width: POSTER_WIDTH, gap: 14., pad: 40. };
@@ -94,8 +95,7 @@ pub struct Collections {
     /// items near the viewport.
     page: ListState,
     row_scrolls: Vec<ScrollHandle>,
-    fresh: Fresh,
-    _loading: Task<()>,
+    fresh: Loader,
 }
 
 impl EventEmitter<OpenCollection> for Collections {}
@@ -106,14 +106,13 @@ impl Collections {
             client,
             scope,
             groups: Vec::new(),
-            status: Some("Loading…".into()),
+            status: None,
             failed: false,
             focus: Focus::Outside,
             active: false,
             page: ListState::new(0, ListAlignment::Top, px(800.)),
             row_scrolls: Vec::new(),
-            fresh: Fresh::default(),
-            _loading: Task::ready(()),
+            fresh: Loader::default(),
         };
         collections.load(cx);
         collections
@@ -122,19 +121,19 @@ impl Collections {
     /// Loads the collections. A reload keeps the rows and the focus until the new rows come.
     fn load(&mut self, cx: &mut Context<Self>) {
         let (client, scope) = (self.client.clone(), self.scope.clone());
-        if self.groups.is_empty() {
-            self.status = Some("Loading…".into());
-            self.failed = false;
-        }
-        let ticket = self.fresh.begin();
-        self._loading = cx.spawn(async move |this, cx| {
-            let result = match scope {
-                Scope::Library(id) => client.library_collections(&id).await.map(library_groups),
-                Scope::Server => client.server_collections().await.map(server_groups),
-            };
-            this.update(cx, |this, cx| {
+        Loader::run(
+            self,
+            cx,
+            |this| &mut this.fresh,
+            Failure::Retain,
+            async move {
+                match scope {
+                    Scope::Library(id) => client.library_collections(&id).await.map(library_groups),
+                    Scope::Server => client.server_collections().await.map(server_groups),
+                }
+            },
+            move |this, result, _cx| {
                 match result {
-                    _ if !this.fresh.end(ticket) => {}
                     Ok(groups) => {
                         this.status = groups.is_empty().then(|| "No collections.".into());
                         let old = |group: &Group| {
@@ -158,21 +157,15 @@ impl Collections {
                         };
                         this.failed = false;
                     }
-                    // A view that loaded keeps what it shows, with no error.
-                    Err(err) if !this.groups.is_empty() => eprintln!("relics: cannot reload the collections: {err}"),
                     // The Library window shows Offline or the sign-in screen.
                     Err(err) => {
                         this.status = Some(err.to_string());
                         this.failed = true;
                     }
                 }
-                if this.fresh.ready() {
-                    this.load(cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        });
+            },
+            Self::load,
+        );
         cx.notify();
     }
 
@@ -216,17 +209,18 @@ impl Collections {
         let t = cx.omarchy();
         div()
             .pb(px(80.))
-            .children(self.status.clone().map(|status| {
+            .children(self.fresh.status(self.status.as_deref(), self.failed).map(|(status, failed)| {
                 let retry = button("collections-retry", "Retry", ButtonVariant::Secondary, cx)
+                    .debug_selector(|| "collections-retry".into())
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
                 div()
                     .px(px(40.))
                     .flex()
                     .items_center()
                     .gap(px(14.))
-                    .text_color(if self.failed { t.danger } else { t.secondary })
-                    .child(status)
-                    .children(self.failed.then_some(retry))
+                    .text_color(if failed { t.danger } else { t.secondary })
+                    .child(status.to_owned())
+                    .children(failed.then_some(retry))
             }))
             .into_any_element()
     }
