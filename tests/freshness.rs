@@ -461,9 +461,9 @@ fn a_reload_waits_for_a_setting_write_and_a_read_from_before_the_write_does_not_
     let effective = "settings/values/effective";
     open_row(cx, 7);
     assert_eq!(server.count(effective), 1);
-    // Row 2 is the subtitle mode: auto, then always, then off.
+    // Row 6 is the subtitle mode: auto, then always, then off.
     server.hold(&["settings/values/playback."]);
-    cx.simulate_keystrokes("j j l");
+    cx.simulate_keystrokes("j j j j j j l");
     send(cx, &changes, LiveChange::Resync);
     assert_eq!(server.count(effective), 1, "the reload waits for the write");
     server.hold(&[]);

@@ -4,23 +4,168 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::api::wire;
 
-/// The keys of the Server settings that the app reads.
-pub const KEYS: [&str; 8] = [
-    "playback.audio_language",
-    "playback.subtitle_language",
-    "playback.subtitle_mode",
-    "playback.show_forced_subtitles",
-    "playback.intro_skip_mode",
-    "playback.auto_skip_credits",
-    "playback.auto_skip_recap",
-    "playback.auto_play_next",
-];
+/// A group of the Settings page. The order is the order of the groups on the web Settings pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Quality,
+    Skipping,
+    NextEpisode,
+    SeekControls,
+    LanguageAndSubtitles,
+    SubtitleAppearance,
+    /// The Local settings.
+    ThisComputer,
+}
+
+impl Group {
+    pub const ALL: [Group; 7] = [
+        Group::Quality,
+        Group::Skipping,
+        Group::NextEpisode,
+        Group::SeekControls,
+        Group::LanguageAndSubtitles,
+        Group::SubtitleAppearance,
+        Group::ThisComputer,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Group::Quality => "Quality",
+            Group::Skipping => "Skipping",
+            Group::NextEpisode => "Next episode",
+            Group::SeekControls => "Seek controls",
+            Group::LanguageAndSubtitles => "Language & subtitles",
+            Group::SubtitleAppearance => "Subtitle appearance",
+            Group::ThisComputer => "This computer",
+        }
+    }
+}
+
+/// The values that a Server setting allows, and their labels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Choices {
+    /// Null ("No preference") or a language tag. The labels come from `LANGUAGES`.
+    Language,
+    /// true ("On") or false ("Off").
+    OnOff,
+    /// The values with their labels, in the order of the web Settings pages.
+    List(&'static [(&'static str, &'static str)]),
+}
+
+/// The definition of one Server setting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Definition {
+    pub key: &'static str,
+    /// The revision of the settings contract that introduced the key.
+    pub revision: u32,
+    /// The label of the web Settings pages.
+    pub label: &'static str,
+    pub default: Value,
+    pub choices: Choices,
+    pub group: Group,
+}
+
+impl Definition {
+    /// True when the setting can have this value.
+    pub fn allows(&self, value: &Value) -> bool {
+        match self.choices {
+            Choices::Language => value.is_null() || value.is_string(),
+            Choices::OnOff => value.is_boolean(),
+            Choices::List(list) => list.iter().any(|&(v, _)| value.as_str() == Some(v)),
+        }
+    }
+
+    /// The choices, with their labels. A language setting has "No preference" (null) first. Like the web page,
+    /// a stored language outside the list is the second choice, so that it stays selected.
+    pub fn options(&self, current: &Value) -> Vec<(Value, String)> {
+        let pairs = |list: &[(&str, &str)]| list.iter().map(|&(v, l)| (Value::from(v), l.to_string())).collect();
+        match self.choices {
+            Choices::Language => {
+                let mut options = vec![(Value::Null, "No preference".to_string())];
+                if let Some(tag) = current.as_str()
+                    && !LANGUAGES.iter().any(|&(code, _)| code == tag)
+                {
+                    let name = if tag == "x-silo-original" { "Original language" } else { tag };
+                    options.push((current.clone(), name.to_string()));
+                }
+                options.extend(pairs(&LANGUAGES));
+                options
+            }
+            Choices::OnOff => vec![(Value::Bool(true), "On".to_string()), (Value::Bool(false), "Off".to_string())],
+            Choices::List(list) => pairs(list),
+        }
+    }
+}
+
+/// The Server settings that the app reads, in the order of the Settings page.
+pub static DEFINITIONS: LazyLock<[Definition; 8]> = LazyLock::new(|| {
+    let setting =
+        |key, revision, label, default, choices, group| Definition { key, revision, label, default, choices, group };
+    [
+        setting(
+            "playback.intro_skip_mode",
+            7,
+            "Skip intros",
+            json!("ask"),
+            Choices::List(&[("never", "Never"), ("ask", "Ask to skip"), ("always", "Skip automatically")]),
+            Group::Skipping,
+        ),
+        setting("playback.auto_skip_recap", 1, "Auto-skip recaps", json!(false), Choices::OnOff, Group::Skipping),
+        setting("playback.auto_skip_credits", 1, "Auto-skip credits", json!(false), Choices::OnOff, Group::Skipping),
+        setting(
+            "playback.auto_play_next",
+            1,
+            "Auto-play next episode",
+            json!(true),
+            Choices::OnOff,
+            Group::NextEpisode,
+        ),
+        setting(
+            "playback.audio_language",
+            1,
+            "Spoken language",
+            Value::Null,
+            Choices::Language,
+            Group::LanguageAndSubtitles,
+        ),
+        setting(
+            "playback.subtitle_language",
+            1,
+            "Subtitle language",
+            Value::Null,
+            Choices::Language,
+            Group::LanguageAndSubtitles,
+        ),
+        setting(
+            "playback.subtitle_mode",
+            1,
+            "Subtitle behavior",
+            json!("auto"),
+            Choices::List(&[("auto", "Auto"), ("always", "Always on"), ("off", "Off")]),
+            Group::LanguageAndSubtitles,
+        ),
+        setting(
+            "playback.show_forced_subtitles",
+            1,
+            "Show forced subtitles",
+            json!(true),
+            Choices::OnOff,
+            Group::LanguageAndSubtitles,
+        ),
+    ]
+});
+
+/// The definition of a key, or `None` for a key that the app does not read.
+pub fn definition(key: &str) -> Option<&'static Definition> {
+    DEFINITIONS.iter().find(|definition| definition.key == key)
+}
 
 /// The playback Server settings of a Profile. `Default` gives the defaults of the settings contract.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,17 +183,23 @@ pub struct ServerSettings {
 }
 
 impl Default for ServerSettings {
+    /// The default of each definition.
     fn default() -> Self {
-        Self {
+        // `set` replaces each of these values with the default of its definition.
+        let mut settings = Self {
             audio_language: None,
             subtitle_language: None,
             subtitle_mode: SubtitleMode::Auto,
-            show_forced_subtitles: true,
+            show_forced_subtitles: false,
             intro_skip_mode: IntroSkipMode::Ask,
             auto_skip_credits: false,
             auto_skip_recap: false,
-            auto_play_next: true,
+            auto_play_next: false,
+        };
+        for definition in DEFINITIONS.iter() {
+            settings.set(definition.key, &definition.default);
         }
+        settings
     }
 }
 
@@ -76,17 +227,18 @@ impl ServerSettings {
         settings
     }
 
-    /// Sets one value. A value of the wrong type, or an unknown enum value, gives the default of the key.
+    /// Sets one value. A value that the definition does not allow gives the default of the key. An unknown key
+    /// changes nothing.
     pub fn set(&mut self, key: &str, value: &Value) {
+        let Some(definition) = definition(key) else {
+            return;
+        };
+        let value = if definition.allows(value) { value } else { &definition.default };
         let text = value.as_str();
-        let flag = value.as_bool();
+        let on = value.as_bool() == Some(true);
         match key {
-            "playback.audio_language" if value.is_null() || text.is_some() => {
-                self.audio_language = text.map(String::from)
-            }
-            "playback.subtitle_language" if value.is_null() || text.is_some() => {
-                self.subtitle_language = text.map(String::from)
-            }
+            "playback.audio_language" => self.audio_language = text.map(String::from),
+            "playback.subtitle_language" => self.subtitle_language = text.map(String::from),
             "playback.subtitle_mode" => {
                 self.subtitle_mode = match text {
                     Some("always") => SubtitleMode::Always,
@@ -101,10 +253,10 @@ impl ServerSettings {
                     _ => IntroSkipMode::Ask,
                 }
             }
-            "playback.show_forced_subtitles" => self.show_forced_subtitles = flag.unwrap_or(true),
-            "playback.auto_skip_credits" => self.auto_skip_credits = flag.unwrap_or(false),
-            "playback.auto_skip_recap" => self.auto_skip_recap = flag.unwrap_or(false),
-            "playback.auto_play_next" => self.auto_play_next = flag.unwrap_or(true),
+            "playback.show_forced_subtitles" => self.show_forced_subtitles = on,
+            "playback.auto_skip_credits" => self.auto_skip_credits = on,
+            "playback.auto_skip_recap" => self.auto_skip_recap = on,
+            "playback.auto_play_next" => self.auto_play_next = on,
             _ => {}
         }
     }
@@ -132,21 +284,6 @@ impl ServerSettings {
             "playback.auto_play_next" => self.auto_play_next.into(),
             _ => Value::Null,
         }
-    }
-}
-
-/// The label of a Server setting, from the settings contract.
-pub fn label(key: &str) -> &'static str {
-    match key {
-        "playback.audio_language" => "Preferred audio language",
-        "playback.subtitle_language" => "Preferred subtitle language",
-        "playback.subtitle_mode" => "Subtitles",
-        "playback.show_forced_subtitles" => "Show forced subtitles",
-        "playback.intro_skip_mode" => "Skip intros",
-        "playback.auto_skip_credits" => "Auto-skip credits",
-        "playback.auto_skip_recap" => "Auto-skip recaps",
-        "playback.auto_play_next" => "Auto-play next episode",
-        _ => "",
     }
 }
 
@@ -201,28 +338,9 @@ pub const LANGUAGES: [(&str, &str); 46] = [
     ("vi", "Vietnamese"),
 ];
 
-/// The choices of a Server setting, with their labels. A language setting has "No preference" (null) first.
-/// Like the web page, a stored language outside the list is the second choice, so that it stays selected.
+/// The choices of a Server setting, with their labels. An unknown key has none.
 pub fn options(key: &str, current: &Value) -> Vec<(Value, String)> {
-    let pairs = |list: &[(&str, &str)]| list.iter().map(|&(v, l)| (Value::from(v), l.to_string())).collect();
-    match key {
-        "playback.audio_language" | "playback.subtitle_language" => {
-            let mut options = vec![(Value::Null, "No preference".to_string())];
-            if let Some(tag) = current.as_str()
-                && !LANGUAGES.iter().any(|&(code, _)| code == tag)
-            {
-                let name = if tag == "x-silo-original" { "Original language" } else { tag };
-                options.push((current.clone(), name.to_string()));
-            }
-            options.extend(LANGUAGES.iter().map(|&(v, l)| (Value::from(v), l.to_string())));
-            options
-        }
-        "playback.subtitle_mode" => pairs(&[("auto", "Auto"), ("always", "Always on"), ("off", "Off")]),
-        "playback.intro_skip_mode" => {
-            pairs(&[("never", "Never"), ("ask", "Ask to skip"), ("always", "Skip automatically")])
-        }
-        _ => vec![(Value::Bool(true), "On".to_string()), (Value::Bool(false), "Off".to_string())],
-    }
+    definition(key).map_or_else(Vec::new, |definition| definition.options(current))
 }
 
 /// The Local settings: the preferences of this app on this computer only.
@@ -289,4 +407,18 @@ pub fn use_directory(dir: PathBuf, cx: &mut gpui::App) {
 
 pub fn directory(cx: &gpui::App) -> PathBuf {
     cx.try_global::<LocalDirectory>().map_or_else(LocalSettings::dir, |dir| dir.0.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFINITIONS, ServerSettings};
+
+    #[test]
+    fn the_store_holds_the_default_of_each_definition() {
+        let settings = ServerSettings::default();
+        for definition in DEFINITIONS.iter() {
+            assert!(definition.allows(&definition.default), "{}", definition.key);
+            assert_eq!(settings.value(definition.key), definition.default, "{}", definition.key);
+        }
+    }
 }

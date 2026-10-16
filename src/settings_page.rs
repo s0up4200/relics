@@ -1,11 +1,13 @@
 //! The Settings page. `,` or the Settings row at the bottom of the sidebar opens it.
 //!
-//! - Playback: the eight Server settings of the active Profile. The page reads them again each time it opens.
-//!   Each change writes at the `profile` scope at once. A failed write puts the old value back and shows one
-//!   line of error text. The app keeps no queue of failed writes.
-//! - Player: the hardware decoding Local setting.
-//! - Releases: the "Check for new releases" Local setting of the Release notice.
+//! - The Server settings of the active Profile, in the groups of the web Settings pages. The page reads them
+//!   again each time it opens. Each change writes at the `profile` scope at once. A failed write puts the old
+//!   value back and shows one line of error text. The app keeps no queue of failed writes.
+//! - This computer: the hardware decoding Local setting, and the "Check for new releases" Local setting of the
+//!   Release notice.
 //! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
+//!
+//! A group with no visible rows does not show.
 //!
 //! j/k move between the rows. l or Right gives the next value, h or Left the previous one. Enter or a click
 //! on a setting with more than two choices opens the list of its choices below the row. In the list j/k move,
@@ -32,7 +34,7 @@ use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::pages::loading::{Failure, Loader};
 use crate::release::ReleaseCheck;
-use crate::settings::{self, KEYS, LocalSettings, ServerSettings};
+use crate::settings::{DEFINITIONS, Definition, Group, LocalSettings, ServerSettings};
 use crate::state::Pair;
 
 /// An Accounts action. The Library window does it.
@@ -54,12 +56,41 @@ pub fn step(options: &[(Value, String)], current: &Value, step: isize) -> Value 
     options[next as usize].0.clone()
 }
 
-/// The row of the hardware decoding toggle. The eight Server settings come first.
-const HWDEC_ROW: usize = KEYS.len();
-/// The row of the release check toggle.
-const RELEASES_ROW: usize = HWDEC_ROW + 1;
-/// The first Account row.
-const FIRST_PAIR: usize = RELEASES_ROW + 1;
+/// A Local setting on the Settings page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Local {
+    HardwareDecoding,
+    CheckReleases,
+}
+
+/// A row of the Settings page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Row {
+    Server(&'static Definition),
+    Local(Local),
+    /// The index of the Server and Account pair.
+    Account(usize),
+    AddServer,
+}
+
+/// The visible sections of the page in order, each with its title and its rows. The Server settings show only
+/// after the page has read them. A group with no visible rows does not show.
+pub fn sections(server: bool, pairs: usize) -> Vec<(&'static str, Vec<Row>)> {
+    let mut sections: Vec<_> = Group::ALL
+        .into_iter()
+        .map(|group| {
+            let mut rows: Vec<_> =
+                DEFINITIONS.iter().filter(|definition| server && definition.group == group).map(Row::Server).collect();
+            if group == Group::ThisComputer {
+                rows.extend([Row::Local(Local::HardwareDecoding), Row::Local(Local::CheckReleases)]);
+            }
+            (group.title(), rows)
+        })
+        .filter(|(_, rows)| !rows.is_empty())
+        .collect();
+    sections.push(("Accounts", (0..pairs).map(Row::Account).chain([Row::AddServer]).collect()));
+    sections
+}
 
 pub struct SettingsPage {
     client: Arc<Client>,
@@ -76,6 +107,7 @@ pub struct SettingsPage {
     /// The release check of the app. `None` when the page has no Library window, as in a test.
     release: Option<Entity<ReleaseCheck>>,
     _release: Option<Subscription>,
+    /// The index of the focused row in the list of visible rows.
     row: usize,
     /// On an Account row: 0 is Sign out, 1 is Remove.
     action: usize,
@@ -159,41 +191,49 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// The row after the last Account: Add server.
-    fn add_row(&self) -> usize {
-        FIRST_PAIR + self.pairs.len()
+    /// The visible rows, in order.
+    fn rows(&self) -> Vec<Row> {
+        sections(self.server.is_some(), self.pairs.len()).into_iter().flat_map(|(_, rows)| rows).collect()
+    }
+
+    /// The Server setting of the focused row.
+    fn focused_setting(&self) -> Option<&'static Definition> {
+        match self.rows().get(self.row) {
+            Some(Row::Server(definition)) => Some(definition),
+            _ => None,
+        }
     }
 
     /// The choices of a Server setting. They are empty before the page read the settings.
-    fn options(&self, index: usize) -> Vec<(Value, String)> {
+    fn options(&self, definition: &Definition) -> Vec<(Value, String)> {
         let Some(server) = &self.server else {
             return Vec::new();
         };
-        settings::options(KEYS[index], &server.value(KEYS[index]))
+        definition.options(&server.value(definition.key))
     }
 
     /// Changes a Server setting by `delta` choices and writes it.
-    fn change(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
+    fn change(&mut self, definition: &'static Definition, delta: isize, cx: &mut Context<Self>) {
         if let Some(server) = &self.server {
-            let old = server.value(KEYS[index]);
-            self.set(index, step(&self.options(index), &old, delta), cx);
+            let old = server.value(definition.key);
+            self.set(definition, step(&self.options(definition), &old, delta), cx);
         }
     }
 
     /// The choices of a Server setting as the rows of a Choice list.
-    fn choices(&self, index: usize) -> Vec<Choice> {
+    fn choices(&self, definition: &Definition) -> Vec<Choice> {
         let Some(server) = &self.server else {
             return Vec::new();
         };
-        let current = server.value(KEYS[index]);
-        self.options(index).into_iter().map(|(value, label)| Choice::new(label, value == current)).collect()
+        let current = server.value(definition.key);
+        self.options(definition).into_iter().map(|(value, label)| Choice::new(label, value == current)).collect()
     }
 
     /// Enter on a Server setting: it opens the Choice list, or toggles an On/Off setting.
-    fn open_picker(&mut self, index: usize, cx: &mut Context<Self>) {
-        let choices = self.choices(index);
+    fn open_picker(&mut self, definition: &'static Definition, cx: &mut Context<Self>) {
+        let choices = self.choices(definition);
         if choices.len() <= 2 {
-            return self.change(index, 1, cx);
+            return self.change(definition, 1, cx);
         }
         self.picker = Some(ChoiceList::open(&choices));
     }
@@ -201,18 +241,20 @@ impl SettingsPage {
     /// Picks the choice at `focus` in the open list, and closes the list.
     fn pick(&mut self, focus: usize, cx: &mut Context<Self>) {
         self.picker = None;
-        if let Some((value, _)) = self.options(self.row).into_iter().nth(focus) {
-            self.set(self.row, value, cx);
+        if let Some(definition) = self.focused_setting()
+            && let Some((value, _)) = self.options(definition).into_iter().nth(focus)
+        {
+            self.set(definition, value, cx);
         }
         cx.notify();
     }
 
     /// Sets a Server setting and writes it.
-    fn set(&mut self, index: usize, new: Value, cx: &mut Context<Self>) {
+    fn set(&mut self, definition: &'static Definition, new: Value, cx: &mut Context<Self>) {
         let Some(server) = &mut self.server else {
             return;
         };
-        let key = KEYS[index];
+        let key = definition.key;
         let old = server.value(key);
         server.set(key, &new);
         self.message = None;
@@ -231,7 +273,7 @@ impl SettingsPage {
                     if let Some(server) = &mut this.server {
                         server.set(key, &old);
                     }
-                    this.message = Some((format!("Could not save {}: {err}", settings::label(key)), true));
+                    this.message = Some((format!("Could not save {}: {err}", definition.label), true));
                 }
                 cx.notify();
             })
@@ -278,7 +320,7 @@ impl SettingsPage {
 
     fn act(&mut self, index: usize, action: usize, cx: &mut Context<Self>) {
         let Some(pair) = self.pairs.get(index).cloned() else {
-            return cx.emit(AccountAction::AddServer);
+            return;
         };
         let who = format!("{} on {}", pair.username, pair.server_name);
         if action == 0 {
@@ -287,7 +329,7 @@ impl SettingsPage {
         } else {
             self.message = Some((format!("Removed {who}."), false));
             self.pairs.remove(index);
-            self.row = self.row.min(self.add_row());
+            self.row = self.row.min(self.rows().len() - 1);
             cx.emit(AccountAction::Remove(pair));
         }
         cx.notify();
@@ -295,9 +337,8 @@ impl SettingsPage {
 
     /// A key while the page has the focus. Returns false for a key that the page does not use.
     pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
-        let row = self.row;
         if self.picker.is_some() {
-            let len = self.options(row).len();
+            let len = self.focused_setting().map_or(0, |definition| self.options(definition).len());
             let outcome = self.picker.as_mut().map_or(Outcome::Unused, |picker| picker.key(key, len));
             match outcome {
                 Outcome::Moved => {}
@@ -308,27 +349,32 @@ impl SettingsPage {
             cx.notify();
             return true;
         }
-        match key {
-            Key::Down => {
-                self.row = (row + 1).min(self.add_row());
+        let rows = self.rows();
+        // The list can be shorter than when the row had the focus, for example after a failed read.
+        self.row = self.row.min(rows.len() - 1);
+        match (key, rows[self.row]) {
+            (Key::Down, _) => {
+                self.row = (self.row + 1).min(rows.len() - 1);
                 self.action = 0;
             }
-            Key::Up => {
-                self.row = row.saturating_sub(1);
+            (Key::Up, _) => {
+                self.row = self.row.saturating_sub(1);
                 self.action = 0;
             }
-            Key::Other("r") if self.load_error.is_some() => self.load(cx),
-            _ if row < HWDEC_ROW => match key {
-                Key::Right => self.change(row, 1, cx),
-                Key::Other("enter") => self.open_picker(row, cx),
-                Key::Left => self.change(row, -1, cx),
-                _ => return false,
-            },
-            Key::Right | Key::Other("enter") | Key::Left if row == HWDEC_ROW => self.toggle_hwdec(cx),
-            Key::Right | Key::Other("enter") | Key::Left if row == RELEASES_ROW => self.toggle_releases(cx),
-            Key::Other("enter") => self.act(row - FIRST_PAIR, self.action, cx),
-            Key::Right if row < self.add_row() => self.action = 1,
-            Key::Left if row < self.add_row() && self.action == 1 => self.action = 0,
+            (Key::Other("r"), _) if self.load_error.is_some() => self.load(cx),
+            (Key::Right, Row::Server(definition)) => self.change(definition, 1, cx),
+            (Key::Other("enter"), Row::Server(definition)) => self.open_picker(definition, cx),
+            (Key::Left, Row::Server(definition)) => self.change(definition, -1, cx),
+            (Key::Right | Key::Other("enter") | Key::Left, Row::Local(Local::HardwareDecoding)) => {
+                self.toggle_hwdec(cx)
+            }
+            (Key::Right | Key::Other("enter") | Key::Left, Row::Local(Local::CheckReleases)) => {
+                self.toggle_releases(cx)
+            }
+            (Key::Other("enter"), Row::Account(index)) => self.act(index, self.action, cx),
+            (Key::Right, Row::Account(_)) => self.action = 1,
+            (Key::Left, Row::Account(_)) if self.action == 1 => self.action = 0,
+            (Key::Other("enter"), Row::AddServer) => cx.emit(AccountAction::AddServer),
             _ => return false,
         }
         cx.notify();
@@ -392,9 +438,8 @@ impl SettingsPage {
             .bg(t.surface)
     }
 
-    fn pair_row(&self, index: usize, pair: &Pair, cx: &Context<Self>) -> impl IntoElement {
+    fn pair_row(&self, row: usize, index: usize, pair: &Pair, cx: &Context<Self>) -> impl IntoElement {
         let t = cx.omarchy();
-        let row = FIRST_PAIR + index;
         let is_active = self.active_pair == Some((pair.server_id.clone(), pair.account_id.clone()));
         let action = |n: usize, label: &'static str| {
             let focused = self.active && self.row == row && self.action == n;
@@ -443,43 +488,56 @@ impl SettingsPage {
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.omarchy().clone();
-        let playback: Vec<_> = match &self.server {
-            Some(server) => KEYS
-                .iter()
-                .enumerate()
-                .flat_map(|(row, key)| {
-                    let current = server.value(key);
-                    let options = settings::options(key, &current);
-                    let value = options.into_iter().find(|(v, _)| *v == current).map(|(_, l)| l).unwrap_or_default();
-                    let picker = self.picker.as_ref().filter(|_| self.row == row);
-                    [
-                        Some(self.row(row, settings::label(key).into(), value.into(), cx).into_any_element()),
-                        picker.map(|picker| self.picker(picker, self.choices(row), cx).into_any_element()),
-                    ]
-                })
-                .flatten()
-                .collect(),
-            None => {
-                let retry = button("settings-retry", "Retry", ButtonVariant::Secondary, &*cx)
-                    .debug_selector(|| "settings-retry".into())
-                    .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
-                let failed = self.load_error.is_some();
-                vec![
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(14.))
-                        .text_color(if failed { t.danger } else { t.secondary })
-                        .child(self.load_error.clone().unwrap_or_else(|| "Loading…".into()))
-                        .when(failed, |row| row.child(retry))
-                        .into_any_element(),
-                ]
-            }
-        };
         let on_off = |on: bool| if on { "On" } else { "Off" };
+        let mut index = 0;
+        let mut elements = Vec::new();
+        for (title, rows) in sections(self.server.is_some(), self.pairs.len()) {
+            elements.push(self.header(title, cx).into_any_element());
+            for row in rows {
+                elements.push(match row {
+                    Row::Server(definition) => {
+                        let current = self.server.as_ref().map(|server| server.value(definition.key));
+                        let value = self
+                            .options(definition)
+                            .into_iter()
+                            .find(|(v, _)| Some(v) == current.as_ref())
+                            .map(|(_, l)| l)
+                            .unwrap_or_default();
+                        self.row(index, definition.label.into(), value.into(), cx).into_any_element()
+                    }
+                    Row::Local(local) => {
+                        let (label, on) = match local {
+                            Local::HardwareDecoding => ("Hardware decoding", self.local.hardware_decoding),
+                            Local::CheckReleases => ("Check for new releases", self.local.check_releases),
+                        };
+                        self.row(index, label.into(), on_off(on).into(), cx).into_any_element()
+                    }
+                    Row::Account(i) => self.pair_row(index, i, &self.pairs[i], cx).into_any_element(),
+                    Row::AddServer => self.row(index, "Add server".into(), "".into(), cx).into_any_element(),
+                });
+                if let (Row::Server(definition), Some(picker)) =
+                    (row, self.picker.as_ref().filter(|_| self.row == index))
+                {
+                    elements.push(self.picker(picker, self.choices(definition), cx).into_any_element());
+                }
+                index += 1;
+            }
+        }
+        let status = self.server.is_none().then(|| {
+            let retry = button("settings-retry", "Retry", ButtonVariant::Secondary, &*cx)
+                .debug_selector(|| "settings-retry".into())
+                .on_click(cx.listener(|this, _, _, cx| this.load(cx)));
+            let failed = self.load_error.is_some();
+            div()
+                .pt(px(24.))
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .text_color(if failed { t.danger } else { t.secondary })
+                .child(self.load_error.clone().unwrap_or_else(|| "Loading…".into()))
+                .when(failed, |row| row.child(retry))
+        });
         let newer = self.release.as_ref().and_then(|release| release.read(cx).release.clone());
-        let pairs: Vec<_> = self.pairs.iter().enumerate().map(|(i, pair)| self.pair_row(i, pair, cx)).collect();
-        let add = self.add_row();
         div()
             .id("settings-page")
             .size_full()
@@ -492,20 +550,8 @@ impl Render for SettingsPage {
             // ponytail: the page does not scroll to the focused row; it fits a normal window.
             .overflow_y_scroll()
             .child(div().text_size(px(28.)).font_weight(FontWeight::EXTRA_BOLD).text_color(t.bright).child("Settings"))
-            .child(self.header("Playback", cx))
-            .children(playback)
-            .child(self.header("Player", cx))
-            .child(self.row(HWDEC_ROW, "Hardware decoding".into(), on_off(self.local.hardware_decoding).into(), cx))
-            .child(self.header("Releases", cx))
-            .child(self.row(
-                RELEASES_ROW,
-                "Check for new releases".into(),
-                on_off(self.local.check_releases).into(),
-                cx,
-            ))
-            .child(self.header("Accounts", cx))
-            .children(pairs)
-            .child(self.row(add, "Add server".into(), "".into(), cx))
+            .children(status)
+            .children(elements)
             .children(self.message.clone().map(|(text, failed)| {
                 div().pt(px(12.)).text_color(if failed { t.danger } else { t.secondary }).child(text)
             }))
@@ -534,7 +580,7 @@ impl Render for SettingsPage {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::step;
+    use super::{Local, Row, sections, step};
 
     #[test]
     fn a_step_wraps_at_the_ends_and_an_unknown_value_goes_to_the_first_choice() {
@@ -544,5 +590,46 @@ mod tests {
         assert_eq!(step(&options, &json!("off"), 1), json!("auto"));
         assert_eq!(step(&options, &json!("auto"), -1), json!("off"));
         assert_eq!(step(&options, &Value::Null, 1), json!("auto"));
+    }
+
+    #[test]
+    fn the_server_settings_show_in_the_groups_of_the_web_and_empty_groups_do_not_show() {
+        let shown: Vec<_> = sections(true, 1)
+            .into_iter()
+            .map(|(title, rows)| {
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .map(|row| match row {
+                        Row::Server(definition) => definition.label.to_string(),
+                        row => format!("{row:?}"),
+                    })
+                    .collect();
+                (title, rows)
+            })
+            .collect();
+        let expected = [
+            ("Skipping", vec!["Skip intros", "Auto-skip recaps", "Auto-skip credits"]),
+            ("Next episode", vec!["Auto-play next episode"]),
+            (
+                "Language & subtitles",
+                vec!["Spoken language", "Subtitle language", "Subtitle behavior", "Show forced subtitles"],
+            ),
+            ("This computer", vec!["Local(HardwareDecoding)", "Local(CheckReleases)"]),
+            ("Accounts", vec!["Account(0)", "AddServer"]),
+        ];
+        let expected: Vec<_> =
+            expected.map(|(title, rows)| (title, rows.into_iter().map(String::from).collect::<Vec<_>>())).into();
+        assert_eq!(shown, expected);
+    }
+
+    #[test]
+    fn before_the_read_only_the_local_settings_and_the_accounts_show() {
+        assert_eq!(
+            sections(false, 0),
+            [
+                ("This computer", vec![Row::Local(Local::HardwareDecoding), Row::Local(Local::CheckReleases)]),
+                ("Accounts", vec![Row::AddServer]),
+            ]
+        );
     }
 }

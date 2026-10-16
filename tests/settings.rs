@@ -50,14 +50,14 @@ fn opening_a_profile_reads_the_eight_server_settings() {
     let seen = seen.lock().unwrap();
     let (url, profile) = (&seen[0].url, seen[0].header("X-Profile-Id"));
     let keys = [
+        "playback.intro_skip_mode",
+        "playback.auto_skip_recap",
+        "playback.auto_skip_credits",
+        "playback.auto_play_next",
         "playback.audio_language",
         "playback.subtitle_language",
         "playback.subtitle_mode",
         "playback.show_forced_subtitles",
-        "playback.intro_skip_mode",
-        "playback.auto_skip_credits",
-        "playback.auto_skip_recap",
-        "playback.auto_play_next",
     ];
     let query = keys.map(|key| format!("keys={key}")).join("&");
     assert_eq!(url, &format!("https://silo.test/api/v2/settings/values/effective?{query}"));
@@ -271,11 +271,11 @@ fn a_settings_page_in_the_back_history_keeps_the_changes_of_a_newer_one(cx: &mut
         PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
     });
     // A Settings page, and a second one on top of it. The second one turns the release check off.
-    cx.simulate_keystrokes(", , j j j j j j j j j enter");
+    cx.simulate_keystrokes(", , j enter");
     cx.run_until_parked();
     assert!(!LocalSettings::load(&dir.join("relics")).check_releases);
     // Back to the first page, which turns hardware decoding off.
-    cx.simulate_keystrokes("escape j j j j j j j j enter");
+    cx.simulate_keystrokes("escape enter");
     cx.run_until_parked();
     let saved = LocalSettings::load(&dir.join("relics"));
     assert!(!saved.hardware_decoding);

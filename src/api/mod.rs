@@ -373,7 +373,11 @@ impl Client {
     pub async fn load_server_settings(&self) -> Result<(), Error> {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let writes = self.settings_writes.load(Ordering::SeqCst);
-        let query = settings::KEYS.map(|key| format!("keys={key}")).join("&");
+        let query = settings::DEFINITIONS
+            .iter()
+            .map(|definition| format!("keys={}", definition.key))
+            .collect::<Vec<_>>()
+            .join("&");
         let values: wire::EffectiveSettingCollection =
             self.call(Method::GET, &format!("settings/values/effective?{query}"), None).await?;
         // The user can switch to another Profile, or write a setting, while the request runs.
