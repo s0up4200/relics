@@ -144,6 +144,7 @@ impl Server {
                 json(200, r#"{"page":1,"total_pages":1,"total_results":0,"results":[]}"#.into())
             }
             ("POST", "requests/r-2/cancel") => ok("cancel_request_ok.json"),
+            ("GET", "settings/contract/capabilities") => ok("get_settings_contract_capabilities_ok.json"),
             ("GET", "settings/values/effective") => {
                 let mode = self.mode.lock().unwrap().clone();
                 let item = serde_json::json!({"key": "playback.subtitle_mode", "value": mode, "source": "profile", "definition_revision": 1});

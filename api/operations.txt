@@ -38,6 +38,7 @@ updatePlaybackProgress
 stopPlayback
 replanPlayback
 syncProgress
+getSettingsContractCapabilities
 listEffectiveSettings
 updateSettingValue
 listSeriesSeasons

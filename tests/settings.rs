@@ -6,11 +6,58 @@ use common::{Log, json};
 use futures::executor::block_on;
 use relics::api::Client;
 use relics::settings::{self, IntroSkipMode, LocalSettings, ServerSettings, SubtitleMode};
+use relics::settings_page::Row;
 use serde_json::json;
 
-/// A fake server that answers each request with `body`.
+const CAPABILITIES: &str = "settings/contract/capabilities";
+
+/// The settings contract capabilities of a server at `revision`.
+fn capabilities(revision: u32) -> String {
+    let mut body: serde_json::Value =
+        serde_json::from_str(&common::fixture("get_settings_contract_capabilities_ok.json")).unwrap();
+    body["manifest_revision"] = revision.into();
+    body.to_string()
+}
+
+/// A fake server at `revision` of the settings contract. It answers each other request with `body`.
+fn fake_at(revision: u32, body: serde_json::Value) -> (Client, Log) {
+    common::fake(move |request| {
+        if request.path == CAPABILITIES { json(200, capabilities(revision)) } else { json(200, body.to_string()) }
+    })
+}
+
+/// A fake server whose capability read fails. It answers each other request with 404.
+fn fake_without_capabilities() -> (Client, Log) {
+    common::fake(|request| if request.path == CAPABILITIES { json(500, String::new()) } else { common::not_found() })
+}
+
+/// A fake server at revision 17 whose capabilities have the `changed` fields. It accepts each write, and it
+/// answers each other request with no settings.
+fn fake_capabilities(changed: serde_json::Value) -> (Client, Log) {
+    common::fake(move |request| {
+        if request.path == CAPABILITIES {
+            let mut body: serde_json::Value = serde_json::from_str(&capabilities(17)).unwrap();
+            for (field, value) in changed.as_object().unwrap() {
+                body[field] = value.clone();
+            }
+            json(200, body.to_string())
+        } else if request.method == "PUT" {
+            common::ok("update_setting_value_ok.json")
+        } else {
+            json(200, json!({ "revision": 17, "items": [] }).to_string())
+        }
+    })
+}
+
+/// A fake server at revision 17 of the settings contract.
 fn fake(body: serde_json::Value) -> (Client, Log) {
-    common::fake(move |_| json(200, body.to_string()))
+    fake_at(17, body)
+}
+
+/// The keys that an effective read asks for.
+fn asked_keys(seen: &common::Seen) -> Vec<String> {
+    let query = seen.url.split_once('?').map_or("", |(_, query)| query);
+    query.split('&').filter_map(|pair| pair.strip_prefix("keys=")).map(String::from).collect()
 }
 
 fn value(key: &str, value: serde_json::Value) -> serde_json::Value {
@@ -45,10 +92,11 @@ fn opening_a_profile_reads_the_eight_server_settings() {
             auto_skip_credits: true,
             auto_skip_recap: true,
             auto_play_next: false,
+            manifest_revision: Some(17),
         }
     );
     let seen = seen.lock().unwrap();
-    let (url, profile) = (&seen[0].url, seen[0].header("X-Profile-Id"));
+    let (url, profile) = (&seen[1].url, seen[1].header("X-Profile-Id"));
     let keys = [
         "playback.intro_skip_mode",
         "playback.auto_skip_recap",
@@ -75,7 +123,134 @@ fn a_missing_key_or_a_value_of_another_type_keeps_the_default() {
         ],
     }));
     block_on(client.load_server_settings()).unwrap();
-    assert_eq!(client.server_settings(), ServerSettings::default());
+    assert_eq!(client.server_settings(), ServerSettings { manifest_revision: Some(17), ..ServerSettings::default() });
+}
+
+#[test]
+fn the_capability_read_comes_before_the_effective_read() {
+    let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
+    block_on(client.load_server_settings()).unwrap();
+    let paths: Vec<_> = seen.lock().unwrap().iter().map(|request| request.path.clone()).collect();
+    assert_eq!(paths[0], CAPABILITIES);
+    assert!(paths[1].starts_with("settings/values/effective?"), "{paths:?}");
+    assert_eq!(paths.len(), 2);
+}
+
+#[test]
+fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
+    let (client, seen) = fake_at(
+        6,
+        json!({
+            "revision": 6,
+            "items": [
+                value("playback.audio_language", json!("ja")),
+                value("playback.subtitle_language", json!("en")),
+                value("playback.subtitle_mode", json!("always")),
+                value("playback.show_forced_subtitles", json!(false)),
+                value("playback.auto_skip_credits", json!(true)),
+                value("playback.auto_skip_recap", json!(true)),
+                value("playback.auto_play_next", json!(false)),
+            ],
+        }),
+    );
+    block_on(client.load_server_settings()).unwrap();
+    assert_eq!(
+        client.server_settings(),
+        ServerSettings {
+            audio_language: Some("ja".into()),
+            subtitle_language: Some("en".into()),
+            subtitle_mode: SubtitleMode::Always,
+            show_forced_subtitles: false,
+            intro_skip_mode: IntroSkipMode::Ask,
+            auto_skip_credits: true,
+            auto_skip_recap: true,
+            auto_play_next: false,
+            manifest_revision: Some(6),
+        }
+    );
+    let asked = asked_keys(&seen.lock().unwrap()[1]);
+    assert_eq!(asked.len(), 7, "{asked:?}");
+    assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
+    let shown: Vec<_> = relics::settings_page::sections(Some(&client.server_settings()), 0)
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .collect();
+    assert!(
+        shown.iter().any(|row| matches!(row, Row::Server(definition) if definition.key == "playback.auto_skip_recap"))
+    );
+    assert!(
+        !shown.iter().any(|row| matches!(row, Row::Server(definition) if definition.key == "playback.intro_skip_mode"))
+    );
+}
+
+#[test]
+fn a_server_at_revision_17_is_asked_for_each_key() {
+    let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
+    block_on(client.load_server_settings()).unwrap();
+    let asked = asked_keys(&seen.lock().unwrap()[1]);
+    let all: Vec<_> = settings::DEFINITIONS.iter().map(|definition| definition.key.to_string()).collect();
+    assert_eq!(asked, all);
+}
+
+#[test]
+fn without_the_capabilities_the_rows_stay_and_each_change_is_refused() {
+    let (client, seen) = fake_without_capabilities();
+    block_on(client.load_server_settings()).unwrap();
+    let settings = client.server_settings();
+    assert_eq!(settings.manifest_revision, None);
+    let rows = relics::settings_page::sections(Some(&settings), 0).into_iter().flat_map(|(_, rows)| rows);
+    assert_eq!(rows.filter(|row| matches!(row, Row::Server(_))).count(), settings::DEFINITIONS.len());
+    let err = block_on(client.set_server_setting("playback.auto_play_next", json!(false))).unwrap_err();
+    assert_eq!(err.to_string(), "Relics cannot reach the settings of the Server");
+    assert!(client.server_settings().auto_play_next);
+    let paths: Vec<_> = seen.lock().unwrap().iter().map(|request| request.path.clone()).collect();
+    assert_eq!(paths, [CAPABILITIES], "the client read or wrote without the capabilities");
+}
+
+#[test]
+fn another_api_version_an_unavailable_state_or_a_refusal_is_like_a_failed_capability_read() {
+    for changed in [
+        json!({ "api_version": 2 }),
+        json!({ "state": "disabled" }),
+        json!({ "state": "not_configured" }),
+        json!({ "state": "unsupported" }),
+        json!({ "state": "from_a_newer_server" }),
+        json!({ "allowed": false }),
+    ] {
+        let (client, seen) = fake_capabilities(changed.clone());
+        block_on(client.load_server_settings()).unwrap();
+        assert_eq!(client.server_settings().manifest_revision, None, "{changed}");
+        let err = block_on(client.set_server_setting("playback.auto_play_next", json!(false))).unwrap_err();
+        assert_eq!(err.to_string(), "Relics cannot reach the settings of the Server", "{changed}");
+        let paths: Vec<_> = seen.lock().unwrap().iter().map(|request| request.path.clone()).collect();
+        assert_eq!(paths, [CAPABILITIES], "{changed}: the client read or wrote the settings");
+    }
+}
+
+#[test]
+fn without_batched_reads_the_keys_after_revision_1_are_unknown() {
+    let (client, seen) = fake_capabilities(json!({ "supports_batched_effective": false }));
+    block_on(client.load_server_settings()).unwrap();
+    let asked = asked_keys(&seen.lock().unwrap()[1]);
+    assert_eq!(asked.len(), 7, "{asked:?}");
+    assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
+    let shown = relics::settings_page::sections(Some(&client.server_settings()), 0);
+    let rows: Vec<_> = shown.into_iter().flat_map(|(_, rows)| rows).collect();
+    assert!(
+        !rows.iter().any(|row| matches!(row, Row::Server(definition) if definition.key == "playback.intro_skip_mode"))
+    );
+    block_on(client.set_server_setting("playback.auto_play_next", json!(false))).unwrap();
+}
+
+#[test]
+fn a_later_read_of_the_same_profile_does_not_read_the_capabilities_again() {
+    let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
+    block_on(client.load_server_settings()).unwrap();
+    block_on(client.load_server_settings()).unwrap();
+    client.set_profile(Some("p-kid".into()));
+    block_on(client.load_server_settings()).unwrap();
+    let capability_reads = seen.lock().unwrap().iter().filter(|request| request.path == CAPABILITIES).count();
+    assert_eq!(capability_reads, 2);
 }
 
 #[test]
@@ -99,11 +274,23 @@ fn an_old_profiles_write_does_not_discard_the_new_profiles_settings() {
     let waits = Arc::new(Mutex::new((Some(write), Some(read))));
     let http = FakeHttpClient::create(move |req| {
         let writing = req.method() == "PUT";
+        // The read of the old Profile, and each capability read, answer at once.
+        let at_once = req.uri().path().ends_with("contract/capabilities")
+            || req.headers().get("X-Profile-Id").is_some_and(|id| id == "p-owner");
+        if at_once && !writing {
+            let body = if req.uri().path().ends_with("contract/capabilities") {
+                capabilities(17)
+            } else {
+                json!({"revision": 17, "items": []}).to_string()
+            };
+            return Box::pin(async move { Ok(common::json(200, body).unwrap()) })
+                as futures::future::BoxFuture<'static, _>;
+        }
         let wait = {
             let mut waits = waits.lock().unwrap();
             if writing { waits.0.take().unwrap() } else { waits.1.take().unwrap() }
         };
-        async move {
+        Box::pin(async move {
             wait.await.unwrap();
             let body = if writing {
                 common::fixture("update_setting_value_ok.json")
@@ -111,10 +298,11 @@ fn an_old_profiles_write_does_not_discard_the_new_profiles_settings() {
                 json!({"revision": 17, "items": [value("playback.subtitle_mode", json!("always"))]}).to_string()
             };
             Ok(common::json(200, body).unwrap())
-        }
+        })
     });
     let client = common::client(http, "https://silo.test/");
     client.set_profile(Some("p-owner".into()));
+    block_on(client.load_server_settings()).unwrap();
     block_on(async {
         let mut write = Box::pin(client.set_server_setting("playback.subtitle_mode", json!("off")));
         assert!(futures::poll!(write.as_mut()).is_pending());
@@ -129,16 +317,22 @@ fn an_old_profiles_write_does_not_discard_the_new_profiles_settings() {
     assert_eq!(client.server_settings().subtitle_mode, SubtitleMode::Always);
 }
 
-/// The method, URL and body of each request.
-/// A fake server that answers each write with `status`.
+/// A fake server at revision 17 that answers each write with `status`. The client has read the settings.
 fn fake_write(status: u16) -> (Client, Log) {
-    common::fake(move |_| {
-        let reply = json!({
-            "key": "playback.subtitle_mode", "scope": "profile", "profile_id": "p-owner",
-            "value": "off", "revision": 2,
-        });
-        json(status, reply.to_string())
-    })
+    let (client, seen) = common::fake(move |request| match request.method.as_str() {
+        "PUT" => {
+            let reply = json!({
+                "key": "playback.subtitle_mode", "scope": "profile", "profile_id": "p-owner",
+                "value": "off", "revision": 2,
+            });
+            json(status, reply.to_string())
+        }
+        _ if request.path == CAPABILITIES => json(200, capabilities(17)),
+        _ => json(200, json!({ "revision": 17, "items": [] }).to_string()),
+    });
+    block_on(client.load_server_settings()).unwrap();
+    seen.lock().unwrap().clear();
+    (client, seen)
 }
 
 /// The JSON body of a request.
@@ -265,7 +459,13 @@ fn a_settings_page_in_the_back_history_keeps_the_changes_of_a_newer_one(cx: &mut
         gpui_kit::init(cx);
         gpui_omarchy::Theme::tokyo_night().apply(cx);
     });
-    let (client, _) = common::fake(|_| common::not_found());
+    // The effective read fails, so the page shows no Server rows.
+    let (client, _) =
+        common::fake(
+            |request| {
+                if request.path == CAPABILITIES { json(200, capabilities(17)) } else { common::not_found() }
+            },
+        );
     let client = std::sync::Arc::new(client);
     let (_, cx) = cx.add_window_view(|window, cx| {
         PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
@@ -295,7 +495,9 @@ fn the_focus_stays_on_its_row_when_the_server_settings_appear(cx: &mut gpui::Tes
     let ready = std::sync::Arc::new(AtomicBool::new(false));
     let answer = ready.clone();
     let (client, seen) = common::fake(move |request| {
-        if request.path.starts_with("settings/values/effective") && answer.load(Ordering::SeqCst) {
+        if request.path == CAPABILITIES {
+            json(200, capabilities(17))
+        } else if request.path.starts_with("settings/values/effective") && answer.load(Ordering::SeqCst) {
             json(200, json!({ "revision": 17, "items": [] }).to_string())
         } else {
             common::not_found()
@@ -315,4 +517,27 @@ fn the_focus_stays_on_its_row_when_the_server_settings_appear(cx: &mut gpui::Tes
     cx.run_until_parked();
     assert!(!LocalSettings::load(&dir).check_releases, "Enter did not act on the release check");
     assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "Enter changed a Server setting");
+}
+
+#[gpui::test]
+fn without_the_capabilities_a_change_on_the_page_sends_no_write(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+        common::isolate(cx)
+    });
+    let (client, seen) = fake_without_capabilities();
+    let client = std::sync::Arc::new(client);
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
+    });
+    // The Server rows show with their current values. l changes the first one, Skip intros.
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("l");
+    cx.run_until_parked();
+    let seen = seen.lock().unwrap();
+    assert!(!seen.iter().any(|request| request.method == "PUT"), "the page wrote without the capabilities");
+    assert!(!seen.iter().any(|request| request.path.starts_with("settings/values")), "the page read without them");
 }

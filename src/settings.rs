@@ -180,6 +180,10 @@ pub struct ServerSettings {
     pub auto_skip_credits: bool,
     pub auto_skip_recap: bool,
     pub auto_play_next: bool,
+    /// The revision of the settings contract that the server gives to the app: the `manifest_revision` of its
+    /// capabilities, or 1 when it has no batched effective reads. The server knows a key when this is equal to or
+    /// higher than the revision of its definition. `None` until the app reads capabilities that allow the settings.
+    pub manifest_revision: Option<u32>,
 }
 
 impl Default for ServerSettings {
@@ -195,6 +199,7 @@ impl Default for ServerSettings {
             auto_skip_credits: false,
             auto_skip_recap: false,
             auto_play_next: false,
+            manifest_revision: None,
         };
         for definition in DEFINITIONS.iter() {
             settings.set(definition.key, &definition.default);
@@ -218,6 +223,12 @@ pub enum IntroSkipMode {
 }
 
 impl ServerSettings {
+    /// False when the server does not know the key of the definition. Before the capability read succeeds, the
+    /// server knows each key.
+    pub fn knows(&self, definition: &Definition) -> bool {
+        self.manifest_revision.is_none_or(|revision| revision >= definition.revision)
+    }
+
     /// Reads the effective values. A key that is missing, or a value of the wrong type, keeps its default.
     pub fn from_effective(values: &[wire::EffectiveSettingValue]) -> Self {
         let mut settings = Self::default();

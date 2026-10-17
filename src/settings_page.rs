@@ -2,7 +2,9 @@
 //!
 //! - The Server settings of the active Profile, in the groups of the web Settings pages. The page reads them
 //!   again each time it opens. Each change writes at the `profile` scope at once. A failed write puts the old
-//!   value back and shows one line of error text. The app keeps no queue of failed writes.
+//!   value back and shows one line of error text. The app keeps no queue of failed writes. A row of a key that
+//!   the server does not know does not show. When Relics cannot read the settings contract capabilities, or
+//!   they do not allow the settings, each change fails.
 //! - This computer: the hardware decoding Local setting, and the "Check for new releases" Local setting of the
 //!   Release notice.
 //! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
@@ -74,13 +76,17 @@ pub enum Row {
 }
 
 /// The visible sections of the page in order, each with its title and its rows. The Server settings show only
-/// after the page has read them. A group with no visible rows does not show.
-pub fn sections(server: bool, pairs: usize) -> Vec<(&'static str, Vec<Row>)> {
+/// after the page has read them, and only the keys that the server knows. A group with no visible rows does not
+/// show.
+pub fn sections(server: Option<&ServerSettings>, pairs: usize) -> Vec<(&'static str, Vec<Row>)> {
     let mut sections: Vec<_> = Group::ALL
         .into_iter()
         .map(|group| {
-            let mut rows: Vec<_> =
-                DEFINITIONS.iter().filter(|definition| server && definition.group == group).map(Row::Server).collect();
+            let mut rows: Vec<_> = DEFINITIONS
+                .iter()
+                .filter(|definition| definition.group == group && server.is_some_and(|server| server.knows(definition)))
+                .map(Row::Server)
+                .collect();
             if group == Group::ThisComputer {
                 rows.extend([Row::Local(Local::HardwareDecoding), Row::Local(Local::CheckReleases)]);
             }
@@ -201,7 +207,7 @@ impl SettingsPage {
 
     /// The visible rows, in order.
     fn rows(&self) -> Vec<Row> {
-        sections(self.server.is_some(), self.pairs.len()).into_iter().flat_map(|(_, rows)| rows).collect()
+        sections(self.server.as_ref(), self.pairs.len()).into_iter().flat_map(|(_, rows)| rows).collect()
     }
 
     /// The Server setting of the focused row.
@@ -499,7 +505,7 @@ impl Render for SettingsPage {
         let on_off = |on: bool| if on { "On" } else { "Off" };
         let mut index = 0;
         let mut elements = Vec::new();
-        for (title, rows) in sections(self.server.is_some(), self.pairs.len()) {
+        for (title, rows) in sections(self.server.as_ref(), self.pairs.len()) {
             elements.push(self.header(title, cx).into_any_element());
             for row in rows {
                 elements.push(match row {
@@ -589,6 +595,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{Local, Row, sections, step};
+    use crate::settings::ServerSettings;
 
     #[test]
     fn a_step_wraps_at_the_ends_and_an_unknown_value_goes_to_the_first_choice() {
@@ -602,7 +609,7 @@ mod tests {
 
     #[test]
     fn the_server_settings_show_in_the_groups_of_the_web_and_empty_groups_do_not_show() {
-        let shown: Vec<_> = sections(true, 1)
+        let shown: Vec<_> = sections(Some(&ServerSettings::default()), 1)
             .into_iter()
             .map(|(title, rows)| {
                 let rows: Vec<_> = rows
@@ -633,7 +640,7 @@ mod tests {
     #[test]
     fn before_the_read_only_the_local_settings_and_the_accounts_show() {
         assert_eq!(
-            sections(false, 0),
+            sections(None, 0),
             [
                 ("This computer", vec![Row::Local(Local::HardwareDecoding), Row::Local(Local::CheckReleases)]),
                 ("Accounts", vec![Row::AddServer]),

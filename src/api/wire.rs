@@ -6379,6 +6379,34 @@ pub struct SettingValueWrite {
     #[doc = "The value to store; validated and normalized against the key's value_schema"]
     pub value: ::serde_json::Value,
 }
+#[doc = "`SettingsContractCapabilities`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct SettingsContractCapabilities {
+    #[doc = "Whether the current principal may use the capability"]
+    pub allowed: bool,
+    #[doc = "Settings protocol version; changes only for a change no revision rule can express"]
+    pub api_version: i64,
+    #[doc = "Client families a profile_client scope may name"]
+    pub client_families: ::std::vec::Vec<::std::string::String>,
+    #[doc = "Entity tag of the public manifest getSettingsContract serves"]
+    pub contract_etag: ::std::string::String,
+    #[doc = "Number of setting definitions in the manifest"]
+    pub definition_count: i64,
+    #[doc = "Manifest revision clients filter definitions against"]
+    pub manifest_revision: i64,
+    #[doc = "Opaque revision of this document"]
+    pub revision: ::std::string::String,
+    #[doc = "Setting scopes this server resolves"]
+    pub scopes: ::std::vec::Vec<::std::string::String>,
+    #[doc = "Support and configuration state, not health"]
+    pub state: ::std::string::String,
+    #[doc = "Whether navigation shortcut list mutations are atomic"]
+    pub supports_atomic_shortcuts: bool,
+    #[doc = "Whether the effective resolver accepts a batch of keys"]
+    pub supports_batched_effective: bool,
+    #[doc = "Whether repeating a value write converges on the same state"]
+    pub supports_idempotent_writes: bool,
+}
 #[doc = "`Shuffle`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct Shuffle {

@@ -862,6 +862,43 @@
       "body_file": "get_person_ok.json"
     },
     {
+      "name": "get_settings_contract_capabilities_authentication_required",
+      "operation_id": "getSettingsContractCapabilities",
+      "scenario": "The capability document is served behind authentication.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/settings/contract/capabilities"
+      },
+      "expected_status": 401,
+      "response_headers": {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json"
+      },
+      "response_media_type": "application/problem+json",
+      "schema": "#/components/schemas/Problem",
+      "body_file": "get_settings_contract_capabilities_authentication_required.json"
+    },
+    {
+      "name": "get_settings_contract_capabilities_ok",
+      "operation_id": "getSettingsContractCapabilities",
+      "scenario": "What this server's settings API supports, for feature detection.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/settings/contract/capabilities",
+        "headers": {
+          "Authorization": "Bearer tok-member"
+        }
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Cache-Control": "private, no-cache",
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/SettingsContractCapabilities",
+      "body_file": "get_settings_contract_capabilities_ok.json"
+    },
+    {
       "name": "get_system_info_ok",
       "operation_id": "getSystemInfo",
       "scenario": "Discovery before login: a public operation answered with the contract identity.",
