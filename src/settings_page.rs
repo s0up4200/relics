@@ -176,7 +176,15 @@ impl SettingsPage {
             Failure::Retain,
             async move { client.load_server_settings().await.map(|()| client.server_settings()) },
             move |this, result, _cx| match result {
-                Ok(settings) => this.server = Some(settings),
+                Ok(settings) => {
+                    // The Server rows can appear above the focused row. The focus stays on its row, and a focus
+                    // on the first row stays at the top.
+                    let focused = this.rows().get(this.row).copied().filter(|_| this.row > 0);
+                    this.server = Some(settings);
+                    if let Some(focused) = focused {
+                        this.row = this.rows().iter().position(|row| *row == focused).unwrap_or(0);
+                    }
+                }
                 Err(err) => this.load_error = Some(err.to_string()),
             },
             Self::load,
