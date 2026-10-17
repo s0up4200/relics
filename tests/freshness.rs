@@ -1696,3 +1696,24 @@ fn episode_replacement_keeps_the_play_target_and_clamps_a_shorter_row(cx: &mut T
     assert!(server.count("catalog/items/episode:severance-s01e01/versions") > 0);
     assert!(server.requests("POST", "playback/start").is_empty(), "the local 404 stops playback before mpv");
 }
+
+#[gpui::test]
+fn an_open_choice_list_closes_when_its_row_goes_away(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = rig(cx);
+    open_row(cx, 7);
+    // Row 0 is Skip intros. Enter opens its Choice list, with the focus on its second choice, "Ask to skip".
+    cx.simulate_keystrokes("enter");
+    // The server goes back to revision 6, which does not know Skip intros, and the page reloads.
+    let mut capabilities: serde_json::Value =
+        serde_json::from_str(&common::fixture("get_settings_contract_capabilities_ok.json")).unwrap();
+    capabilities["manifest_revision"] = 6.into();
+    set_reply(&server, "settings/contract/capabilities", capabilities);
+    send(cx, &changes, LiveChange::Resync);
+    // Auto-skip recaps (off) now has the focus. With the list closed, Enter toggles it on. With the old list
+    // open, Enter picks its second choice and writes off.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let writes = server.requests("PUT", "settings/values");
+    let bodies: Vec<_> = writes.iter().map(|req| (req.path.as_str(), req.body.as_str())).collect();
+    assert_eq!(bodies, [("settings/values/playback.auto_skip_recap?scope=profile", r#"{"value":true}"#)]);
+}

@@ -185,10 +185,15 @@ impl SettingsPage {
                 Ok(settings) => {
                     // The Server rows can appear above the focused row. The focus stays on its row, and a focus
                     // on the first row stays at the top.
-                    let focused = this.rows().get(this.row).copied().filter(|_| this.row > 0);
+                    let before = this.rows().get(this.row).copied();
+                    let focused = before.filter(|_| this.row > 0);
                     this.server = Some(settings);
                     if let Some(focused) = focused {
                         this.row = this.rows().iter().position(|row| *row == focused).unwrap_or(0);
+                    }
+                    // The row of the open Choice list can go away when the server knows fewer keys.
+                    if this.rows().get(this.row).copied() != before {
+                        this.picker = None;
                     }
                 }
                 Err(err) => this.load_error = Some(err.to_string()),
