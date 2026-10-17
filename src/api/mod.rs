@@ -539,14 +539,21 @@ impl Client {
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
         let (headers, used) = self.headers();
+        let profile_id = self.auth.lock().unwrap().profile_id.clone();
+        // The user can switch to another Profile while a retry waits, and a retry must not act for the new Profile.
+        let same_profile = || self.auth.lock().unwrap().profile_id == profile_id;
         let mut result = send(&self.http, &self.server, method.clone(), path, &headers, body.clone()).await;
         if matches!(&result, Err(err) if is_unauthorized(err)) {
             self.refresh(&used).await?;
+            if !same_profile() {
+                return result;
+            }
             result = send(&self.http, &self.server, method.clone(), path, &self.headers().0, body.clone()).await;
         }
         let stale = headers.iter().find(|(name, _)| *name == "X-Profile-Token").map(|(_, token)| token.as_str());
         if matches!(&result, Err(Error::Problem(p)) if p.code() == "profile_verification_required")
             && self.unlock(stale).await
+            && same_profile()
         {
             result = send(&self.http, &self.server, method, path, &self.headers().0, body).await;
         }

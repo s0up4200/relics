@@ -604,6 +604,61 @@ fn a_profile_switch_during_the_write_keeps_the_device_row_of_the_new_profile() {
 }
 
 #[test]
+fn a_profile_switch_during_a_refresh_sends_no_retry_for_the_new_profile() {
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use http_client::FakeHttpClient;
+
+    let (finish_refresh, refresh) = oneshot::channel::<()>();
+    let refresh = Mutex::new(Some(refresh));
+    let deletes = Arc::new(Mutex::new(Vec::new()));
+    let http = FakeHttpClient::create({
+        let deletes = deletes.clone();
+        move |req| {
+            let reply = match req.method().as_str() {
+                _ if req.uri().path().ends_with("auth/refresh") => {
+                    let refresh = refresh.lock().unwrap().take().unwrap();
+                    return Box::pin(async move {
+                        refresh.await.unwrap();
+                        let tokens = json!({
+                            "access_token": common::jwt(1_900_000_000), "refresh_token": "ref2", "expires_in": 28800,
+                        });
+                        Ok(common::json(200, tokens.to_string()).unwrap())
+                    }) as futures::future::BoxFuture<'static, _>;
+                }
+                "PUT" => common::ok("update_setting_value_ok.json"),
+                "DELETE" => {
+                    deletes.lock().unwrap().push(req.headers().get("X-Profile-Id").cloned());
+                    common::problem(401, "token_refresh_required.json")
+                }
+                _ if req.uri().path().ends_with("contract/capabilities") => json(200, capabilities(17)),
+                _ => {
+                    let item = json!({
+                        "key": "playback.subtitle_mode", "value": "off", "source": "profile_device",
+                        "definition_revision": 1,
+                    });
+                    json(200, json!({ "revision": 17, "items": [item] }).to_string())
+                }
+            };
+            Box::pin(async move { Ok(reply.unwrap()) })
+        }
+    });
+    let client = common::client(http, "https://silo.test/");
+    client.set_profile(Some("p-owner".into()));
+    block_on(client.load_server_settings()).unwrap();
+    block_on(async {
+        let mut write = Box::pin(client.set_server_setting("playback.subtitle_mode", json!("always")));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        client.set_profile(Some("p-kid".into()));
+        finish_refresh.send(()).unwrap();
+        assert!(write.await.is_err());
+    });
+    let deletes = deletes.lock().unwrap();
+    assert_eq!(deletes.len(), 1, "the retry went out for the new Profile: {deletes:?}");
+}
+
+#[test]
 fn a_failed_delete_is_a_failed_save_and_reads_the_settings_again() {
     let (client, seen) = fake_source("profile_device", 500);
     assert!(block_on(client.set_server_setting("playback.subtitle_mode", json!("auto"))).is_err());
