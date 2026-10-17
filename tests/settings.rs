@@ -553,6 +553,57 @@ fn a_device_row_that_is_already_gone_is_a_success() {
 }
 
 #[test]
+fn a_profile_switch_during_the_write_keeps_the_device_row_of_the_new_profile() {
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use http_client::FakeHttpClient;
+
+    let (finish_write, write) = oneshot::channel::<()>();
+    let write = Mutex::new(Some(write));
+    let deletes = Arc::new(Mutex::new(Vec::new()));
+    let http = FakeHttpClient::create({
+        let deletes = deletes.clone();
+        move |req| {
+            let body = match req.method().as_str() {
+                "PUT" => {
+                    let write = write.lock().unwrap().take().unwrap();
+                    return Box::pin(async move {
+                        write.await.unwrap();
+                        Ok(common::json(200, common::fixture("update_setting_value_ok.json")).unwrap())
+                    }) as futures::future::BoxFuture<'static, _>;
+                }
+                "DELETE" => {
+                    deletes.lock().unwrap().push(req.headers().get("X-Profile-Id").cloned());
+                    String::new()
+                }
+                _ if req.uri().path().ends_with("contract/capabilities") => capabilities(17),
+                _ => {
+                    let item = json!({
+                        "key": "playback.subtitle_mode", "value": "off", "source": "profile_device",
+                        "definition_revision": 1,
+                    });
+                    json!({ "revision": 17, "items": [item] }).to_string()
+                }
+            };
+            Box::pin(async move { Ok(common::json(200, body).unwrap()) })
+        }
+    });
+    let client = common::client(http, "https://silo.test/");
+    client.set_profile(Some("p-owner".into()));
+    block_on(client.load_server_settings()).unwrap();
+    block_on(async {
+        let mut write = Box::pin(client.set_server_setting("playback.subtitle_mode", json!("always")));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        client.set_profile(Some("p-kid".into()));
+        finish_write.send(()).unwrap();
+        write.await.unwrap();
+    });
+    let deletes = deletes.lock().unwrap();
+    assert!(deletes.is_empty(), "the write deleted a device row: {deletes:?}");
+}
+
+#[test]
 fn a_failed_delete_is_a_failed_save_and_reads_the_settings_again() {
     let (client, seen) = fake_source("profile_device", 500);
     assert!(block_on(client.set_server_setting("playback.subtitle_mode", json!("auto"))).is_err());

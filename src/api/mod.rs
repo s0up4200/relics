@@ -458,7 +458,9 @@ impl Client {
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
         let mut saved = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await.map(|_| ());
         let mut delete_failed = false;
-        if saved.is_ok() && device_row {
+        // The delete goes with the headers of the active Profile, so after a switch it would remove the device
+        // row of the new Profile.
+        if saved.is_ok() && device_row && self.auth.lock().unwrap().profile_id == profile_id {
             // The profile value is written first, so a failed delete does not lose the choice.
             let path = format!("settings/values/{key}?scope=profile_device");
             // A 404 is a row that is already gone, which is the state that the delete asks for.
