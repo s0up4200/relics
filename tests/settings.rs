@@ -50,14 +50,14 @@ fn opening_a_profile_reads_the_eight_server_settings() {
     let seen = seen.lock().unwrap();
     let (url, profile) = (&seen[0].url, seen[0].header("X-Profile-Id"));
     let keys = [
+        "playback.intro_skip_mode",
+        "playback.auto_skip_recap",
+        "playback.auto_skip_credits",
+        "playback.auto_play_next",
         "playback.audio_language",
         "playback.subtitle_language",
         "playback.subtitle_mode",
         "playback.show_forced_subtitles",
-        "playback.intro_skip_mode",
-        "playback.auto_skip_credits",
-        "playback.auto_skip_recap",
-        "playback.auto_play_next",
     ];
     let query = keys.map(|key| format!("keys={key}")).join("&");
     assert_eq!(url, &format!("https://silo.test/api/v2/settings/values/effective?{query}"));
@@ -271,13 +271,48 @@ fn a_settings_page_in_the_back_history_keeps_the_changes_of_a_newer_one(cx: &mut
         PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
     });
     // A Settings page, and a second one on top of it. The second one turns the release check off.
-    cx.simulate_keystrokes(", , j j j j j j j j j enter");
+    cx.simulate_keystrokes(", , j enter");
     cx.run_until_parked();
     assert!(!LocalSettings::load(&dir.join("relics")).check_releases);
     // Back to the first page, which turns hardware decoding off.
-    cx.simulate_keystrokes("escape j j j j j j j j enter");
+    cx.simulate_keystrokes("escape enter");
     cx.run_until_parked();
     let saved = LocalSettings::load(&dir.join("relics"));
     assert!(!saved.hardware_decoding);
     assert!(!saved.check_releases, "the older page wrote back its stale release setting");
+}
+
+#[gpui::test]
+fn the_focus_stays_on_its_row_when_the_server_settings_appear(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+        common::isolate(cx)
+    });
+    // The first read of the Server settings fails, and the retry reads them.
+    let ready = std::sync::Arc::new(AtomicBool::new(false));
+    let answer = ready.clone();
+    let (client, seen) = common::fake(move |request| {
+        if request.path.starts_with("settings/values/effective") && answer.load(Ordering::SeqCst) {
+            json(200, json!({ "revision": 17, "items": [] }).to_string())
+        } else {
+            common::not_found()
+        }
+    });
+    let client = std::sync::Arc::new(client);
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
+    });
+    // Without the Server rows, j focuses the release check. The Server rows then appear above it.
+    cx.simulate_keystrokes(", j");
+    cx.run_until_parked();
+    ready.store(true, Ordering::SeqCst);
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!LocalSettings::load(&dir).check_releases, "Enter did not act on the release check");
+    assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "Enter changed a Server setting");
 }
