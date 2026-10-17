@@ -105,6 +105,40 @@ fn a_locked_reply_after_a_profile_switch_asks_for_no_pin() {
 }
 
 #[test]
+fn a_request_that_waits_for_another_pin_entry_asks_for_no_pin_after_a_profile_switch() {
+    use futures::channel::oneshot;
+
+    let (client, _) = client(|_| problem(403, "profile_verification_required.json"));
+    client.set_profile(Some("p-kid".into()));
+    let (cancel, entry) = oneshot::channel::<Option<String>>();
+    let entry = Mutex::new(Some(entry));
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = asked.clone();
+    client.on_pin_required(move |profile_id| {
+        log.lock().unwrap().push(profile_id);
+        let entry = entry.lock().unwrap().take();
+        async move {
+            match entry {
+                Some(entry) => entry.await.ok().flatten(),
+                None => None,
+            }
+        }
+        .boxed()
+    });
+    block_on(async {
+        let mut first = Box::pin(client.profiles());
+        let mut second = Box::pin(client.profiles());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        client.set_profile(Some("p-owner".into()));
+        drop(cancel);
+        assert!(first.await.is_err());
+        assert!(second.await.is_err());
+    });
+    assert_eq!(*asked.lock().unwrap(), ["p-kid"]);
+}
+
+#[test]
 fn the_saved_profile_token_goes_out_with_each_request() {
     let (client, seen) = client(|_| ok("list_profiles_ok.json"));
     client.set_profile(Some("p-kid".into()));

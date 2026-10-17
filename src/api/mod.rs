@@ -552,9 +552,7 @@ impl Client {
         }
         let stale = headers.iter().find(|(name, _)| *name == "X-Profile-Token").map(|(_, token)| token.as_str());
         if matches!(&result, Err(Error::Problem(p)) if p.code() == "profile_verification_required")
-            && same_profile()
-            && self.unlock(stale).await
-            && same_profile()
+            && self.unlock(profile_id.as_deref(), stale).await
         {
             result = send(&self.http, &self.server, method, path, &self.headers().0, body).await;
         }
@@ -981,13 +979,17 @@ impl Client {
         }
     }
 
-    /// Asks the user for the PIN of the active Profile, unless another request already replaced the `stale`
-    /// PIN token. Returns false when the user cancels.
-    async fn unlock(&self, stale: Option<&str>) -> bool {
+    /// Asks the user for the PIN of `profile_id`, unless another request already replaced the `stale` PIN token.
+    /// Returns false when the user cancels, or when `profile_id` is no longer the active Profile.
+    async fn unlock(&self, profile_id: Option<&str>, stale: Option<&str>) -> bool {
         let _guard = self.unlocking.lock().await;
-        let (profile_id, token) = {
+        let token = {
             let auth = self.auth.lock().unwrap();
-            (auth.profile_id.clone(), auth.profile_token.clone())
+            // The user can switch to another Profile while this request waits for the PIN entry of another request.
+            if auth.profile_id.as_deref() != profile_id {
+                return false;
+            }
+            auth.profile_token.clone()
         };
         let Some(profile_id) = profile_id else {
             return false;
@@ -995,13 +997,13 @@ impl Client {
         if token.is_some() && token.as_deref() != stale {
             return true;
         }
-        let asked = (self.on_pin_required.lock().unwrap())(profile_id.clone());
+        let asked = (self.on_pin_required.lock().unwrap())(profile_id.to_string());
         let Some(token) = asked.await else {
             return false;
         };
         let mut auth = self.auth.lock().unwrap();
         // The user can switch to another Profile while the PIN entry is open.
-        if auth.profile_id.as_deref() != Some(profile_id.as_str()) {
+        if auth.profile_id.as_deref() != Some(profile_id) {
             return false;
         }
         auth.profile_token = Some(token);
