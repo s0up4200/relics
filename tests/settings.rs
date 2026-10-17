@@ -211,6 +211,69 @@ fn a_new_revision_applies_to_writes_also_when_the_effective_read_fails() {
     assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "the client wrote an unknown key");
 }
 
+/// Two loads of one Profile overlap. The first capability read gives revision 17, and the second one fails.
+/// `hold` is the path of the reply of the first load that comes last: its capability read or its effective read.
+fn overlapping_loads(hold: &'static str) -> Log {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use http_client::FakeHttpClient;
+
+    let (release, held) = oneshot::channel::<()>();
+    let held = Arc::new(Mutex::new(Some(held)));
+    let capability_reads = Arc::new(AtomicUsize::new(0));
+    let seen: Log = Arc::default();
+    let log = seen.clone();
+    let http = FakeHttpClient::create(move |req| {
+        let path = req.uri().path().trim_start_matches("/api/v2/").to_string();
+        log.lock().unwrap().push(common::Seen {
+            method: req.method().to_string(),
+            url: req.uri().to_string(),
+            path: path.clone(),
+            headers: Vec::new(),
+            body: String::new(),
+        });
+        let first = if path == CAPABILITIES { capability_reads.fetch_add(1, Ordering::SeqCst) == 0 } else { true };
+        let reply = match path.as_str() {
+            CAPABILITIES if first => (200, capabilities(17)),
+            CAPABILITIES => (500, String::new()),
+            _ if hold != CAPABILITIES => (200, json!({ "revision": 17, "items": [] }).to_string()),
+            _ => (500, String::new()),
+        };
+        let wait = (first && path.starts_with(hold)).then(|| held.lock().unwrap().take()).flatten();
+        Box::pin(async move {
+            if let Some(wait) = wait {
+                wait.await.unwrap();
+            }
+            Ok(common::json(reply.0, reply.1).unwrap())
+        }) as futures::future::BoxFuture<'static, _>
+    });
+    let client = common::client(http, "https://silo.test/");
+    client.set_profile(Some("p-owner".into()));
+    block_on(async {
+        let mut first = Box::pin(client.load_server_settings());
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        client.load_server_settings().await.unwrap();
+        release.send(()).unwrap();
+        first.await.ok();
+    });
+    block_on(client.set_server_setting("playback.intro_skip_mode", json!("always"))).ok();
+    seen
+}
+
+#[test]
+fn an_older_effective_read_does_not_undo_a_newer_failed_capability_read() {
+    let seen = overlapping_loads("settings/values/effective");
+    assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "the client wrote");
+}
+
+#[test]
+fn an_older_capability_read_does_not_undo_a_newer_failed_one() {
+    let seen = overlapping_loads(CAPABILITIES);
+    assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "the client wrote");
+}
+
 #[test]
 fn a_server_at_revision_17_is_asked_for_each_key() {
     let (client, seen) = fake(json!({ "revision": 17, "items": [] }));

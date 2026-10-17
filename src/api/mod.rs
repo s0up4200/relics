@@ -234,6 +234,8 @@ pub struct Client {
     /// Counts the starts and ends of the writes of Server settings, so that a read from before a write does not
     /// replace the written value.
     settings_writes: AtomicU64,
+    /// Counts the reads of Server settings. Only the newest read keeps its result.
+    settings_loads: AtomicU64,
     /// The `client_features` of the last start request. A replan sends the same list.
     features: Mutex<Vec<&'static str>>,
     on_trouble: Mutex<Box<dyn Fn(Trouble) + Send + Sync>>,
@@ -289,6 +291,7 @@ impl Client {
             installation_id: Mutex::default(),
             server_settings: Mutex::default(),
             settings_writes: AtomicU64::new(0),
+            settings_loads: AtomicU64::new(0),
             features: Mutex::default(),
             on_trouble: Mutex::new(Box::new(|_| {})),
             sessions: Mutex::default(),
@@ -380,9 +383,13 @@ impl Client {
     pub async fn load_server_settings(&self) -> Result<(), Error> {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let writes = self.settings_writes.load(Ordering::SeqCst);
+        let load = self.settings_loads.fetch_add(1, Ordering::SeqCst) + 1;
+        // The user can switch to another Profile while a request runs, and a newer read can start.
+        let current =
+            || self.auth.lock().unwrap().profile_id == profile_id && self.settings_loads.load(Ordering::SeqCst) == load;
         let known = ServerSettings { manifest_revision: self.settings_revision().await, ..ServerSettings::default() };
         // The writes use the new revision at once, also when the effective read fails.
-        if self.auth.lock().unwrap().profile_id == profile_id {
+        if current() {
             self.server_settings.lock().unwrap().manifest_revision = known.manifest_revision;
         }
         if known.manifest_revision.is_none() {
@@ -396,8 +403,8 @@ impl Client {
             .join("&");
         let values: wire::EffectiveSettingCollection =
             self.call(Method::GET, &format!("settings/values/effective?{query}"), None).await?;
-        // The user can switch to another Profile, or write a setting, while the request runs.
-        if self.auth.lock().unwrap().profile_id == profile_id && self.settings_writes.load(Ordering::SeqCst) == writes {
+        // A write while the request runs also makes the result old.
+        if current() && self.settings_writes.load(Ordering::SeqCst) == writes {
             *self.server_settings.lock().unwrap() = ServerSettings {
                 manifest_revision: known.manifest_revision,
                 ..ServerSettings::from_effective(&values.items)
