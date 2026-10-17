@@ -54,8 +54,8 @@ pub enum Error {
     Decode(String),
     /// The server refused the refresh token. The user must sign in again.
     SignedOut,
-    /// Relics cannot read the settings contract capabilities, or they do not allow the settings, so it must not
-    /// write a Server setting.
+    /// Relics cannot read the settings contract capabilities, they do not allow the settings, or the server does
+    /// not know the key, so Relics must not write the Server setting.
     NoSettingsCapabilities,
 }
 
@@ -433,8 +433,12 @@ impl Client {
     /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
     /// when the write succeeds. A null value is "No preference".
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
-        // The server docs say that a client must not write without the capabilities.
-        if self.server_settings.lock().unwrap().manifest_revision.is_none() {
+        // The server docs say that a client must not write without the capabilities. A page from before the
+        // capability read can still show the row of a key that the server does not know.
+        let settings = self.server_settings.lock().unwrap().clone();
+        if settings.manifest_revision.is_none()
+            || !settings::definition(key).is_some_and(|definition| settings.knows(definition))
+        {
             return Err(Error::NoSettingsCapabilities);
         }
         let profile_id = self.auth.lock().unwrap().profile_id.clone();

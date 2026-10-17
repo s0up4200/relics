@@ -184,6 +184,16 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
 }
 
 #[test]
+fn a_key_that_the_server_does_not_know_is_not_written() {
+    let (client, seen) = fake_at(6, json!({ "revision": 6, "items": [] }));
+    block_on(client.load_server_settings()).unwrap();
+    // A Settings page from before the capability read can still show the row.
+    let err = block_on(client.set_server_setting("playback.intro_skip_mode", json!("always"))).unwrap_err();
+    assert_eq!(err.to_string(), "Relics cannot reach the settings of the Server");
+    assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "the client wrote an unknown key");
+}
+
+#[test]
 fn a_server_at_revision_17_is_asked_for_each_key() {
     let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
     block_on(client.load_server_settings()).unwrap();
