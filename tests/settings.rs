@@ -194,6 +194,24 @@ fn a_key_that_the_server_does_not_know_is_not_written() {
 }
 
 #[test]
+fn a_new_revision_applies_to_writes_also_when_the_effective_read_fails() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // The server goes back from revision 17 to revision 6, and its effective read then fails.
+    let revision = std::sync::Arc::new(AtomicU32::new(17));
+    let server = revision.clone();
+    let (client, seen) = common::fake(move |request| match server.load(Ordering::SeqCst) {
+        revision if request.path == CAPABILITIES => json(200, capabilities(revision)),
+        17 => json(200, json!({ "revision": 17, "items": [] }).to_string()),
+        _ => json(500, String::new()),
+    });
+    block_on(client.load_server_settings()).unwrap();
+    revision.store(6, Ordering::SeqCst);
+    assert!(block_on(client.load_server_settings()).is_err());
+    assert!(block_on(client.set_server_setting("playback.intro_skip_mode", json!("always"))).is_err());
+    assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"), "the client wrote an unknown key");
+}
+
+#[test]
 fn a_server_at_revision_17_is_asked_for_each_key() {
     let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
     block_on(client.load_server_settings()).unwrap();

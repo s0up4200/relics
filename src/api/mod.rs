@@ -381,10 +381,11 @@ impl Client {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let writes = self.settings_writes.load(Ordering::SeqCst);
         let known = ServerSettings { manifest_revision: self.settings_revision().await, ..ServerSettings::default() };
+        // The writes use the new revision at once, also when the effective read fails.
+        if self.auth.lock().unwrap().profile_id == profile_id {
+            self.server_settings.lock().unwrap().manifest_revision = known.manifest_revision;
+        }
         if known.manifest_revision.is_none() {
-            if self.auth.lock().unwrap().profile_id == profile_id {
-                self.server_settings.lock().unwrap().manifest_revision = None;
-            }
             return Ok(());
         }
         let query = settings::DEFINITIONS
