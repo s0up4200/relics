@@ -5,7 +5,7 @@ mod common;
 use common::{Log, json};
 use futures::executor::block_on;
 use relics::api::Client;
-use relics::settings::{self, IntroSkipMode, LocalSettings, ServerSettings, SubtitleMode};
+use relics::settings::{self, IntroSkipMode, LocalSettings, Origin, ServerSettings, SubtitleMode};
 use relics::settings_page::Row;
 use serde_json::json;
 
@@ -82,7 +82,7 @@ fn opening_a_profile_reads_the_eight_server_settings() {
     assert_eq!(client.server_settings(), ServerSettings::default());
     block_on(client.load_server_settings()).unwrap();
     assert_eq!(
-        client.server_settings(),
+        ServerSettings { origins: Default::default(), ..client.server_settings() },
         ServerSettings {
             audio_language: Some("ja".into()),
             subtitle_language: Some("en".into()),
@@ -93,6 +93,7 @@ fn opening_a_profile_reads_the_eight_server_settings() {
             auto_skip_recap: true,
             auto_play_next: false,
             manifest_revision: Some(17),
+            origins: Default::default(),
         }
     );
     let seen = seen.lock().unwrap();
@@ -123,7 +124,35 @@ fn a_missing_key_or_a_value_of_another_type_keeps_the_default() {
         ],
     }));
     block_on(client.load_server_settings()).unwrap();
-    assert_eq!(client.server_settings(), ServerSettings { manifest_revision: Some(17), ..ServerSettings::default() });
+    let settings = ServerSettings { origins: Default::default(), ..client.server_settings() };
+    assert_eq!(settings, ServerSettings { manifest_revision: Some(17), ..ServerSettings::default() });
+}
+
+#[test]
+fn the_source_and_the_cap_fields_reach_the_store() {
+    let (client, _) = fake(json!({
+        "revision": 17,
+        "items": [
+            { "key": "playback.auto_skip_recap", "value": true, "source": "profile_device", "definition_revision": 1 },
+            {
+                "key": "playback.subtitle_mode", "value": "auto", "source": "profile", "definition_revision": 1,
+                "constrained": true, "stored_value": "always", "permitted_values": ["auto", "off"],
+            },
+        ],
+    }));
+    block_on(client.load_server_settings()).unwrap();
+    let origins = client.server_settings().origins;
+    assert_eq!(origins["playback.auto_skip_recap"], Origin { source: "profile_device".into(), ..Origin::default() });
+    assert_eq!(
+        origins["playback.subtitle_mode"],
+        Origin {
+            source: "profile".into(),
+            constrained: true,
+            stored_value: Some(json!("always")),
+            permitted_values: vec![json!("auto"), json!("off")],
+        }
+    );
+    assert!(!origins.contains_key("playback.audio_language"), "a key that the server did not send has no origin");
 }
 
 #[test]
@@ -155,7 +184,7 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
     );
     block_on(client.load_server_settings()).unwrap();
     assert_eq!(
-        client.server_settings(),
+        ServerSettings { origins: Default::default(), ..client.server_settings() },
         ServerSettings {
             audio_language: Some("ja".into()),
             subtitle_language: Some("en".into()),
@@ -166,6 +195,7 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
             auto_skip_recap: true,
             auto_play_next: false,
             manifest_revision: Some(6),
+            origins: Default::default(),
         }
     );
     let asked = asked_keys(&seen.lock().unwrap()[1]);
@@ -459,6 +489,184 @@ fn a_change_writes_at_the_profile_scope_and_the_store_keeps_it() {
             json!({ "value": "off" }),
         )
     );
+}
+
+/// A fake server at revision 17 whose Effective value of the subtitle mode is "off" from the `source` row. It
+/// accepts each write, and answers each delete with `delete_status`. After the first read it reads "always" from the
+/// profile row. The client has read the settings.
+fn fake_source(source: &'static str, delete_status: u16) -> (Client, Log) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let read = AtomicBool::new(false);
+    let (client, seen) = common::fake(move |request| match request.method.as_str() {
+        "PUT" => common::ok("update_setting_value_ok.json"),
+        "DELETE" => json(delete_status, String::new()),
+        _ if request.path == CAPABILITIES => json(200, capabilities(17)),
+        _ => {
+            let item = if read.swap(true, Ordering::SeqCst) {
+                value("playback.subtitle_mode", json!("always"))
+            } else {
+                json!({ "key": "playback.subtitle_mode", "value": "off", "source": source, "definition_revision": 1 })
+            };
+            json(200, json!({ "revision": 17, "items": [item] }).to_string())
+        }
+    });
+    block_on(client.load_server_settings()).unwrap();
+    seen.lock().unwrap().clear();
+    (client, seen)
+}
+
+/// The method and the path of each request.
+fn requests(seen: &Log) -> Vec<(String, String)> {
+    seen.lock().unwrap().iter().map(|req| (req.method.clone(), req.path.clone())).collect()
+}
+
+#[test]
+fn a_save_over_a_device_value_deletes_the_device_row_of_this_device() {
+    let (client, seen) = fake_source("profile_device", 204);
+    block_on(client.set_server_setting("playback.subtitle_mode", json!("always"))).unwrap();
+    assert_eq!(
+        requests(&seen),
+        [
+            ("PUT".into(), "settings/values/playback.subtitle_mode?scope=profile".into()),
+            ("DELETE".into(), "settings/values/playback.subtitle_mode?scope=profile_device".into()),
+        ]
+    );
+    assert_eq!(seen.lock().unwrap()[1].header("X-Silo-Device-Id"), Some(common::DEVICE_ID));
+    let settings = client.server_settings();
+    assert_eq!(settings.subtitle_mode, SubtitleMode::Always);
+    assert!(!settings.origins["playback.subtitle_mode"].is_device(), "the row still says Set for this device");
+}
+
+#[test]
+fn a_save_over_a_profile_value_only_writes_the_profile_row() {
+    let (client, seen) = fake_source("profile", 204);
+    block_on(client.set_server_setting("playback.subtitle_mode", json!("always"))).unwrap();
+    assert_eq!(requests(&seen), [("PUT".into(), "settings/values/playback.subtitle_mode?scope=profile".into())]);
+}
+
+#[test]
+fn a_device_row_that_is_already_gone_is_a_success() {
+    let (client, seen) = fake_source("profile_device", 404);
+    block_on(client.set_server_setting("playback.subtitle_mode", json!("always"))).unwrap();
+    assert_eq!(requests(&seen).len(), 2);
+    assert_eq!(client.server_settings().subtitle_mode, SubtitleMode::Always);
+}
+
+#[test]
+fn a_profile_switch_during_the_write_keeps_the_device_row_of_the_new_profile() {
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use http_client::FakeHttpClient;
+
+    let (finish_write, write) = oneshot::channel::<()>();
+    let write = Mutex::new(Some(write));
+    let deletes = Arc::new(Mutex::new(Vec::new()));
+    let http = FakeHttpClient::create({
+        let deletes = deletes.clone();
+        move |req| {
+            let body = match req.method().as_str() {
+                "PUT" => {
+                    let write = write.lock().unwrap().take().unwrap();
+                    return Box::pin(async move {
+                        write.await.unwrap();
+                        Ok(common::json(200, common::fixture("update_setting_value_ok.json")).unwrap())
+                    }) as futures::future::BoxFuture<'static, _>;
+                }
+                "DELETE" => {
+                    deletes.lock().unwrap().push(req.headers().get("X-Profile-Id").cloned());
+                    String::new()
+                }
+                _ if req.uri().path().ends_with("contract/capabilities") => capabilities(17),
+                _ => {
+                    let item = json!({
+                        "key": "playback.subtitle_mode", "value": "off", "source": "profile_device",
+                        "definition_revision": 1,
+                    });
+                    json!({ "revision": 17, "items": [item] }).to_string()
+                }
+            };
+            Box::pin(async move { Ok(common::json(200, body).unwrap()) })
+        }
+    });
+    let client = common::client(http, "https://silo.test/");
+    client.set_profile(Some("p-owner".into()));
+    block_on(client.load_server_settings()).unwrap();
+    block_on(async {
+        let mut write = Box::pin(client.set_server_setting("playback.subtitle_mode", json!("always")));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        client.set_profile(Some("p-kid".into()));
+        finish_write.send(()).unwrap();
+        write.await.unwrap();
+    });
+    let deletes = deletes.lock().unwrap();
+    assert!(deletes.is_empty(), "the write deleted a device row: {deletes:?}");
+}
+
+#[test]
+fn a_profile_switch_during_a_refresh_sends_no_retry_for_the_new_profile() {
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use http_client::FakeHttpClient;
+
+    let (finish_refresh, refresh) = oneshot::channel::<()>();
+    let refresh = Mutex::new(Some(refresh));
+    let deletes = Arc::new(Mutex::new(Vec::new()));
+    let http = FakeHttpClient::create({
+        let deletes = deletes.clone();
+        move |req| {
+            let reply = match req.method().as_str() {
+                _ if req.uri().path().ends_with("auth/refresh") => {
+                    let refresh = refresh.lock().unwrap().take().unwrap();
+                    return Box::pin(async move {
+                        refresh.await.unwrap();
+                        let tokens = json!({
+                            "access_token": common::jwt(1_900_000_000), "refresh_token": "ref2", "expires_in": 28800,
+                        });
+                        Ok(common::json(200, tokens.to_string()).unwrap())
+                    }) as futures::future::BoxFuture<'static, _>;
+                }
+                "PUT" => common::ok("update_setting_value_ok.json"),
+                "DELETE" => {
+                    deletes.lock().unwrap().push(req.headers().get("X-Profile-Id").cloned());
+                    common::problem(401, "token_refresh_required.json")
+                }
+                _ if req.uri().path().ends_with("contract/capabilities") => json(200, capabilities(17)),
+                _ => {
+                    let item = json!({
+                        "key": "playback.subtitle_mode", "value": "off", "source": "profile_device",
+                        "definition_revision": 1,
+                    });
+                    json(200, json!({ "revision": 17, "items": [item] }).to_string())
+                }
+            };
+            Box::pin(async move { Ok(reply.unwrap()) })
+        }
+    });
+    let client = common::client(http, "https://silo.test/");
+    client.set_profile(Some("p-owner".into()));
+    block_on(client.load_server_settings()).unwrap();
+    block_on(async {
+        let mut write = Box::pin(client.set_server_setting("playback.subtitle_mode", json!("always")));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        client.set_profile(Some("p-kid".into()));
+        finish_refresh.send(()).unwrap();
+        assert!(write.await.is_err());
+    });
+    let deletes = deletes.lock().unwrap();
+    assert_eq!(deletes.len(), 1, "the retry went out for the new Profile: {deletes:?}");
+}
+
+#[test]
+fn a_failed_delete_is_a_failed_save_and_reads_the_settings_again() {
+    let (client, seen) = fake_source("profile_device", 500);
+    assert!(block_on(client.set_server_setting("playback.subtitle_mode", json!("auto"))).is_err());
+    let paths: Vec<_> = requests(&seen).into_iter().map(|(_, path)| path).collect();
+    assert_eq!(paths[2], CAPABILITIES, "{paths:?}");
+    assert!(paths[3].starts_with("settings/values/effective?"), "{paths:?}");
+    // The read gives the value that really applies.
+    assert_eq!(client.server_settings().subtitle_mode, SubtitleMode::Always);
 }
 
 #[test]

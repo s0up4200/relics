@@ -1,10 +1,12 @@
 //! The Settings page. `,` or the Settings row at the bottom of the sidebar opens it.
 //!
 //! - The Server settings of the active Profile, in the groups of the web Settings pages. The page reads them
-//!   again each time it opens. Each change writes at the `profile` scope at once. A failed write puts the old
-//!   value back and shows one line of error text. The app keeps no queue of failed writes. A row of a key that
-//!   the server does not know does not show. When Relics cannot read the settings contract capabilities, or
-//!   they do not allow the settings, each change fails.
+//!   again each time it opens. Each change writes at the `profile` scope at once, and deletes the device row of
+//!   this device when the value came from it. A failed write puts back the value that applies and shows one
+//!   line of error text. The app keeps no queue of failed writes. A row whose value comes from the device row
+//!   of this device says "Set for this device". A row of a key that the server does not know does not show.
+//!   When Relics cannot read the settings contract capabilities, or they do not allow the settings, each change
+//!   fails.
 //! - This computer: the hardware decoding Local setting, and the "Check for new releases" Local setting of the
 //!   Release notice.
 //! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
@@ -96,6 +98,11 @@ pub fn sections(server: Option<&ServerSettings>, pairs: usize) -> Vec<(&'static 
         .collect();
     sections.push(("Accounts", (0..pairs).map(Row::Account).chain([Row::AddServer]).collect()));
     sections
+}
+
+/// The one-line note below the row of a Server setting, when its Effective value is not the Profile value.
+pub fn note(server: &ServerSettings, definition: &Definition) -> Option<&'static str> {
+    server.origins.get(definition.key).filter(|origin| origin.is_device()).map(|_| "Set for this device")
 }
 
 pub struct SettingsPage {
@@ -274,7 +281,6 @@ impl SettingsPage {
             return;
         };
         let key = definition.key;
-        let old = server.value(key);
         server.set(key, &new);
         self.message = None;
         let client = self.client.clone();
@@ -288,10 +294,12 @@ impl SettingsPage {
                 if this.fresh.written() {
                     this.load(cx);
                 }
+                // The store has the value that the write left: the new value, the old value after a failed
+                // write, or the value of the read after a failed delete of the device row.
+                if let Some(server) = &mut this.server {
+                    server.copy_key(key, &this.client.server_settings());
+                }
                 if let Err(err) = result {
-                    if let Some(server) = &mut this.server {
-                        server.set(key, &old);
-                    }
                     this.message = Some((format!("Could not save {}: {err}", definition.label), true));
                 }
                 cx.notify();
@@ -413,7 +421,14 @@ impl SettingsPage {
 
     /// One row: a label on the left and a value on the right. A click acts like Enter. A click on the row of
     /// the open list closes the list.
-    fn row(&self, row: usize, label: SharedString, value: SharedString, cx: &Context<Self>) -> impl IntoElement {
+    fn row(
+        &self,
+        row: usize,
+        label: SharedString,
+        note: Option<&'static str>,
+        value: SharedString,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let t = cx.omarchy();
         let focused = self.active && self.row == row;
         div()
@@ -437,7 +452,15 @@ impl SettingsPage {
                 }
                 cx.notify();
             }))
-            .child(div().flex_1().truncate().child(label))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(label))
+                    .children(note.map(|note| div().text_size(px(12.)).text_color(t.secondary).child(note))),
+            )
             .child(div().text_color(t.bright).child(value))
     }
 
@@ -522,17 +545,18 @@ impl Render for SettingsPage {
                             .find(|(v, _)| Some(v) == current.as_ref())
                             .map(|(_, l)| l)
                             .unwrap_or_default();
-                        self.row(index, definition.label.into(), value.into(), cx).into_any_element()
+                        let note = self.server.as_ref().and_then(|server| note(server, definition));
+                        self.row(index, definition.label.into(), note, value.into(), cx).into_any_element()
                     }
                     Row::Local(local) => {
                         let (label, on) = match local {
                             Local::HardwareDecoding => ("Hardware decoding", self.local.hardware_decoding),
                             Local::CheckReleases => ("Check for new releases", self.local.check_releases),
                         };
-                        self.row(index, label.into(), on_off(on).into(), cx).into_any_element()
+                        self.row(index, label.into(), None, on_off(on).into(), cx).into_any_element()
                     }
                     Row::Account(i) => self.pair_row(index, i, &self.pairs[i], cx).into_any_element(),
-                    Row::AddServer => self.row(index, "Add server".into(), "".into(), cx).into_any_element(),
+                    Row::AddServer => self.row(index, "Add server".into(), None, "".into(), cx).into_any_element(),
                 });
                 if let (Row::Server(definition), Some(picker)) =
                     (row, self.picker.as_ref().filter(|_| self.row == index))
@@ -599,8 +623,8 @@ impl Render for SettingsPage {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{Local, Row, sections, step};
-    use crate::settings::ServerSettings;
+    use super::{Local, Row, note, sections, step};
+    use crate::settings::{Origin, ServerSettings, definition};
 
     #[test]
     fn a_step_wraps_at_the_ends_and_an_unknown_value_goes_to_the_first_choice() {
@@ -640,6 +664,17 @@ mod tests {
         let expected: Vec<_> =
             expected.map(|(title, rows)| (title, rows.into_iter().map(String::from).collect::<Vec<_>>())).into();
         assert_eq!(shown, expected);
+    }
+
+    #[test]
+    fn a_row_whose_value_comes_from_this_device_says_so() {
+        let recaps = definition("playback.auto_skip_recap").unwrap();
+        let mut server = ServerSettings::default();
+        assert_eq!(note(&server, recaps), None, "a key without an origin");
+        server.origins.insert(recaps.key, Origin { source: "profile".into(), ..Origin::default() });
+        assert_eq!(note(&server, recaps), None);
+        server.origins.insert(recaps.key, Origin { source: "profile_device".into(), ..Origin::default() });
+        assert_eq!(note(&server, recaps), Some("Set for this device"));
     }
 
     #[test]

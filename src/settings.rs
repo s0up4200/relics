@@ -2,6 +2,7 @@
 //! API client reads them when a Profile opens, and each new Playback session uses them.
 //! The Local settings of this computer live in `$XDG_CONFIG_HOME/relics/settings.toml`.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -184,6 +185,28 @@ pub struct ServerSettings {
     /// capabilities, or 1 when it has no batched effective reads. The server knows a key when this is equal to or
     /// higher than the revision of its definition. `None` until the app reads capabilities that allow the settings.
     pub manifest_revision: Option<u32>,
+    /// Where the Effective value of each key came from, by key. A key that the server did not send has none.
+    pub origins: HashMap<&'static str, Origin>,
+}
+
+/// Where the Effective value of a key came from, and how the household cap changed it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Origin {
+    /// The scope of the row that gave the value, for example `profile` or `profile_device`, or `default`.
+    pub source: String,
+    /// The household cap changed the value.
+    pub constrained: bool,
+    /// The value that the Profile set, before the cap changed it.
+    pub stored_value: Option<Value>,
+    /// The values that the cap allows. Empty when no cap applies.
+    pub permitted_values: Vec<Value>,
+}
+
+impl Origin {
+    /// The value came from the device row of this device.
+    pub fn is_device(&self) -> bool {
+        self.source == "profile_device"
+    }
 }
 
 impl Default for ServerSettings {
@@ -200,6 +223,7 @@ impl Default for ServerSettings {
             auto_skip_recap: false,
             auto_play_next: false,
             manifest_revision: None,
+            origins: HashMap::new(),
         };
         for definition in DEFINITIONS.iter() {
             settings.set(definition.key, &definition.default);
@@ -229,11 +253,37 @@ impl ServerSettings {
         self.manifest_revision.is_none_or(|revision| revision >= definition.revision)
     }
 
+    /// Keeps a value that the app wrote at the `profile` scope. The cap fields stay until the next read.
+    pub fn set_profile_value(&mut self, key: &str, value: &Value) {
+        self.set(key, value);
+        if let Some(origin) = self.origins.get_mut(key) {
+            origin.source = "profile".into();
+        }
+    }
+
+    /// Takes the value and the origin of one key from `other`.
+    pub fn copy_key(&mut self, key: &str, other: &ServerSettings) {
+        self.set(key, &other.value(key));
+        match other.origins.get_key_value(key) {
+            Some((&key, origin)) => self.origins.insert(key, origin.clone()),
+            None => self.origins.remove(key),
+        };
+    }
+
     /// Reads the effective values. A key that is missing, or a value of the wrong type, keeps its default.
     pub fn from_effective(values: &[wire::EffectiveSettingValue]) -> Self {
         let mut settings = Self::default();
         for item in values {
             settings.set(&item.key, &item.value);
+            if let Some(definition) = definition(&item.key) {
+                let origin = Origin {
+                    source: item.source.clone(),
+                    constrained: item.constrained == Some(true),
+                    stored_value: item.stored_value.clone(),
+                    permitted_values: item.permitted_values.clone(),
+                };
+                settings.origins.insert(definition.key, origin);
+            }
         }
         settings
     }

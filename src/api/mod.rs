@@ -439,7 +439,9 @@ impl Client {
     }
 
     /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
-    /// when the write succeeds. A null value is "No preference".
+    /// when the write succeeds. A null value is "No preference". When the Effective value came from the device
+    /// row of this device, the device row would still win, so the write also deletes it, as the web does. When
+    /// that delete fails, the save fails, and the client reads the settings again to get the value that applies.
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
         // The server docs say that a client must not write without the capabilities. A page from before the
         // capability read can still show the row of a key that the server does not know.
@@ -449,19 +451,40 @@ impl Client {
         {
             return Err(Error::NoSettingsCapabilities);
         }
+        let device_row = settings.origins.get(key).is_some_and(|origin| origin.is_device());
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let path = format!("settings/values/{key}?scope=profile");
         let body = serde_json::json!({ "value": value });
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
-        let written = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await;
-        if self.auth.lock().unwrap().profile_id == profile_id {
-            if written.is_ok() {
-                self.server_settings.lock().unwrap().set(key, &value);
+        let mut saved = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await.map(|_| ());
+        let mut delete_failed = false;
+        // The delete goes with the headers of the active Profile, so after a switch it would remove the device
+        // row of the new Profile.
+        if saved.is_ok() && device_row && self.auth.lock().unwrap().profile_id == profile_id {
+            // The profile value is written first, so a failed delete does not lose the choice.
+            let path = format!("settings/values/{key}?scope=profile_device");
+            // A 404 is a row that is already gone, which is the state that the delete asks for.
+            saved = match self.call::<()>(Method::DELETE, &path, None).await {
+                Err(err) if err.status() == Some(404) => Ok(()),
+                deleted => deleted,
+            };
+            delete_failed = saved.is_err();
+        }
+        let same_profile = self.auth.lock().unwrap().profile_id == profile_id;
+        if same_profile {
+            if saved.is_ok() {
+                self.server_settings.lock().unwrap().set_profile_value(key, &value);
             }
             // A write of the old Profile must not invalidate the read of the new Profile.
             self.settings_writes.fetch_add(1, Ordering::SeqCst);
         }
-        written.map(|_| ())
+        if same_profile && delete_failed {
+            // The profile row holds the new value, but the device row can still win.
+            if let Err(err) = self.load_server_settings().await {
+                eprintln!("relics: cannot read the Server settings again: {err}");
+            }
+        }
+        saved
     }
 
     pub async fn profiles(&self) -> Result<Vec<wire::Profile>, Error> {
@@ -516,14 +539,21 @@ impl Client {
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
         let (headers, used) = self.headers();
+        // A request on a background thread can meet a Profile switch, so the Profile comes from the same headers.
+        let profile_id = headers.iter().find(|(name, _)| *name == "X-Profile-Id").map(|(_, id)| id.clone());
+        // The user can switch to another Profile while a retry waits, and a retry must not act for the new Profile.
+        let same_profile = || self.auth.lock().unwrap().profile_id == profile_id;
         let mut result = send(&self.http, &self.server, method.clone(), path, &headers, body.clone()).await;
         if matches!(&result, Err(err) if is_unauthorized(err)) {
             self.refresh(&used).await?;
+            if !same_profile() {
+                return result;
+            }
             result = send(&self.http, &self.server, method.clone(), path, &self.headers().0, body.clone()).await;
         }
         let stale = headers.iter().find(|(name, _)| *name == "X-Profile-Token").map(|(_, token)| token.as_str());
         if matches!(&result, Err(Error::Problem(p)) if p.code() == "profile_verification_required")
-            && self.unlock(stale).await
+            && self.unlock(profile_id.as_deref(), stale).await
         {
             result = send(&self.http, &self.server, method, path, &self.headers().0, body).await;
         }
@@ -950,13 +980,17 @@ impl Client {
         }
     }
 
-    /// Asks the user for the PIN of the active Profile, unless another request already replaced the `stale`
-    /// PIN token. Returns false when the user cancels.
-    async fn unlock(&self, stale: Option<&str>) -> bool {
+    /// Asks the user for the PIN of `profile_id`, unless another request already replaced the `stale` PIN token.
+    /// Returns false when the user cancels, or when `profile_id` is no longer the active Profile.
+    async fn unlock(&self, profile_id: Option<&str>, stale: Option<&str>) -> bool {
         let _guard = self.unlocking.lock().await;
-        let (profile_id, token) = {
+        let token = {
             let auth = self.auth.lock().unwrap();
-            (auth.profile_id.clone(), auth.profile_token.clone())
+            // The user can switch to another Profile while this request waits for the PIN entry of another request.
+            if auth.profile_id.as_deref() != profile_id {
+                return false;
+            }
+            auth.profile_token.clone()
         };
         let Some(profile_id) = profile_id else {
             return false;
@@ -964,13 +998,13 @@ impl Client {
         if token.is_some() && token.as_deref() != stale {
             return true;
         }
-        let asked = (self.on_pin_required.lock().unwrap())(profile_id.clone());
+        let asked = (self.on_pin_required.lock().unwrap())(profile_id.to_string());
         let Some(token) = asked.await else {
             return false;
         };
         let mut auth = self.auth.lock().unwrap();
         // The user can switch to another Profile while the PIN entry is open.
-        if auth.profile_id.as_deref() != Some(profile_id.as_str()) {
+        if auth.profile_id.as_deref() != Some(profile_id) {
             return false;
         }
         auth.profile_token = Some(token);
