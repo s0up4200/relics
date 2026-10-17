@@ -552,6 +552,7 @@ impl Client {
         }
         let stale = headers.iter().find(|(name, _)| *name == "X-Profile-Token").map(|(_, token)| token.as_str());
         if matches!(&result, Err(Error::Problem(p)) if p.code() == "profile_verification_required")
+            && same_profile()
             && self.unlock(stale).await
             && same_profile()
         {
