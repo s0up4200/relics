@@ -65,6 +65,7 @@ fn decode(name: &str, body: Value) -> Option<Result<(), serde_json::Error>> {
         SectionLayout,
         ServerIdentity,
         SettingValue,
+        SettingsContractCapabilities,
         SystemInfo,
         TokenPair,
         WatchTrickplay,

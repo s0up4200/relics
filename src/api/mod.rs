@@ -54,6 +54,9 @@ pub enum Error {
     Decode(String),
     /// The server refused the refresh token. The user must sign in again.
     SignedOut,
+    /// Relics cannot read the settings contract capabilities, they do not allow the settings, or the server does
+    /// not know the key, so Relics must not write the Server setting.
+    NoSettingsCapabilities,
 }
 
 impl std::fmt::Display for Error {
@@ -68,6 +71,7 @@ impl std::fmt::Display for Error {
             Error::Status(status) => write!(f, "The server answered with HTTP {status}"),
             Error::Decode(err) => write!(f, "The server sent a reply that Relics cannot read: {err}"),
             Error::SignedOut => f.write_str("Your sign-in has expired. Sign in again."),
+            Error::NoSettingsCapabilities => f.write_str("Relics cannot reach the settings of the Server"),
         }
     }
 }
@@ -230,6 +234,8 @@ pub struct Client {
     /// Counts the starts and ends of the writes of Server settings, so that a read from before a write does not
     /// replace the written value.
     settings_writes: AtomicU64,
+    /// Counts the reads of Server settings. Only the newest read keeps its result.
+    settings_loads: AtomicU64,
     /// The `client_features` of the last start request. A replan sends the same list.
     features: Mutex<Vec<&'static str>>,
     on_trouble: Mutex<Box<dyn Fn(Trouble) + Send + Sync>>,
@@ -285,6 +291,7 @@ impl Client {
             installation_id: Mutex::default(),
             server_settings: Mutex::default(),
             settings_writes: AtomicU64::new(0),
+            settings_loads: AtomicU64::new(0),
             features: Mutex::default(),
             on_trouble: Mutex::new(Box::new(|_| {})),
             sessions: Mutex::default(),
@@ -369,27 +376,79 @@ impl Client {
         self.server_settings.lock().unwrap().clone()
     }
 
-    /// Reads the Server settings of the active Profile from the server and keeps them in memory.
+    /// Reads the Server settings of the active Profile from the server and keeps them in memory. Each read reads
+    /// the settings contract capabilities first, and then asks only for the keys that the server knows. When the
+    /// capability read fails, or the capabilities do not allow the settings, the store keeps its values, and each
+    /// write fails until a later read gets usable capabilities.
     pub async fn load_server_settings(&self) -> Result<(), Error> {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let writes = self.settings_writes.load(Ordering::SeqCst);
+        let load = self.settings_loads.fetch_add(1, Ordering::SeqCst) + 1;
+        // The user can switch to another Profile while a request runs, and a newer read can start.
+        let current =
+            || self.auth.lock().unwrap().profile_id == profile_id && self.settings_loads.load(Ordering::SeqCst) == load;
+        let known = ServerSettings { manifest_revision: self.settings_revision().await, ..ServerSettings::default() };
+        // The writes use the new revision at once, also when the effective read fails.
+        if current() {
+            self.server_settings.lock().unwrap().manifest_revision = known.manifest_revision;
+        }
+        if known.manifest_revision.is_none() {
+            return Ok(());
+        }
         let query = settings::DEFINITIONS
             .iter()
+            .filter(|definition| known.knows(definition))
             .map(|definition| format!("keys={}", definition.key))
             .collect::<Vec<_>>()
             .join("&");
         let values: wire::EffectiveSettingCollection =
             self.call(Method::GET, &format!("settings/values/effective?{query}"), None).await?;
-        // The user can switch to another Profile, or write a setting, while the request runs.
-        if self.auth.lock().unwrap().profile_id == profile_id && self.settings_writes.load(Ordering::SeqCst) == writes {
-            *self.server_settings.lock().unwrap() = ServerSettings::from_effective(&values.items);
+        // A write while the request runs also makes the result old.
+        if current() && self.settings_writes.load(Ordering::SeqCst) == writes {
+            *self.server_settings.lock().unwrap() = ServerSettings {
+                manifest_revision: known.manifest_revision,
+                ..ServerSettings::from_effective(&values.items)
+            };
         }
         Ok(())
+    }
+
+    /// Reads the settings contract capabilities, and gives the revision whose keys the app can read and write.
+    /// `None` when the read fails, or when the server does not allow the settings to this Profile.
+    async fn settings_revision(&self) -> Option<u32> {
+        let path = "settings/contract/capabilities";
+        let capabilities = match self.call::<wire::SettingsContractCapabilities>(Method::GET, path, None).await {
+            Ok(capabilities) => capabilities,
+            Err(err) => {
+                eprintln!("relics: cannot read the settings contract capabilities: {err}");
+                return None;
+            }
+        };
+        // Another `api_version` can give the keys another meaning. The server can add a new state, and an unknown
+        // state is not available.
+        if capabilities.api_version != 1 || capabilities.state != "available" || !capabilities.allowed {
+            eprintln!(
+                "relics: the Server settings are not available: api_version {}, state {}, allowed {}",
+                capabilities.api_version, capabilities.state, capabilities.allowed
+            );
+            return None;
+        }
+        let revision = u32::try_from(capabilities.manifest_revision.max(0)).unwrap_or(u32::MAX);
+        // Like the web client, a server without batched effective reads gets only the keys of revision 1.
+        Some(if capabilities.supports_batched_effective { revision } else { revision.min(1) })
     }
 
     /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
     /// when the write succeeds. A null value is "No preference".
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
+        // The server docs say that a client must not write without the capabilities. A page from before the
+        // capability read can still show the row of a key that the server does not know.
+        let settings = self.server_settings.lock().unwrap().clone();
+        if settings.manifest_revision.is_none()
+            || !settings::definition(key).is_some_and(|definition| settings.knows(definition))
+        {
+            return Err(Error::NoSettingsCapabilities);
+        }
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let path = format!("settings/values/{key}?scope=profile");
         let body = serde_json::json!({ "value": value });
