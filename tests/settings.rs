@@ -253,14 +253,29 @@ fn without_batched_reads_the_keys_after_revision_1_are_unknown() {
 }
 
 #[test]
-fn a_later_read_of_the_same_profile_does_not_read_the_capabilities_again() {
-    let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
+fn each_read_reads_the_capabilities_again() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // The server goes back from revision 17 to revision 6, and then its capability read fails.
+    let revision = std::sync::Arc::new(AtomicU32::new(17));
+    let server = revision.clone();
+    let (client, seen) = common::fake(move |request| match server.load(Ordering::SeqCst) {
+        0 if request.path == CAPABILITIES => json(500, String::new()),
+        revision if request.path == CAPABILITIES => json(200, capabilities(revision)),
+        _ if request.method == "PUT" => common::ok("update_setting_value_ok.json"),
+        _ => json(200, json!({ "revision": 17, "items": [] }).to_string()),
+    });
     block_on(client.load_server_settings()).unwrap();
+    assert_eq!(client.server_settings().manifest_revision, Some(17));
+    revision.store(6, Ordering::SeqCst);
     block_on(client.load_server_settings()).unwrap();
-    client.set_profile(Some("p-kid".into()));
+    assert_eq!(client.server_settings().manifest_revision, Some(6));
+    assert!(!asked_keys(seen.lock().unwrap().last().unwrap()).iter().any(|key| key == "playback.intro_skip_mode"));
+    revision.store(0, Ordering::SeqCst);
     block_on(client.load_server_settings()).unwrap();
+    assert!(block_on(client.set_server_setting("playback.auto_play_next", json!(false))).is_err());
     let capability_reads = seen.lock().unwrap().iter().filter(|request| request.path == CAPABILITIES).count();
-    assert_eq!(capability_reads, 2);
+    assert_eq!(capability_reads, 3);
+    assert!(!seen.lock().unwrap().iter().any(|request| request.method == "PUT"));
 }
 
 #[test]

@@ -373,19 +373,19 @@ impl Client {
         self.server_settings.lock().unwrap().clone()
     }
 
-    /// Reads the Server settings of the active Profile from the server and keeps them in memory. The first read of
-    /// a Profile reads the settings contract capabilities first, and then asks only for the keys that the server
-    /// knows. When the capability read fails, or the capabilities do not allow the settings, the store keeps its
-    /// values, and each write fails until a later read gets usable capabilities.
+    /// Reads the Server settings of the active Profile from the server and keeps them in memory. Each read reads
+    /// the settings contract capabilities first, and then asks only for the keys that the server knows. When the
+    /// capability read fails, or the capabilities do not allow the settings, the store keeps its values, and each
+    /// write fails until a later read gets usable capabilities.
     pub async fn load_server_settings(&self) -> Result<(), Error> {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let writes = self.settings_writes.load(Ordering::SeqCst);
-        let mut known = self.server_settings.lock().unwrap().clone();
+        let known = ServerSettings { manifest_revision: self.settings_revision().await, ..ServerSettings::default() };
         if known.manifest_revision.is_none() {
-            known.manifest_revision = self.settings_revision().await;
-            if known.manifest_revision.is_none() {
-                return Ok(());
+            if self.auth.lock().unwrap().profile_id == profile_id {
+                self.server_settings.lock().unwrap().manifest_revision = None;
             }
+            return Ok(());
         }
         let query = settings::DEFINITIONS
             .iter()

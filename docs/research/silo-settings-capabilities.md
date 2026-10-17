@@ -119,3 +119,4 @@ The user chose these points on 2026-10-17. Where they do not agree with items 3,
 - `supports_batched_effective` is false: Relics does the same as the web. It reads only the keys of revision 1, in one batch, and hides the other rows. It does not read one key for each request.
 - `state` is not `available`, or `allowed` is false: Relics does the same as for a failed capability read, with the same message.
 - Choices with an `introduced_in` above `manifest_revision`: not part of #131.
+- Relics reads the capabilities before each effective read. This happens when a Profile opens, when the Settings page opens or loads again, and after the Server comes back. If a later capability read fails, Relics refuses each write again.
