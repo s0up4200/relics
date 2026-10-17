@@ -439,7 +439,9 @@ impl Client {
     }
 
     /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
-    /// when the write succeeds. A null value is "No preference".
+    /// when the write succeeds. A null value is "No preference". When the Effective value came from the device
+    /// row of this device, the device row would still win, so the write also deletes it, as the web does. When
+    /// that delete fails, the save fails, and the client reads the settings again to get the value that applies.
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
         // The server docs say that a client must not write without the capabilities. A page from before the
         // capability read can still show the row of a key that the server does not know.
@@ -449,19 +451,38 @@ impl Client {
         {
             return Err(Error::NoSettingsCapabilities);
         }
+        let device_row = settings.origins.get(key).is_some_and(|origin| origin.is_device());
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let path = format!("settings/values/{key}?scope=profile");
         let body = serde_json::json!({ "value": value });
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
-        let written = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await;
-        if self.auth.lock().unwrap().profile_id == profile_id {
-            if written.is_ok() {
-                self.server_settings.lock().unwrap().set(key, &value);
+        let mut saved = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await.map(|_| ());
+        let mut delete_failed = false;
+        if saved.is_ok() && device_row {
+            // The profile value is written first, so a failed delete does not lose the choice.
+            let path = format!("settings/values/{key}?scope=profile_device");
+            // A 404 is a row that is already gone, which is the state that the delete asks for.
+            saved = match self.call::<()>(Method::DELETE, &path, None).await {
+                Err(err) if err.status() == Some(404) => Ok(()),
+                deleted => deleted,
+            };
+            delete_failed = saved.is_err();
+        }
+        let same_profile = self.auth.lock().unwrap().profile_id == profile_id;
+        if same_profile {
+            if saved.is_ok() {
+                self.server_settings.lock().unwrap().set_profile_value(key, &value);
             }
             // A write of the old Profile must not invalidate the read of the new Profile.
             self.settings_writes.fetch_add(1, Ordering::SeqCst);
         }
-        written.map(|_| ())
+        if same_profile && delete_failed {
+            // The profile row holds the new value, but the device row can still win.
+            if let Err(err) = self.load_server_settings().await {
+                eprintln!("relics: cannot read the Server settings again: {err}");
+            }
+        }
+        saved
     }
 
     pub async fn profiles(&self) -> Result<Vec<wire::Profile>, Error> {

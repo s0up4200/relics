@@ -41,6 +41,7 @@ syncProgress
 getSettingsContractCapabilities
 listEffectiveSettings
 updateSettingValue
+deleteSettingValue
 listSeriesSeasons
 listSeasonEpisodes
 addToWatchlist

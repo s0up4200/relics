@@ -130,8 +130,15 @@ An end of file that mpv reports before the Item's runtime is reached, usually be
 _Avoid_: premature EOF, false EOF
 
 **Server setting**:
-A preference that Silo stores for a Profile. Every client that uses the Profile shares it.
+A preference that Silo stores for a Profile. Every client that uses the Profile shares it, unless an Override replaces it.
 _Avoid_: preference, user setting
+
+**Override**:
+A value of a Server setting for one series, one Library or one device of the Profile. A series value replaces a Library value. A Library value replaces a device value. A device value replaces the Profile value.
+_Avoid_: exception, per-library setting
+
+**Effective value**:
+The value of a Server setting that applies for one Profile, device, Library and series. The Server gives it after it applies the Overrides and the household cap.
 
 **Local setting**:
 A preference that only this app on this computer has, such as hardware decoding.
