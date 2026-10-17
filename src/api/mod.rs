@@ -539,7 +539,8 @@ impl Client {
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
         let (headers, used) = self.headers();
-        let profile_id = self.auth.lock().unwrap().profile_id.clone();
+        // A request on a background thread can meet a Profile switch, so the Profile comes from the same headers.
+        let profile_id = headers.iter().find(|(name, _)| *name == "X-Profile-Id").map(|(_, id)| id.clone());
         // The user can switch to another Profile while a retry waits, and a retry must not act for the new Profile.
         let same_profile = || self.auth.lock().unwrap().profile_id == profile_id;
         let mut result = send(&self.http, &self.server, method.clone(), path, &headers, body.clone()).await;
