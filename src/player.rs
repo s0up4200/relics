@@ -21,6 +21,7 @@ use crate::mpris::{self, Track};
 use crate::playback::playing::{Next, PlayItem, Playing, next_label};
 use crate::playback::tracks;
 use crate::playback::{Command, Input, Session};
+use crate::settings::SubtitleAppearance;
 
 /// Starts a server shuffle of the scope `kind` and `id` (a Library, a collection of a Library, a series or a
 /// season) and emits `Play` with its first pick. A failure gives the text for the user to `failed`.
@@ -96,6 +97,8 @@ pub trait Handle {
     fn sub_delay(&self) -> anyhow::Result<f64>;
     fn add_sub_delay(&self, delta: f64) -> anyhow::Result<()>;
     fn set_sub_delay(&self, seconds: f64) -> anyhow::Result<()>;
+    /// Draws the plain-text subtitles with `appearance`. Styled (ASS) subtitles keep their own styles.
+    fn set_subtitle_appearance(&self, appearance: &SubtitleAppearance) -> anyhow::Result<()>;
 }
 
 /// The text of a playback error, for the Library window.
@@ -468,20 +471,29 @@ impl Controller {
             return;
         };
         match command {
-            Command::Load { url, headers, start, aid } => match self.open(cx) {
-                Ok(handle) => {
-                    if let Err(err) = handle.load(&url, &headers, start, aid) {
-                        eprintln!("relics: mpv cannot play {url}: {err}");
-                        self.step(Input::LoadFailed, cx);
+            Command::Load { url, headers, start, aid } => {
+                // Each load applies the Subtitle appearance that the Playback session started with.
+                let appearance = self.playing.session().map(|session| session.subtitle_appearance().clone());
+                match self.open(cx) {
+                    Ok(handle) => {
+                        if let Some(appearance) = appearance
+                            && let Err(err) = handle.set_subtitle_appearance(&appearance)
+                        {
+                            eprintln!("relics: cannot set the subtitle appearance: {err}");
+                        }
+                        if let Err(err) = handle.load(&url, &headers, start, aid) {
+                            eprintln!("relics: mpv cannot play {url}: {err}");
+                            self.step(Input::LoadFailed, cx);
+                        }
+                    }
+                    // The session ends with the stop report, and the Library window shows the error on the page.
+                    Err(err) => {
+                        cx.emit(PlaybackError(format!("The player cannot start: {err}")));
+                        self.step(Input::End, cx);
+                        self.close(cx);
                     }
                 }
-                // The session ends with the stop report, and the Library window shows the error on the page.
-                Err(err) => {
-                    cx.emit(PlaybackError(format!("The player cannot start: {err}")));
-                    self.step(Input::End, cx);
-                    self.close(cx);
-                }
-            },
+            }
             Command::Refresh => self.answer(cx, async move {
                 let access = client.refresh_access().await;
                 Input::Refreshed(access.inspect_err(|err| eprintln!("relics: token refresh failed: {err}")).ok())

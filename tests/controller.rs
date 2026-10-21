@@ -20,6 +20,7 @@ use relics::playback::Input;
 use relics::playback::playing::PlayItem;
 use relics::playback::tracks::{self, Kind};
 use relics::player::{Controller, Handle, Media, PlaybackError, Stopped, ViewClosed};
+use relics::settings::SubtitleAppearance;
 use serde_json::{Value, json};
 
 /// One operation that the controller asked of the fake media.
@@ -48,6 +49,8 @@ struct FakeState {
     fail_open: Option<String>,
     fail_load: bool,
     sub_delay: f64,
+    /// Each Subtitle appearance that the controller applied, with the number of loads before it.
+    appearances: Vec<(usize, SubtitleAppearance)>,
 }
 
 /// The fake media. It records each operation, sends the events that the test gives it, and fails when the test
@@ -170,6 +173,12 @@ impl Handle for FakeHandle {
         (self.0).0.borrow_mut().sub_delay = seconds;
         self.record(Op::SetSubDelay(seconds))
     }
+
+    fn set_subtitle_appearance(&self, appearance: &SubtitleAppearance) -> anyhow::Result<()> {
+        let loads = self.0.loads().len();
+        (self.0).0.borrow_mut().appearances.push((loads, appearance.clone()));
+        Ok(())
+    }
 }
 
 /// The fake Silo server. A request whose path starts with a prefix in `fail` gets no answer (a network failure).
@@ -186,6 +195,8 @@ struct Server {
     advances: Arc<Mutex<usize>>,
     /// The body of each Item detail. `None` gives the server fixture, which has no `effective_subtitle_*` fields.
     detail: Arc<Mutex<Option<Value>>>,
+    /// The stored Subtitle appearance that the effective read gives.
+    appearance: Arc<Mutex<Value>>,
 }
 
 impl Server {
@@ -251,6 +262,14 @@ impl Server {
                 None => ok("get_catalog_item_ok.json"),
             },
             ("GET", "playback/capabilities") => ok("playback_capability_available.json"),
+            ("GET", "settings/contract/capabilities") => ok("get_settings_contract_capabilities_ok.json"),
+            ("GET", "settings/values/effective") => {
+                let item = json!({
+                    "key": "playback.subtitle_appearance", "source": "profile_device", "definition_revision": 1,
+                    "value": self.appearance.lock().unwrap().clone(),
+                });
+                json(200, json!({ "revision": 17, "items": [item] }).to_string())
+            }
             ("POST", "playback/start") => {
                 let mut starts = self.starts.lock().unwrap();
                 *starts += 1;
@@ -877,4 +896,26 @@ fn an_episode_with_no_known_season_reads_its_detail_once_and_still_finds_the_nex
     rig.play(PlayItem::from(&serde_json::from_value::<wire::CatalogItem>(card).unwrap()), cx);
     assert_eq!(rig.read(cx, |p| p.next_title().map(String::from)), Some("S1:E2 · Good News About Hell".into()));
     assert_eq!(rig.server.count("GET", "catalog/items/episode:severance-s01e01?"), 1);
+}
+
+#[gpui::test]
+fn the_subtitle_appearance_applies_when_the_player_opens_and_a_change_applies_from_the_next_item(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx);
+    let set = |appearance: Value| {
+        *rig.server.appearance.lock().unwrap() = appearance;
+        futures::executor::block_on(rig.client.load_server_settings()).unwrap();
+    };
+    set(json!({ "fontSize": "small" }));
+    rig.play(episode(1), cx);
+    set(json!({ "position": "top" }));
+    rig.loaded(3420.0, 105.0, cx);
+    let client = rig.client.clone();
+    rig.player.update(cx, |player, cx| player.play(client, episode(2), cx));
+    cx.run_until_parked();
+    let small = SubtitleAppearance { font_size: "small".into(), ..SubtitleAppearance::default() };
+    let top = SubtitleAppearance { position: "top".into(), ..SubtitleAppearance::default() };
+    assert_eq!(rig.fake.0.borrow().appearances, [(0, small), (1, top)]);
+    assert_eq!(rig.fake.count(|op| *op == Op::Open), 1);
 }
