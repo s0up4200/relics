@@ -934,8 +934,8 @@ fn a_subtitle_appearance_save_writes_the_whole_value_for_this_device_and_deletes
     block_on(client.load_server_settings()).unwrap();
     seen.lock().unwrap().clear();
     let mut store = client.server_settings();
-    let value = store.set_row(appearance_row("position"), json!("top"));
-    block_on(client.set_server_setting(settings::APPEARANCE, value)).unwrap();
+    store.set_row(appearance_row("position"), json!("top"));
+    block_on(client.set_server_setting(settings::APPEARANCE, store.value(settings::APPEARANCE))).unwrap();
     assert_eq!(
         requests(&seen),
         [("PUT".into(), format!("settings/values/{}?scope=profile_device", settings::APPEARANCE))]
@@ -985,4 +985,78 @@ fn the_subtitle_appearance_choices_keep_a_stored_value_outside_the_list() {
     assert!(!appearance_row("textOpacity").allows(&json!(0)));
     assert!(appearance_row("fontColor").allows(&json!("#AbCdEf")));
     assert!(!appearance_row("fontColor").allows(&json!("red")));
+}
+
+#[gpui::test]
+fn a_slow_subtitle_appearance_save_does_not_undo_a_newer_change(cx: &mut gpui::TestAppContext) {
+    use std::sync::{Arc, Mutex};
+
+    use futures::channel::oneshot;
+    use gpui::AppContext as _;
+    use http_client::FakeHttpClient;
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+        common::isolate(cx)
+    });
+    // The server holds the first save until the test lets it go. Like a real server, it ends a save that it got
+    // also when the client stops waiting. It keeps each saved value in the order that the saves end, so the last
+    // one is the value that the server has.
+    let (release, held) = oneshot::channel::<()>();
+    let held = Mutex::new(Some(held));
+    let saved = Arc::new(Mutex::new(Vec::new()));
+    let server = Arc::new(Mutex::new(None));
+    let http = FakeHttpClient::create({
+        let (saved, server) = (saved.clone(), server.clone());
+        move |req| {
+            let (saved, server) = (saved.clone(), server.clone());
+            let method = req.method().to_string();
+            let path = req.uri().path().to_string();
+            let held = if method == "PUT" { held.lock().unwrap().take() } else { None };
+            Box::pin(async move {
+                use futures::AsyncReadExt as _;
+                let mut body = String::new();
+                req.into_body().read_to_string(&mut body).await.unwrap();
+                let reply = if method == "PUT" {
+                    let value = serde_json::from_str::<serde_json::Value>(&body).unwrap()["value"].clone();
+                    match held {
+                        Some(held) => {
+                            let (done, ended) = oneshot::channel();
+                            *server.lock().unwrap() = Some(Box::pin(async move {
+                                held.await.ok();
+                                saved.lock().unwrap().push(value);
+                                done.send(()).ok();
+                            }) as futures::future::BoxFuture<'static, ()>);
+                            ended.await.ok();
+                        }
+                        None => saved.lock().unwrap().push(value),
+                    }
+                    common::fixture("update_setting_value_ok.json")
+                } else if path.ends_with("contract/capabilities") {
+                    capabilities(17)
+                } else {
+                    json!({ "revision": 17, "items": [] }).to_string()
+                };
+                Ok(common::json(200, reply).unwrap())
+            }) as futures::future::BoxFuture<'static, _>
+        }
+    });
+    let client = Arc::new(common::client(http, "https://silo.test/"));
+    client.set_profile(Some("p-owner".into()));
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        PageWindow(cx.new(|cx| relics::pages::Pages::new(client, "Test".into(), window, cx)))
+    });
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    // Font size is the ninth row. Its save waits at the server while the position changes.
+    cx.simulate_keystrokes("j j j j j j j j l");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j j j j j j j l");
+    cx.run_until_parked();
+    release.send(()).unwrap();
+    futures::executor::block_on(server.lock().unwrap().take().unwrap());
+    cx.run_until_parked();
+    let saved = saved.lock().unwrap();
+    let last = saved.last().unwrap();
+    assert_eq!((&last["fontSize"], &last["position"]), (&json!("xlarge"), &json!("lower-third")), "{saved:?}");
 }

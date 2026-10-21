@@ -439,17 +439,14 @@ impl ServerSettings {
         definition.field.map_or(value.clone(), |field| value[field].clone())
     }
 
-    /// Sets the row of `definition` to `row`, and gives the value of its key to write. For the Subtitle appearance
-    /// that is the whole object.
-    pub fn set_row(&mut self, definition: &Definition, row: Value) -> Value {
+    /// Sets the row of `definition` to `row`. A row of the Subtitle appearance sets one field of the object.
+    pub fn set_row(&mut self, definition: &Definition, row: Value) {
         let Some(field) = definition.field else {
-            self.set(definition.key, &row);
-            return row;
+            return self.set(definition.key, &row);
         };
         let mut value = self.value(definition.key);
         value[field] = row;
         self.set(definition.key, &value);
-        self.value(definition.key)
     }
 
     /// Takes the value and the origin of one key from `other`.

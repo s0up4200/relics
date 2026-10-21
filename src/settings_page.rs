@@ -3,7 +3,9 @@
 //! - The Server settings of the active Profile, in the groups of the web Settings pages. The page reads them
 //!   again each time it opens. Each change writes at the `profile` scope at once, and deletes the device row of
 //!   this device when the value came from it. A failed write puts back the value that applies and shows one
-//!   line of error text. The app keeps no queue of failed writes. A row whose value comes from the device row
+//!   line of error text. The app keeps no queue of failed writes. Each key has one write at a time, so that an
+//!   older write cannot end after a newer one on the server. A change during a write waits, and the next write
+//!   sends the value that the page shows then. A row whose value comes from the device row
 //!   of this device says "Set for this device". A row of a key that the server does not know does not show.
 //!   When Relics cannot read the settings contract capabilities, or they do not allow the settings, each change
 //!   fails.
@@ -133,8 +135,10 @@ pub struct SettingsPage {
     /// The page has the keyboard focus.
     pub active: bool,
     fresh: Loader,
-    /// The write that runs for each key. A new change of the key drops the old write.
+    /// The write that runs for each key.
     writes: HashMap<&'static str, Task<()>>,
+    /// The keys that changed while their write ran, with the definition of the last changed row.
+    waiting: HashMap<&'static str, &'static Definition>,
 }
 
 impl EventEmitter<AccountAction> for SettingsPage {}
@@ -178,6 +182,7 @@ impl SettingsPage {
             active: true,
             fresh: Loader::default(),
             writes: HashMap::new(),
+            waiting: HashMap::new(),
         };
         page.load(cx);
         page
@@ -279,43 +284,59 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// Sets a Server setting and writes it.
+    /// Sets a Server setting and writes it. While a write of the key runs, the change waits for it.
     fn set(&mut self, definition: &'static Definition, new: Value, cx: &mut Context<Self>) {
         let Some(server) = &mut self.server else {
             return;
         };
-        let key = definition.key;
-        let new = server.set_row(definition, new);
+        server.set_row(definition, new);
         self.message = None;
+        if self.writes.contains_key(definition.key) {
+            self.waiting.insert(definition.key, definition);
+        } else {
+            self.write(definition, cx);
+        }
+        cx.notify();
+    }
+
+    /// Writes the value of the key of `definition` that the page shows.
+    fn write(&mut self, definition: &'static Definition, cx: &mut Context<Self>) {
+        let Some(server) = &self.server else {
+            return;
+        };
+        let key = definition.key;
+        let value = server.value(key);
         let client = self.client.clone();
         let write = cx.spawn(async move |this, cx| {
-            let result = client.set_server_setting(key, new).await;
+            let result = client.set_server_setting(key, value).await;
             this.update(cx, |this, cx| {
                 // The task ends here, so it must not drop itself.
                 if let Some(write) = this.writes.remove(key) {
                     write.detach();
                 }
+                // A newer change waits. Its write gives the value and the error text. It starts before this
+                // write counts as ended, so that no reload runs between the two.
+                if let Some(next) = this.waiting.remove(key) {
+                    this.write(next, cx);
+                } else {
+                    // The store has the value that the write left: the new value, the old value after a failed
+                    // write, or the value of the read after a failed delete of the device row.
+                    if let Some(server) = &mut this.server {
+                        server.copy_key(key, &this.client.server_settings());
+                    }
+                    if let Err(err) = result {
+                        this.message = Some((format!("Could not save {}: {err}", definition.label), true));
+                    }
+                }
                 if this.fresh.written() {
                     this.load(cx);
-                }
-                // The store has the value that the write left: the new value, the old value after a failed
-                // write, or the value of the read after a failed delete of the device row.
-                if let Some(server) = &mut this.server {
-                    server.copy_key(key, &this.client.server_settings());
-                }
-                if let Err(err) = result {
-                    this.message = Some((format!("Could not save {}: {err}", definition.label), true));
                 }
                 cx.notify();
             })
             .ok();
         });
         self.fresh.write();
-        if self.writes.insert(key, write).is_some() {
-            // The old write of the key is dropped. The new one still holds the reloads.
-            self.fresh.written();
-        }
-        cx.notify();
+        self.writes.insert(key, write);
     }
 
     /// Saves the Local settings. Returns false when the save failed, and shows why.
