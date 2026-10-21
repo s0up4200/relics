@@ -64,6 +64,22 @@
       "response_media_type": "application/json",
       "schema": "#/components/schemas/PlaybackDecision",
       "body_file": "playback_replan_failure_recovery.json"
+    },
+    {
+      "name": "get_catalog_item_effective_subtitles",
+      "operation_id": "getCatalogItem",
+      "scenario": "A movie in a Library with an Override of the subtitle settings: Japanese subtitles, always on, no forced subtitles.",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/catalog/items/movie:heat-1995"
+      },
+      "expected_status": 200,
+      "response_headers": {
+        "Content-Type": "application/json"
+      },
+      "response_media_type": "application/json",
+      "schema": "#/components/schemas/CatalogItemDetail",
+      "body_file": "get_catalog_item_effective_subtitles.json"
     }
   ]
 }
