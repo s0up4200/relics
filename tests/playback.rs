@@ -36,7 +36,7 @@ fn access() -> Access {
 /// A session whose file is loaded at time 0. `runtime` is the Item runtime in seconds.
 fn playing(runtime: Option<f64>) -> Session {
     let mut session = Session::new(runtime, ServerSettings::default());
-    session.step(Input::Started { decision: decision(|_| {}), access: access() }, at(0));
+    session.step(Input::Started { decision: decision(|_| {}), access: access(), item: None }, at(0));
     session.step(Input::FileLoaded, at(0));
     session
 }
@@ -48,7 +48,7 @@ fn stop(position: f64, sequence: u64) -> Command {
 #[test]
 fn a_playable_decision_loads_the_stream_with_the_headers_at_the_plan_start() {
     let mut session = Session::new(None, ServerSettings::default());
-    let commands = session.step(Input::Started { decision: decision(|_| {}), access: access() }, at(0));
+    let commands = session.step(Input::Started { decision: decision(|_| {}), access: access(), item: None }, at(0));
     assert_eq!(
         commands,
         vec![Command::Load { url: format!("/api/v2/stream/{SESSION}"), headers: headers(), start: 12.5, aid: Some(1) }]
@@ -59,7 +59,7 @@ fn a_playable_decision_loads_the_stream_with_the_headers_at_the_plan_start() {
 fn direct_play_plays_the_audio_track_that_the_server_picked() {
     let mut session = Session::new(None, ServerSettings::default());
     let decision = decision(|body| body["playback_plan"]["selected_tracks"]["audio"]["index"] = 2.into());
-    let commands = session.step(Input::Started { decision, access: access() }, at(0));
+    let commands = session.step(Input::Started { decision, access: access(), item: None }, at(0));
     // mpv counts the audio tracks from 1, the server from 0.
     assert!(matches!(&commands[..], [Command::Load { aid: Some(3), .. }]), "{commands:?}");
 }
@@ -91,7 +91,7 @@ fn progress_goes_to_the_server_every_ten_seconds() {
 #[test]
 fn no_progress_goes_before_the_file_is_loaded() {
     let mut session = Session::new(None, ServerSettings::default());
-    session.step(Input::Started { decision: decision(|_| {}), access: access() }, at(0));
+    session.step(Input::Started { decision: decision(|_| {}), access: access(), item: None }, at(0));
     // A position from the file that this Item replaced.
     session.step(Input::Position(900.0), at(1));
     assert_eq!(session.step(Input::Tick, at(30)), vec![]);
@@ -101,7 +101,7 @@ fn no_progress_goes_before_the_file_is_loaded() {
 fn the_position_in_a_report_is_the_source_position() {
     let mut session = Session::new(None, ServerSettings::default());
     let decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 600.into());
-    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
     session.step(Input::FileLoaded, at(0));
     session.step(Input::Position(30.0), at(1));
     assert_eq!(session.step(Input::Shutdown, at(2)), vec![stop(630.0, 1), Command::ClosePlayer]);
@@ -168,12 +168,12 @@ fn an_unplayable_item_shows_the_server_message() {
     let decision =
         Decision::Unavailable { reason: "transcoding_disabled".into(), message: "Transcoding is off".into() };
     assert_eq!(
-        session.step(Input::Started { decision, access: access() }, at(0)),
+        session.step(Input::Started { decision, access: access(), item: None }, at(0)),
         vec![Command::ShowError("Transcoding is off".into()), Command::ClosePlayer]
     );
     let mut session = Session::new(None, ServerSettings::default());
-    let commands =
-        session.step(Input::Started { decision: Decision::Unknown("queued".into()), access: access() }, at(0));
+    let commands = session
+        .step(Input::Started { decision: Decision::Unknown("queued".into()), access: access(), item: None }, at(0));
     assert!(matches!(&commands[..], [Command::ShowError(text), Command::ClosePlayer] if text.contains("queued")));
 }
 
@@ -188,7 +188,7 @@ fn load_with_delivery(settings: ServerSettings, audio_language: &str, delivery: 
     let mut decision = decision(|body| body["playback_plan"]["delivery"] = delivery.into());
     let Decision::Playable { audio_language: language, .. } = &mut decision else { unreachable!() };
     *language = Some(audio_language.into());
-    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
     let commands = session.step(Input::FileLoaded, at(0)).into_iter();
     commands.filter(|c| matches!(c, Command::AddSubtitle { .. } | Command::SelectSubtitle(_))).collect()
 }
@@ -255,7 +255,7 @@ fn with_markers(settings: ServerSettings, markers: Vec<Marker>) -> Session {
     let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
     let Decision::Playable { markers: m, .. } = &mut decision else { unreachable!() };
     *m = markers;
-    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
     session.step(Input::FileLoaded, at(0));
     session.step(Input::Duration(1000.0), at(0));
     session
@@ -272,7 +272,7 @@ fn the_player_view_gets_the_markers_in_player_time() {
     let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
     let Decision::Playable { markers, .. } = &mut decision else { unreachable!() };
     *markers = vec![marker(MarkerKind::Intro, 110.0, 150.0), marker(MarkerKind::Credits, 1000.0, 1100.0)];
-    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
     session.step(Input::FileLoaded, at(0));
     assert_eq!(session.markers(), [marker(MarkerKind::Intro, 10.0, 50.0), marker(MarkerKind::Credits, 900.0, 1000.0)]);
 }
@@ -548,7 +548,7 @@ fn after_auto_plays(count: u32) -> Session {
     let mut decision = decision(|body| body["playback_plan"]["timeline"]["timeline_offset_seconds"] = 100.into());
     let Decision::Playable { markers, .. } = &mut decision else { unreachable!() };
     *markers = vec![marker(MarkerKind::Credits, 1040.0, 1100.0)];
-    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
     session.step(Input::FileLoaded, at(0));
     session.step(Input::Duration(1000.0), at(0));
     session.step(Input::NextEpisode, at(0));
@@ -644,7 +644,10 @@ const LOST: &str = "Lost connection to the server";
 fn a_token_with_less_than_four_hours_left_is_refreshed_before_the_load() {
     let mut session = Session::new(None, ServerSettings::default());
     let access = Access { headers: headers(), expires: Some(at(4 * HOUR - 1)) };
-    assert_eq!(session.step(Input::Started { decision: decision(|_| {}), access }, at(0)), vec![Command::Refresh]);
+    assert_eq!(
+        session.step(Input::Started { decision: decision(|_| {}), access, item: None }, at(0)),
+        vec![Command::Refresh]
+    );
     assert_eq!(
         session.step(Input::Refreshed(Some(refreshed(1))), at(1)),
         vec![load(&stream(), refreshed(1).headers, 12.5)]
@@ -655,7 +658,7 @@ fn a_token_with_less_than_four_hours_left_is_refreshed_before_the_load() {
 fn a_failed_refresh_before_the_load_loads_with_the_old_token() {
     let mut session = Session::new(None, ServerSettings::default());
     let access = Access { headers: headers(), expires: Some(at(HOUR)) };
-    session.step(Input::Started { decision: decision(|_| {}), access }, at(0));
+    session.step(Input::Started { decision: decision(|_| {}), access, item: None }, at(0));
     assert_eq!(session.step(Input::Refreshed(None), at(1)), vec![load(&stream(), headers(), 12.5)]);
 }
 
@@ -690,7 +693,7 @@ fn failed_at(position: f64) -> Session {
     let mut decision = decision(|_| {});
     let Decision::Playable { attempt_id, .. } = &mut decision else { unreachable!() };
     *attempt_id = "attempt-1".into();
-    session.step(Input::Started { decision, access: access() }, at(0));
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
     session.step(Input::FileLoaded, at(0));
     session.step(Input::Duration(7200.0), at(1));
     session.step(Input::Position(position), at(1));
@@ -955,7 +958,7 @@ fn next_episode(picks: &[(Kind, Option<i64>)]) -> (Session, Vec<Command>) {
     let mut decision = decision(|_| {});
     let Decision::Playable { audio_language, .. } = &mut decision else { unreachable!() };
     *audio_language = Some("ja".into());
-    next.step(Input::Started { decision, access: access() }, at(10));
+    next.step(Input::Started { decision, access: access(), item: None }, at(10));
     let commands = next.step(Input::FileLoaded, at(10)).into_iter();
     let subtitles = commands.filter(|c| matches!(c, Command::AddSubtitle { .. } | Command::SelectSubtitle(_)));
     (next, subtitles.collect())

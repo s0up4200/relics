@@ -184,6 +184,8 @@ struct Server {
     starts: Arc<Mutex<usize>>,
     /// The number of shuffle advances.
     advances: Arc<Mutex<usize>>,
+    /// The body of each Item detail. `None` gives the server fixture, which has no `effective_subtitle_*` fields.
+    detail: Arc<Mutex<Option<Value>>>,
 }
 
 impl Server {
@@ -197,6 +199,14 @@ impl Server {
 
     fn fail(&self, prefixes: &[&str]) {
         *self.fail.lock().unwrap() = prefixes.iter().map(|p| p.to_string()).collect();
+    }
+
+    /// Each Item detail is the fixture with the `effective_subtitle_*` fields, with `fields` over it.
+    fn detail(&self, fields: Value) {
+        let mut body: Value =
+            serde_json::from_str(&common::fixture("../own/get_catalog_item_effective_subtitles.json")).unwrap();
+        body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        *self.detail.lock().unwrap() = Some(body);
     }
 
     fn hold(&self, prefixes: &[&str]) {
@@ -236,6 +246,10 @@ impl Server {
         let path = req.path.split('?').next().unwrap();
         match (req.method.as_str(), path) {
             ("GET", p) if p.ends_with("/versions") => json(200, two_versions()),
+            ("GET", p) if p.starts_with("catalog/items/") => match self.detail.lock().unwrap().clone() {
+                Some(body) => json(200, body.to_string()),
+                None => ok("get_catalog_item_ok.json"),
+            },
             ("GET", "playback/capabilities") => ok("playback_capability_available.json"),
             ("POST", "playback/start") => {
                 let mut starts = self.starts.lock().unwrap();
@@ -750,4 +764,117 @@ fn the_player_view_controls_reach_the_media(cx: &mut TestAppContext) {
     assert_eq!(rig.read(cx, Controller::volume), Some((100.0, false)));
     rig.events([Input::Seeked(310.0)], cx);
     assert_eq!(rig.read(cx, Controller::position), Some(310.0), "the seek bar follows the seek");
+}
+
+/// The detail read of the movie, with no version list.
+const MOVIE_DETAIL: &str = "catalog/items/movie:heat-1995?";
+
+/// The subtitle operations of the fake media.
+fn subtitles(rig: &Rig) -> Vec<Op> {
+    rig.fake.ops().into_iter().filter(|op| matches!(op, Op::AddSubtitle(_) | Op::SelectSubtitle(_))).collect()
+}
+
+/// The subtitle choice of the Profile defaults for the movie: the forced English track, as the audio is English.
+const FALLBACK: Op = Op::SelectSubtitle(Some(1));
+
+#[gpui::test]
+fn the_subtitle_choice_uses_the_effective_values_of_the_item_that_mpris_also_gets(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.server.detail(json!({}));
+    rig.play(movie(), cx);
+    rig.loaded(7200.0, 300.0, cx);
+    assert_eq!(subtitles(&rig), [Op::SelectSubtitle(Some(2))], "the Japanese track of the file, always on");
+    assert_eq!(rig.server.count("GET", MOVIE_DETAIL), 1, "one detail read for the start and MPRIS");
+    assert_eq!(rig.read(cx, |p| p.title().map(String::from)), Some("Heat".into()));
+}
+
+#[gpui::test]
+fn without_values_of_the_item_the_subtitle_choice_uses_the_profile_values_and_an_empty_language_shows_none(
+    cx: &mut TestAppContext,
+) {
+    let auto = |language: Value| {
+        Some(json!({
+            "effective_subtitle_language": language, "effective_subtitle_mode": "auto",
+            "effective_show_forced_subtitles": true,
+        }))
+    };
+    let cases = [
+        ("no effective_subtitle_* fields", None, false, vec![FALLBACK]),
+        ("a null language", auto(Value::Null), false, vec![FALLBACK]),
+        ("an empty language", auto(json!("")), false, vec![]),
+        ("a failed detail read", Some(json!({})), true, vec![FALLBACK]),
+    ];
+    for (case, fields, fail, want) in cases {
+        let rig = rig(cx);
+        if let Some(fields) = fields {
+            rig.server.detail(fields);
+        }
+        if fail {
+            rig.server.fail(&[MOVIE_DETAIL]);
+        }
+        rig.play(movie(), cx);
+        rig.loaded(7200.0, 300.0, cx);
+        assert_eq!(subtitles(&rig), want, "{case}");
+    }
+}
+
+#[gpui::test]
+fn the_start_does_not_wait_for_the_detail_and_the_session_waits_for_it_up_to_2_seconds(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.server.detail(json!({}));
+    rig.server.hold(&[MOVIE_DETAIL]);
+    rig.play(movie(), cx);
+    assert_eq!(rig.server.count("POST", "playback/start"), 1, "the start request goes out at once");
+    assert!(rig.fake.loads().is_empty(), "the session waits for the detail");
+    rig.server.release();
+    cx.run_until_parked();
+    rig.loaded(7200.0, 300.0, cx);
+    assert_eq!(subtitles(&rig), [Op::SelectSubtitle(Some(2))]);
+
+    let rig = self::rig(cx);
+    rig.server.detail(json!({}));
+    rig.server.hold(&[MOVIE_DETAIL]);
+    rig.play(movie(), cx);
+    rig.seconds(1, cx);
+    assert!(rig.fake.loads().is_empty());
+    rig.seconds(1, cx);
+    assert_eq!(rig.fake.loads(), [stream(1)], "after 2 seconds playback starts without the detail");
+    rig.loaded(7200.0, 300.0, cx);
+    assert_eq!(subtitles(&rig), [FALLBACK]);
+    rig.server.release();
+    cx.run_until_parked();
+    assert_eq!(rig.read(cx, |p| p.title().map(String::from)), Some("Heat".into()), "MPRIS gets the late detail");
+    assert_eq!(rig.server.count("GET", MOVIE_DETAIL), 1);
+}
+
+#[gpui::test]
+fn a_replan_keeps_the_effective_values_of_the_item(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.server.detail(json!({}));
+    rig.play(movie(), cx);
+    rig.events([Input::LoadFailed], cx);
+    rig.events([Input::LoadFailed], cx);
+    assert!(rig.fake.loads()[2].ends_with("/master.m3u8"), "the new plan loads");
+    rig.loaded(7200.0, 300.0, cx);
+    let added =
+        subtitles(&rig).into_iter().any(|op| matches!(op, Op::AddSubtitle(url) if url.contains("/subtitles/2.")));
+    assert!(added, "the Japanese track of the new plan: {:?}", subtitles(&rig));
+}
+
+#[gpui::test]
+fn an_episode_with_no_known_season_reads_its_detail_once_and_still_finds_the_next_episode(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.server.detail(json!({
+        "content_id": "episode:severance-s01e01", "type": "episode", "series_id": "series:severance",
+        "season_number": 1,
+    }));
+    let mut card = movies()[0].clone();
+    let series = json!({
+        "content_id": "series:severance", "type": "series", "play_content_id": "episode:severance-s01e01",
+        "series_id": null, "season_number": null,
+    });
+    card.as_object_mut().unwrap().extend(series.as_object().unwrap().clone());
+    rig.play(PlayItem::from(&serde_json::from_value::<wire::CatalogItem>(card).unwrap()), cx);
+    assert_eq!(rig.read(cx, |p| p.next_title().map(String::from)), Some("S1:E2 · Good News About Hell".into()));
+    assert_eq!(rig.server.count("GET", "catalog/items/episode:severance-s01e01?"), 1);
 }

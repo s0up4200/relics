@@ -3,6 +3,7 @@
 //! it each input with the wall-clock time and carries out the commands that it
 //! returns. It holds no clock and does no I/O, so the tests reach it without mpv.
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use crate::api::types::{Decision, Delivery, Marker, MarkerKind};
@@ -86,10 +87,12 @@ pub const ORIGINAL: &str = "original";
 
 #[derive(Debug)]
 pub enum Input {
-    /// The server answered the start request. The headers of `access` go on each media request.
+    /// The server answered the start request. The headers of `access` go on each media request. `item` is the
+    /// Item detail when it arrived in time. Its subtitle values go over the Server settings of the session.
     Started {
         decision: Decision,
         access: Access,
+        item: Option<Arc<wire::CatalogItemDetail>>,
     },
     /// A token refresh ended. `None` means that it failed.
     Refreshed(Option<Access>),
@@ -250,7 +253,7 @@ enum AfterRefresh {
 pub struct Session {
     /// The Item runtime in seconds. The end rule uses it when mpv has no duration.
     runtime: Option<f64>,
-    /// The Server settings of the Profile when the session started.
+    /// The Server settings of the Profile when the session started, with the subtitle values of the Item over them.
     settings: ServerSettings,
     plan: Option<Plan>,
     ended: bool,
@@ -424,19 +427,24 @@ impl Session {
             self.auto_plays = 0;
         }
         match input {
-            Input::Started { decision, access } => match decision {
-                Decision::Playable { session_id, plan, audio_language, markers, attempt_id } => {
-                    self.audio_language = audio_language;
-                    self.access = Some(access);
-                    let start = plan.timeline.player_start_seconds;
-                    self.adopt(session_id, attempt_id, &plan, markers);
-                    self.load(start, now)
+            Input::Started { decision, access, item } => {
+                if let Some(item) = item {
+                    self.settings.apply_item(&item);
                 }
-                Decision::Unavailable { message, .. } => self.fail(message),
-                Decision::Unknown(outcome) => {
-                    self.fail(format!("The Silo server gave an answer that Relics does not know: {outcome}"))
+                match decision {
+                    Decision::Playable { session_id, plan, audio_language, markers, attempt_id } => {
+                        self.audio_language = audio_language;
+                        self.access = Some(access);
+                        let start = plan.timeline.player_start_seconds;
+                        self.adopt(session_id, attempt_id, &plan, markers);
+                        self.load(start, now)
+                    }
+                    Decision::Unavailable { message, .. } => self.fail(message),
+                    Decision::Unknown(outcome) => {
+                        self.fail(format!("The Silo server gave an answer that Relics does not know: {outcome}"))
+                    }
                 }
-            },
+            }
             Input::StartFailed(message) => self.fail(message),
             Input::Refreshed(access) => {
                 let worked = access.is_some();

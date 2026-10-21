@@ -7,8 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use futures::StreamExt as _;
 use futures::channel::mpsc::{self, UnboundedReceiver};
+use futures::future::{Either, LocalBoxFuture, Shared};
+use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Context, EventEmitter, Task};
 use mpris_server::PlaybackStatus;
 
@@ -45,6 +46,24 @@ pub fn start_shuffle<T: EventEmitter<Play>>(
 
 /// The width of the poster that MPRIS shows, in pixels.
 const MPRIS_POSTER_WIDTH: f32 = 512.0;
+/// After the start answer, the Playback session waits this long at most for the Item detail. The client has no
+/// request timeout, so this limit stops a slow detail read from holding playback.
+const DETAIL_WAIT: Duration = Duration::from_secs(2);
+
+/// The one detail read of the Item that plays, for the start, MPRIS and the season lookup. `None` when it failed.
+type Detail = Shared<LocalBoxFuture<'static, Option<Arc<wire::CatalogItemDetail>>>>;
+
+/// Reads the detail of the Item `content_id` once, at the poster size of MPRIS. The read starts when a task first
+/// waits for it.
+fn read_detail(client: Arc<Client>, content_id: String) -> Detail {
+    async move {
+        let rung = artwork::Rung::fit(artwork::Kind::Poster, MPRIS_POSTER_WIDTH, 1.0);
+        let item = client.item(&content_id, rung).await;
+        item.inspect_err(|err| eprintln!("relics: cannot read {content_id}: {err}")).ok().map(Arc::new)
+    }
+    .boxed_local()
+    .shared()
+}
 
 /// The media player of the Player view: libmpv in the app (`mpv::InView`), and a fake in the tests.
 pub trait Media {
@@ -185,6 +204,7 @@ impl Controller {
         }
         (self.versions, self.trickplay, self._trickplay) = (Vec::new(), None, None);
         self.client = Some(client.clone());
+        let detail = read_detail(client.clone(), item.content_id.clone());
         // A new Item drops this task, so an older answer never reaches the new session.
         self.finding = match &item.shuffle {
             Some((_, next)) => {
@@ -193,16 +213,23 @@ impl Controller {
                 }
                 None
             }
-            None => self.find_episodes(&client, &item, cx),
+            None => self.find_episodes(&client, &item, detail.clone(), cx),
         };
         (self.track, self.art, self.duration) = (None, None, None);
-        self.describing = Some(self.describe(client.clone(), item.content_id.clone(), cx));
+        self.describing = Some(self.describe(client.clone(), detail.clone(), cx));
         let start = item.start_position();
         let (content_id, file_id) = (item.content_id, item.file_id);
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
             let input = match client.start_version(&content_id, file_id.as_deref(), start).await {
-                Ok(decision) => Input::Started { decision, access: client.media_access() },
+                Ok(decision) => {
+                    let wait = cx.background_executor().timer(DETAIL_WAIT);
+                    let item = match futures::future::select(detail, wait).await {
+                        Either::Left((item, _)) => item,
+                        Either::Right(_) => None,
+                    };
+                    Input::Started { decision, access: client.media_access(), item }
+                }
                 Err(err) => Input::StartFailed(err.to_string()),
             };
             this.update(cx, |this, cx| {
@@ -253,7 +280,13 @@ impl Controller {
     }
 
     /// Looks up the next and the previous episode of `item`, and gives each one that exists to the session.
-    fn find_episodes(&self, client: &Arc<Client>, item: &PlayItem, cx: &mut Context<Self>) -> Option<Task<()>> {
+    fn find_episodes(
+        &self,
+        client: &Arc<Client>,
+        item: &PlayItem,
+        detail: Detail,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<()>> {
         if item.season.is_none() && !item.find_season {
             return None;
         }
@@ -261,13 +294,7 @@ impl Controller {
         Some(cx.spawn(async move |this, cx| {
             let season = match season {
                 Some(season) => Some(season),
-                None => match client.item(&content_id, artwork::Rung::Small).await {
-                    Ok(episode) => episode.series_id.zip(episode.season_number),
-                    Err(err) => {
-                        eprintln!("relics: cannot read the season of {content_id}: {err}");
-                        None
-                    }
-                },
+                None => detail.await.and_then(|episode| episode.series_id.clone().zip(episode.season_number)),
             };
             let Some((series_id, season)) = season else {
                 return;
@@ -297,19 +324,15 @@ impl Controller {
         }))
     }
 
-    /// Reads the title of the Item and downloads its poster to the Artwork cache, for MPRIS.
-    fn describe(&self, client: Arc<Client>, content_id: String, cx: &mut Context<Self>) -> Task<()> {
+    /// Takes the title of the Item from its detail and downloads its poster to the Artwork cache, for MPRIS.
+    fn describe(&self, client: Arc<Client>, detail: Detail, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
-            let item = match client
-                .item(&content_id, artwork::Rung::fit(artwork::Kind::Poster, MPRIS_POSTER_WIDTH, 1.0))
-                .await
-            {
-                Ok(item) => item,
-                Err(err) => return eprintln!("relics: cannot read {content_id} for MPRIS: {err}"),
+            let Some(item) = detail.await else {
+                return;
             };
             let poster = item.poster_url.as_deref().filter(|url| !url.is_empty());
             let poster = poster.and_then(|url| client.server().url.join(url).ok()).map(String::from);
-            let track = Track::from(&item);
+            let track = Track::from(&*item);
             if this
                 .update(cx, |this, cx| {
                     this.track = Some(track);

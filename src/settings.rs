@@ -270,6 +270,22 @@ impl ServerSettings {
         };
     }
 
+    /// Puts the subtitle values that the Server resolved for one Item over these values. The Server applies the
+    /// Library, series and device Overrides to them. A field that is absent or null, or a value that the definition
+    /// does not allow, keeps the value here.
+    pub fn apply_item(&mut self, item: &wire::CatalogItemDetail) {
+        let values = [
+            ("playback.subtitle_language", item.effective_subtitle_language.clone().map(Value::from)),
+            ("playback.subtitle_mode", item.effective_subtitle_mode.clone().map(Value::from)),
+            ("playback.show_forced_subtitles", item.effective_show_forced_subtitles.map(Value::from)),
+        ];
+        for (key, value) in values {
+            if let Some(value) = value.filter(|value| definition(key).is_some_and(|d| d.allows(value))) {
+                self.set(key, &value);
+            }
+        }
+    }
+
     /// Reads the effective values. A key that is missing, or a value of the wrong type, keeps its default.
     pub fn from_effective(values: &[wire::EffectiveSettingValue]) -> Self {
         let mut settings = Self::default();
