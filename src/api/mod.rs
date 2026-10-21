@@ -395,12 +395,14 @@ impl Client {
         if known.manifest_revision.is_none() {
             return Ok(());
         }
-        let query = settings::DEFINITIONS
+        let mut keys: Vec<_> = settings::DEFINITIONS
             .iter()
             .filter(|definition| known.knows(definition))
             .map(|definition| format!("keys={}", definition.key))
-            .collect::<Vec<_>>()
-            .join("&");
+            .collect();
+        // Each row of the Subtitle appearance has the same key.
+        keys.dedup();
+        let query = keys.join("&");
         let values: wire::EffectiveSettingCollection =
             self.call(Method::GET, &format!("settings/values/effective?{query}"), None).await?;
         // A write while the request runs also makes the result old.
@@ -442,6 +444,8 @@ impl Client {
     /// when the write succeeds. A null value is "No preference". When the Effective value came from the device
     /// row of this device, the device row would still win, so the write also deletes it, as the web does. When
     /// that delete fails, the save fails, and the client reads the settings again to get the value that applies.
+    /// The Subtitle appearance belongs to one device, as on the web: it is written at the device row of this
+    /// device, and nothing is deleted.
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
         // The server docs say that a client must not write without the capabilities. A page from before the
         // capability read can still show the row of a key that the server does not know.
@@ -451,9 +455,10 @@ impl Client {
         {
             return Err(Error::NoSettingsCapabilities);
         }
-        let device_row = settings.origins.get(key).is_some_and(|origin| origin.is_device());
+        let scope = if key == settings::APPEARANCE { "profile_device" } else { "profile" };
+        let device_row = scope == "profile" && settings.origins.get(key).is_some_and(|origin| origin.is_device());
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
-        let path = format!("settings/values/{key}?scope=profile");
+        let path = format!("settings/values/{key}?scope={scope}");
         let body = serde_json::json!({ "value": value });
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
         let mut saved = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await.map(|_| ());
@@ -473,7 +478,7 @@ impl Client {
         let same_profile = self.auth.lock().unwrap().profile_id == profile_id;
         if same_profile {
             if saved.is_ok() {
-                self.server_settings.lock().unwrap().set_profile_value(key, &value);
+                self.server_settings.lock().unwrap().set_stored(key, &value, scope);
             }
             // A write of the old Profile must not invalidate the read of the new Profile.
             self.settings_writes.fetch_add(1, Ordering::SeqCst);

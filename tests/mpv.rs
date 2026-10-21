@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use relics::mpv::Player;
 use relics::playback::Input;
 use relics::playback::tracks::Kind;
+use relics::settings::SubtitleAppearance;
 
 /// One request that the stub got: the path, the `Authorization` header and the device name header.
 #[derive(Debug, Clone)]
@@ -611,4 +612,109 @@ fn an_hls_load_that_cannot_open_ends_three_more_entries_with_an_error() {
     let errors: std::collections::HashSet<i64> = ends[1..].iter().map(|(id, _)| *id).collect();
     assert_eq!(ends[0], (a, REASON_REDIRECT), "{}", show(&log));
     assert!(ends.len() == 4 && errors.len() == 3 && !errors.contains(&a), "{}", show(&log));
+}
+
+/// The mpv subtitle options that `appearance` sets, by name.
+fn subtitle_options(appearance: &SubtitleAppearance) -> Vec<(&'static str, String)> {
+    let (player, _rx) = open();
+    player.set_subtitle_appearance(appearance).unwrap();
+    let names = [
+        "sub-font-size",
+        "sub-font",
+        "sub-color",
+        "sub-border-style",
+        "sub-back-color",
+        "sub-shadow-offset",
+        "sub-outline-size",
+        "sub-outline-color",
+        "sub-align-y",
+        "sub-margin-y",
+    ];
+    names.into_iter().map(|name| (name, player.property(name).unwrap())).collect()
+}
+
+#[test]
+fn the_default_subtitle_appearance_draws_white_text_on_a_75_percent_black_box_near_the_bottom() {
+    assert_eq!(
+        subtitle_options(&SubtitleAppearance::default()),
+        [
+            ("sub-font-size", "32.000000".into()),
+            ("sub-font", "sans-serif".into()),
+            ("sub-color", "#FFFFFFFF".into()),
+            ("sub-border-style", "background-box".into()),
+            ("sub-back-color", "#BF000000".into()),
+            ("sub-shadow-offset", "4.000000".into()),
+            ("sub-outline-size", "0.000000".into()),
+            ("sub-outline-color", "#FF000000".into()),
+            ("sub-align-y", "bottom".into()),
+            ("sub-margin-y", "50".into()),
+        ]
+    );
+}
+
+#[test]
+fn each_field_of_the_subtitle_appearance_sets_its_mpv_option() {
+    let shadow = SubtitleAppearance {
+        font_size: "xxlarge".into(),
+        font_family: "monospace".into(),
+        font_color: "#facc15".into(),
+        text_opacity: 50,
+        background_style: "shadow".into(),
+        text_outline: true,
+        text_outline_color: "#ffffff".into(),
+        position: "top".into(),
+        ..SubtitleAppearance::default()
+    };
+    assert_eq!(
+        subtitle_options(&shadow),
+        [
+            ("sub-font-size", "48.000000".into()),
+            ("sub-font", "monospace".into()),
+            ("sub-color", "#80FACC15".into()),
+            ("sub-border-style", "outline-and-shadow".into()),
+            ("sub-back-color", "#E6000000".into()),
+            ("sub-shadow-offset", "2.000000".into()),
+            ("sub-outline-size", "2.000000".into()),
+            ("sub-outline-color", "#FFFFFFFF".into()),
+            ("sub-align-y", "top".into()),
+            ("sub-margin-y", "50".into()),
+        ]
+    );
+    let outline = SubtitleAppearance {
+        font_size: "small".into(),
+        background_style: "outline".into(),
+        background_color: "#7f1d1d".into(),
+        text_outline_color: "#3b82f6".into(),
+        position: "lower-third".into(),
+        ..SubtitleAppearance::default()
+    };
+    let options = subtitle_options(&outline);
+    assert_eq!(options[0], ("sub-font-size", "20.000000".into()));
+    assert_eq!(
+        options[3..9],
+        [
+            ("sub-border-style", "outline-and-shadow".into()),
+            ("sub-back-color", "#00000000".into()),
+            ("sub-shadow-offset", "0.000000".into()),
+            ("sub-outline-size", "2.000000".into()),
+            ("sub-outline-color", "#FF3B82F6".into()),
+            ("sub-align-y", "bottom".into()),
+        ]
+    );
+    assert_eq!(options[9], ("sub-margin-y", "86".into()));
+    let none = SubtitleAppearance { font_size: "medium".into(), background_style: "none".into(), ..outline };
+    let options = subtitle_options(&none);
+    assert_eq!(options[0], ("sub-font-size", "26.000000".into()));
+    assert_eq!(options[6], ("sub-outline-size", "0.000000".into()), "no outline without the style or Text outline");
+    let box_with_outline = SubtitleAppearance {
+        font_size: "xlarge".into(),
+        background_color: "#1e3a5f".into(),
+        background_opacity: 0,
+        text_outline: true,
+        ..SubtitleAppearance::default()
+    };
+    let options = subtitle_options(&box_with_outline);
+    assert_eq!(options[0], ("sub-font-size", "40.000000".into()));
+    assert_eq!(options[4], ("sub-back-color", "#001E3A5F".into()));
+    assert_eq!(options[6], ("sub-outline-size", "2.000000".into()));
 }

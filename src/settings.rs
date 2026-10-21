@@ -47,6 +47,11 @@ impl Group {
             Group::ThisComputer => "This computer",
         }
     }
+
+    /// The note below the title of the group.
+    pub fn note(self) -> Option<&'static str> {
+        (self == Group::SubtitleAppearance).then_some("Applies to this computer only")
+    }
 }
 
 /// The values that a Server setting allows, and their labels.
@@ -58,6 +63,12 @@ pub enum Choices {
     OnOff,
     /// The values with their labels, in the order of the web Settings pages.
     List(&'static [(&'static str, &'static str)]),
+    /// A `#rrggbb` color. The swatches of the web Settings pages, with their names. A stored color that is not a
+    /// swatch is the first choice, so that it stays selected.
+    Color(&'static [(&'static str, &'static str)]),
+    /// A percent from 0 (or 1 when the first step is above 0) to 100. The choices are the steps of 10% from the
+    /// first step. A stored value between two steps is a choice between them, so that it stays selected.
+    Percent(u64),
 }
 
 /// The definition of one Server setting.
@@ -71,6 +82,8 @@ pub struct Definition {
     pub default: Value,
     pub choices: Choices,
     pub group: Group,
+    /// The field of the Subtitle appearance object that the row shows. `None` for a key with one value.
+    pub field: Option<&'static str>,
 }
 
 impl Definition {
@@ -80,6 +93,10 @@ impl Definition {
             Choices::Language => value.is_null() || value.is_string(),
             Choices::OnOff => value.is_boolean(),
             Choices::List(list) => list.iter().any(|&(v, _)| value.as_str() == Some(v)),
+            Choices::Color(_) => value.as_str().is_some_and(|color| {
+                color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit())
+            }),
+            Choices::Percent(first) => value.as_u64().is_some_and(|n| n >= first.min(1) && n <= 100),
         }
     }
 
@@ -101,14 +118,64 @@ impl Definition {
             }
             Choices::OnOff => vec![(Value::Bool(true), "On".to_string()), (Value::Bool(false), "Off".to_string())],
             Choices::List(list) => pairs(list),
+            Choices::Color(list) => {
+                let mut options = pairs(list);
+                if let Some(color) = current.as_str()
+                    && !list.iter().any(|&(hex, _)| hex == color)
+                {
+                    options.insert(0, (current.clone(), color.to_string()));
+                }
+                options
+            }
+            Choices::Percent(first) => {
+                let mut steps: Vec<u64> = (first..=100).step_by(10).collect();
+                if let Some(n) = current.as_u64().filter(|n| !steps.contains(n)) {
+                    steps.push(n);
+                    steps.sort_unstable();
+                }
+                steps.into_iter().map(|n| (Value::from(n), format!("{n}%"))).collect()
+            }
         }
     }
 }
 
-/// The Server settings that the app reads, in the order of the Settings page.
-pub static DEFINITIONS: LazyLock<[Definition; 8]> = LazyLock::new(|| {
-    let setting =
-        |key, revision, label, default, choices, group| Definition { key, revision, label, default, choices, group };
+/// The key of the Subtitle appearance. Its value is one object, and each of its fields is one row.
+pub const APPEARANCE: &str = "playback.subtitle_appearance";
+
+/// The font color swatches of the web. The outline color uses them too.
+const FONT_COLORS: &[(&str, &str)] = &[
+    ("#ffffff", "White"),
+    ("#facc15", "Yellow"),
+    ("#22c55e", "Green"),
+    ("#06b6d4", "Cyan"),
+    ("#d946ef", "Magenta"),
+    ("#ef4444", "Red"),
+    ("#3b82f6", "Blue"),
+    ("#9ca3af", "Gray"),
+    ("#000000", "Black"),
+];
+
+/// The Server settings that the app reads, in the order of the Settings page. The rows of the Subtitle
+/// appearance come one after the other.
+pub static DEFINITIONS: LazyLock<[Definition; 18]> = LazyLock::new(|| {
+    let setting = |key, revision, label, default, choices, group| Definition {
+        key,
+        revision,
+        label,
+        default,
+        choices,
+        group,
+        field: None,
+    };
+    let appearance = |field, revision, label, default, choices| Definition {
+        key: APPEARANCE,
+        revision,
+        label,
+        default,
+        choices,
+        group: Group::SubtitleAppearance,
+        field: Some(field),
+    };
     [
         setting(
             "playback.intro_skip_mode",
@@ -160,6 +227,59 @@ pub static DEFINITIONS: LazyLock<[Definition; 8]> = LazyLock::new(|| {
             Choices::OnOff,
             Group::LanguageAndSubtitles,
         ),
+        // The fields, labels and swatches of the web Subtitles settings page. Revision 14 added the text opacity.
+        appearance(
+            "fontSize",
+            1,
+            "Font size",
+            json!("large"),
+            Choices::List(&[
+                ("small", "Small"),
+                ("medium", "Medium"),
+                ("large", "Large"),
+                ("xlarge", "X-Large"),
+                ("xxlarge", "XX-Large"),
+            ]),
+        ),
+        appearance(
+            "fontFamily",
+            1,
+            "Font family",
+            json!("sans-serif"),
+            Choices::List(&[("sans-serif", "Sans-serif"), ("serif", "Serif"), ("monospace", "Monospace")]),
+        ),
+        appearance("fontColor", 1, "Font color", json!("#ffffff"), Choices::Color(FONT_COLORS)),
+        appearance("textOpacity", 14, "Text opacity", json!(100), Choices::Percent(10)),
+        appearance("textOutline", 1, "Text outline", json!(false), Choices::OnOff),
+        appearance("textOutlineColor", 1, "Outline color", json!("#000000"), Choices::Color(FONT_COLORS)),
+        appearance(
+            "backgroundStyle",
+            1,
+            "Background style",
+            json!("box"),
+            Choices::List(&[("box", "Box"), ("shadow", "Drop shadow"), ("outline", "Outline"), ("none", "None")]),
+        ),
+        appearance("backgroundOpacity", 1, "Background opacity", json!(75), Choices::Percent(0)),
+        appearance(
+            "backgroundColor",
+            1,
+            "Background color",
+            json!("#000000"),
+            Choices::Color(&[
+                ("#000000", "Black"),
+                ("#374151", "Dark Gray"),
+                ("#1e3a5f", "Navy"),
+                ("#7f1d1d", "Dark Red"),
+                ("#14532d", "Dark Green"),
+            ]),
+        ),
+        appearance(
+            "position",
+            1,
+            "Subtitle position",
+            json!("bottom"),
+            Choices::List(&[("bottom", "Bottom"), ("lower-third", "Lower third"), ("top", "Top")]),
+        ),
     ]
 });
 
@@ -181,6 +301,7 @@ pub struct ServerSettings {
     pub auto_skip_credits: bool,
     pub auto_skip_recap: bool,
     pub auto_play_next: bool,
+    pub subtitle_appearance: SubtitleAppearance,
     /// The revision of the settings contract that the server gives to the app: the `manifest_revision` of its
     /// capabilities, or 1 when it has no batched effective reads. The server knows a key when this is equal to or
     /// higher than the revision of its definition. `None` until the app reads capabilities that allow the settings.
@@ -222,6 +343,7 @@ impl Default for ServerSettings {
             auto_skip_credits: false,
             auto_skip_recap: false,
             auto_play_next: false,
+            subtitle_appearance: SubtitleAppearance::default(),
             manifest_revision: None,
             origins: HashMap::new(),
         };
@@ -229,6 +351,56 @@ impl Default for ServerSettings {
             settings.set(definition.key, &definition.default);
         }
         settings
+    }
+}
+
+/// How plain-text subtitles look on this device. Each field has a value that its definition allows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleAppearance {
+    /// small, medium, large, xlarge or xxlarge.
+    pub font_size: String,
+    /// sans-serif, serif or monospace.
+    pub font_family: String,
+    /// `#rrggbb`.
+    pub font_color: String,
+    /// The alpha of the text in percent.
+    pub text_opacity: u64,
+    /// box, shadow, outline or none.
+    pub background_style: String,
+    /// `#rrggbb`, the color of the box.
+    pub background_color: String,
+    /// The alpha of the box in percent.
+    pub background_opacity: u64,
+    /// An outline in the outline color, on top of the background style.
+    pub text_outline: bool,
+    /// `#rrggbb`, the color of the outline.
+    pub text_outline_color: String,
+    /// bottom, lower-third or top.
+    pub position: String,
+}
+
+impl SubtitleAppearance {
+    /// Merges the fields of a stored value over the defaults. A field that is absent, or that its definition does
+    /// not allow, keeps its default. A color is in lower case, as the swatches are.
+    pub fn merged(value: &Value) -> Self {
+        let fields = DEFINITIONS.iter().filter_map(|definition| {
+            let field = definition.field?;
+            let value = value.get(field).filter(|value| definition.allows(value)).unwrap_or(&definition.default);
+            let value = match (definition.choices, value.as_str()) {
+                (Choices::Color(_), Some(color)) => Value::from(color.to_lowercase()),
+                _ => value.clone(),
+            };
+            Some((field.to_string(), value))
+        });
+        serde_json::from_value(Value::Object(fields.collect()))
+            .expect("each field has a value that its definition allows")
+    }
+}
+
+impl Default for SubtitleAppearance {
+    fn default() -> Self {
+        Self::merged(&Value::Null)
     }
 }
 
@@ -253,12 +425,31 @@ impl ServerSettings {
         self.manifest_revision.is_none_or(|revision| revision >= definition.revision)
     }
 
-    /// Keeps a value that the app wrote at the `profile` scope. The cap fields stay until the next read.
-    pub fn set_profile_value(&mut self, key: &str, value: &Value) {
+    /// Keeps a value that the app wrote at `scope`. The cap fields stay until the next read.
+    pub fn set_stored(&mut self, key: &str, value: &Value, scope: &str) {
         self.set(key, value);
         if let Some(origin) = self.origins.get_mut(key) {
-            origin.source = "profile".into();
+            origin.source = scope.into();
         }
+    }
+
+    /// The value that the row of `definition` shows: the value of its key, or one field of the Subtitle appearance.
+    pub fn row_value(&self, definition: &Definition) -> Value {
+        let value = self.value(definition.key);
+        definition.field.map_or(value.clone(), |field| value[field].clone())
+    }
+
+    /// Sets the row of `definition` to `row`, and gives the value of its key to write. For the Subtitle appearance
+    /// that is the whole object.
+    pub fn set_row(&mut self, definition: &Definition, row: Value) -> Value {
+        let Some(field) = definition.field else {
+            self.set(definition.key, &row);
+            return row;
+        };
+        let mut value = self.value(definition.key);
+        value[field] = row;
+        self.set(definition.key, &value);
+        self.value(definition.key)
     }
 
     /// Takes the value and the origin of one key from `other`.
@@ -307,6 +498,10 @@ impl ServerSettings {
     /// Sets one value. A value that the definition does not allow gives the default of the key. An unknown key
     /// changes nothing.
     pub fn set(&mut self, key: &str, value: &Value) {
+        if key == APPEARANCE {
+            self.subtitle_appearance = SubtitleAppearance::merged(value);
+            return;
+        }
         let Some(definition) = definition(key) else {
             return;
         };
@@ -359,6 +554,7 @@ impl ServerSettings {
             "playback.auto_skip_credits" => self.auto_skip_credits.into(),
             "playback.auto_skip_recap" => self.auto_skip_recap.into(),
             "playback.auto_play_next" => self.auto_play_next.into(),
+            APPEARANCE => serde_json::to_value(&self.subtitle_appearance).expect("the Subtitle appearance serializes"),
             _ => Value::Null,
         }
     }
@@ -494,8 +690,8 @@ mod tests {
     fn the_store_holds_the_default_of_each_definition() {
         let settings = ServerSettings::default();
         for definition in DEFINITIONS.iter() {
-            assert!(definition.allows(&definition.default), "{}", definition.key);
-            assert_eq!(settings.value(definition.key), definition.default, "{}", definition.key);
+            assert!(definition.allows(&definition.default), "{}", definition.label);
+            assert_eq!(settings.row_value(definition), definition.default, "{}", definition.label);
         }
     }
 }

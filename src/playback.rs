@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::api::types::{Decision, Delivery, Marker, MarkerKind};
 use crate::api::wire;
-use crate::settings::{IntroSkipMode, ServerSettings};
+use crate::settings::{IntroSkipMode, ServerSettings, SubtitleAppearance};
 
 pub mod playing;
 pub mod subtitles;
@@ -402,6 +402,11 @@ impl Session {
     /// The track choice to carry to the next episode.
     pub fn carry(&self) -> Carry {
         self.carry.clone()
+    }
+
+    /// The Subtitle appearance of the Server settings that the session started with.
+    pub fn subtitle_appearance(&self) -> &SubtitleAppearance {
+        &self.settings.subtitle_appearance
     }
 
     /// The tracks of the file, for the Track picker.

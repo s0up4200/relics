@@ -7,6 +7,9 @@
 //!   of this device says "Set for this device". A row of a key that the server does not know does not show.
 //!   When Relics cannot read the settings contract capabilities, or they do not allow the settings, each change
 //!   fails.
+//! - Subtitle appearance: one row for each field. A change writes the whole Subtitle appearance at the device row
+//!   of this device, so the rows have no "Set for this device" note. The group says "Applies to this computer
+//!   only".
 //! - This computer: the hardware decoding Local setting, and the "Check for new releases" Local setting of the
 //!   Release notice.
 //! - Accounts: each Server and Account pair with Sign out and Remove, and Add server below.
@@ -102,7 +105,8 @@ pub fn sections(server: Option<&ServerSettings>, pairs: usize) -> Vec<(&'static 
 
 /// The one-line note below the row of a Server setting, when its Effective value is not the Profile value.
 pub fn note(server: &ServerSettings, definition: &Definition) -> Option<&'static str> {
-    server.origins.get(definition.key).filter(|origin| origin.is_device()).map(|_| "Set for this device")
+    let device = server.origins.get(definition.key).is_some_and(|origin| origin.is_device());
+    (device && definition.field.is_none()).then_some("Set for this device")
 }
 
 pub struct SettingsPage {
@@ -235,13 +239,13 @@ impl SettingsPage {
         let Some(server) = &self.server else {
             return Vec::new();
         };
-        definition.options(&server.value(definition.key))
+        definition.options(&server.row_value(definition))
     }
 
     /// Changes a Server setting by `delta` choices and writes it.
     fn change(&mut self, definition: &'static Definition, delta: isize, cx: &mut Context<Self>) {
         if let Some(server) = &self.server {
-            let old = server.value(definition.key);
+            let old = server.row_value(definition);
             self.set(definition, step(&self.options(definition), &old, delta), cx);
         }
     }
@@ -251,7 +255,7 @@ impl SettingsPage {
         let Some(server) = &self.server else {
             return Vec::new();
         };
-        let current = server.value(definition.key);
+        let current = server.row_value(definition);
         self.options(definition).into_iter().map(|(value, label)| Choice::new(label, value == current)).collect()
     }
 
@@ -281,7 +285,7 @@ impl SettingsPage {
             return;
         };
         let key = definition.key;
-        server.set(key, &new);
+        let new = server.set_row(definition, new);
         self.message = None;
         let client = self.client.clone();
         let write = cx.spawn(async move |this, cx| {
@@ -535,10 +539,14 @@ impl Render for SettingsPage {
         let mut elements = Vec::new();
         for (title, rows) in sections(self.server.as_ref(), self.pairs.len()) {
             elements.push(self.header(title, cx).into_any_element());
+            let group_note = Group::ALL.into_iter().find(|group| group.title() == title).and_then(Group::note);
+            elements.extend(group_note.map(|text| {
+                div().pb(px(6.)).text_size(px(12.)).text_color(t.secondary).child(text).into_any_element()
+            }));
             for row in rows {
                 elements.push(match row {
                     Row::Server(definition) => {
-                        let current = self.server.as_ref().map(|server| server.value(definition.key));
+                        let current = self.server.as_ref().map(|server| server.row_value(definition));
                         let value = self
                             .options(definition)
                             .into_iter()
@@ -658,6 +666,21 @@ mod tests {
                 "Language & subtitles",
                 vec!["Spoken language", "Subtitle language", "Subtitle behavior", "Show forced subtitles"],
             ),
+            (
+                "Subtitle appearance",
+                vec![
+                    "Font size",
+                    "Font family",
+                    "Font color",
+                    "Text opacity",
+                    "Text outline",
+                    "Outline color",
+                    "Background style",
+                    "Background opacity",
+                    "Background color",
+                    "Subtitle position",
+                ],
+            ),
             ("This computer", vec!["Local(HardwareDecoding)", "Local(CheckReleases)"]),
             ("Accounts", vec!["Account(0)", "AddServer"]),
         ];
@@ -675,6 +698,14 @@ mod tests {
         assert_eq!(note(&server, recaps), None);
         server.origins.insert(recaps.key, Origin { source: "profile_device".into(), ..Origin::default() });
         assert_eq!(note(&server, recaps), Some("Set for this device"));
+    }
+
+    #[test]
+    fn a_subtitle_appearance_row_has_no_device_note() {
+        let size = crate::settings::DEFINITIONS.iter().find(|d| d.field == Some("fontSize")).unwrap();
+        let mut server = ServerSettings::default();
+        server.origins.insert(size.key, Origin { source: "profile_device".into(), ..Origin::default() });
+        assert_eq!(note(&server, size), None);
     }
 
     #[test]

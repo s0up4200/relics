@@ -5,7 +5,7 @@ mod common;
 use common::{Log, json};
 use futures::executor::block_on;
 use relics::api::Client;
-use relics::settings::{self, IntroSkipMode, LocalSettings, Origin, ServerSettings, SubtitleMode};
+use relics::settings::{self, IntroSkipMode, LocalSettings, Origin, ServerSettings, SubtitleAppearance, SubtitleMode};
 use relics::settings_page::Row;
 use serde_json::json;
 
@@ -65,7 +65,7 @@ fn value(key: &str, value: serde_json::Value) -> serde_json::Value {
 }
 
 #[test]
-fn opening_a_profile_reads_the_eight_server_settings() {
+fn opening_a_profile_reads_the_server_settings() {
     let (client, seen) = fake(json!({
         "revision": 17,
         "items": [
@@ -92,6 +92,7 @@ fn opening_a_profile_reads_the_eight_server_settings() {
             auto_skip_credits: true,
             auto_skip_recap: true,
             auto_play_next: false,
+            subtitle_appearance: SubtitleAppearance::default(),
             manifest_revision: Some(17),
             origins: Default::default(),
         }
@@ -107,6 +108,7 @@ fn opening_a_profile_reads_the_eight_server_settings() {
         "playback.subtitle_language",
         "playback.subtitle_mode",
         "playback.show_forced_subtitles",
+        "playback.subtitle_appearance",
     ];
     let query = keys.map(|key| format!("keys={key}")).join("&");
     assert_eq!(url, &format!("https://silo.test/api/v2/settings/values/effective?{query}"));
@@ -194,12 +196,13 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
             auto_skip_credits: true,
             auto_skip_recap: true,
             auto_play_next: false,
+            subtitle_appearance: SubtitleAppearance::default(),
             manifest_revision: Some(6),
             origins: Default::default(),
         }
     );
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    assert_eq!(asked.len(), 7, "{asked:?}");
+    assert_eq!(asked.len(), 8, "{asked:?}");
     assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
     let shown: Vec<_> = relics::settings_page::sections(Some(&client.server_settings()), 0)
         .into_iter()
@@ -309,7 +312,8 @@ fn a_server_at_revision_17_is_asked_for_each_key() {
     let (client, seen) = fake(json!({ "revision": 17, "items": [] }));
     block_on(client.load_server_settings()).unwrap();
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    let all: Vec<_> = settings::DEFINITIONS.iter().map(|definition| definition.key.to_string()).collect();
+    let mut all: Vec<_> = settings::DEFINITIONS.iter().map(|definition| definition.key.to_string()).collect();
+    all.dedup();
     assert_eq!(asked, all);
 }
 
@@ -353,7 +357,7 @@ fn without_batched_reads_the_keys_after_revision_1_are_unknown() {
     let (client, seen) = fake_capabilities(json!({ "supports_batched_effective": false }));
     block_on(client.load_server_settings()).unwrap();
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    assert_eq!(asked.len(), 7, "{asked:?}");
+    assert_eq!(asked.len(), 8, "{asked:?}");
     assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
     let shown = relics::settings_page::sections(Some(&client.server_settings()), 0);
     let rows: Vec<_> = shown.into_iter().flat_map(|(_, rows)| rows).collect();
@@ -854,4 +858,131 @@ fn without_the_capabilities_a_change_on_the_page_sends_no_write(cx: &mut gpui::T
     let seen = seen.lock().unwrap();
     assert!(!seen.iter().any(|request| request.method == "PUT"), "the page wrote without the capabilities");
     assert!(!seen.iter().any(|request| request.path.starts_with("settings/values")), "the page read without them");
+}
+
+#[test]
+fn a_sparse_subtitle_appearance_merges_over_the_defaults() {
+    let (client, _) = fake(json!({
+        "revision": 17,
+        "items": [{
+            "key": settings::APPEARANCE, "source": "profile_device", "definition_revision": 1,
+            "value": { "fontSize": "small", "fontColor": "#facc15", "backgroundOpacity": 73, "position": "nowhere" },
+        }],
+    }));
+    block_on(client.load_server_settings()).unwrap();
+    assert_eq!(
+        client.server_settings().subtitle_appearance,
+        SubtitleAppearance {
+            font_size: "small".into(),
+            font_color: "#facc15".into(),
+            background_opacity: 73,
+            ..SubtitleAppearance::default()
+        }
+    );
+    assert_eq!(
+        SubtitleAppearance::default(),
+        SubtitleAppearance {
+            font_size: "large".into(),
+            font_family: "sans-serif".into(),
+            font_color: "#ffffff".into(),
+            text_opacity: 100,
+            background_style: "box".into(),
+            background_color: "#000000".into(),
+            background_opacity: 75,
+            text_outline: false,
+            text_outline_color: "#000000".into(),
+            position: "bottom".into(),
+        }
+    );
+}
+
+#[test]
+fn a_font_family_from_another_client_reads_as_sans_serif() {
+    let mut store = ServerSettings::default();
+    store.set(settings::APPEARANCE, &json!({ "fontFamily": "Helvetica Neue", "fontSize": "xxlarge" }));
+    assert_eq!(store.subtitle_appearance.font_family, "sans-serif");
+    assert_eq!(store.subtitle_appearance.font_size, "xxlarge");
+}
+
+#[test]
+fn a_color_that_another_client_stored_in_capitals_is_its_swatch() {
+    let mut store = ServerSettings::default();
+    store.set(settings::APPEARANCE, &json!({ "fontColor": "#FACC15" }));
+    let color = appearance_row("fontColor");
+    assert_eq!(store.row_value(color), json!("#facc15"));
+    assert_eq!(color.options(&store.row_value(color)).len(), 9, "no extra choice next to Yellow");
+}
+
+/// The definition of the Subtitle appearance row of `field`.
+fn appearance_row(field: &str) -> &'static settings::Definition {
+    settings::DEFINITIONS.iter().find(|definition| definition.field == Some(field)).unwrap()
+}
+
+#[test]
+fn a_subtitle_appearance_save_writes_the_whole_value_for_this_device_and_deletes_no_row() {
+    let (client, seen) = common::fake(|request| match request.method.as_str() {
+        "PUT" => common::ok("update_setting_value_ok.json"),
+        _ if request.path == CAPABILITIES => json(200, capabilities(17)),
+        _ => {
+            let item = json!({
+                "key": settings::APPEARANCE, "source": "profile_device", "definition_revision": 1,
+                "value": { "fontSize": "small" },
+            });
+            json(200, json!({ "revision": 17, "items": [item] }).to_string())
+        }
+    });
+    block_on(client.load_server_settings()).unwrap();
+    seen.lock().unwrap().clear();
+    let mut store = client.server_settings();
+    let value = store.set_row(appearance_row("position"), json!("top"));
+    block_on(client.set_server_setting(settings::APPEARANCE, value)).unwrap();
+    assert_eq!(
+        requests(&seen),
+        [("PUT".into(), format!("settings/values/{}?scope=profile_device", settings::APPEARANCE))]
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].header("X-Silo-Device-Id"), Some(common::DEVICE_ID));
+    assert_eq!(
+        body(&seen[0]),
+        json!({ "value": {
+            "fontSize": "small", "fontFamily": "sans-serif", "fontColor": "#ffffff", "textOpacity": 100,
+            "backgroundStyle": "box", "backgroundColor": "#000000", "backgroundOpacity": 75, "textOutline": false,
+            "textOutlineColor": "#000000", "position": "top",
+        }})
+    );
+    let settings = client.server_settings();
+    assert_eq!(settings.subtitle_appearance.position, "top");
+    assert!(settings.origins[settings::APPEARANCE].is_device());
+}
+
+#[test]
+fn before_revision_14_the_text_opacity_row_hides() {
+    let (client, _) = fake_at(13, json!({ "revision": 13, "items": [] }));
+    block_on(client.load_server_settings()).unwrap();
+    let store = client.server_settings();
+    assert!(!store.knows(appearance_row("textOpacity")));
+    assert!(store.knows(appearance_row("fontSize")));
+}
+
+#[test]
+fn the_subtitle_appearance_choices_keep_a_stored_value_outside_the_list() {
+    let labels = |field: &str, current: serde_json::Value| -> Vec<String> {
+        appearance_row(field).options(&current).into_iter().map(|(_, label)| label).collect()
+    };
+    assert_eq!(labels("fontSize", json!("large")), ["Small", "Medium", "Large", "X-Large", "XX-Large"]);
+    assert_eq!(labels("backgroundStyle", json!("box")), ["Box", "Drop shadow", "Outline", "None"]);
+    assert_eq!(labels("position", json!("top")), ["Bottom", "Lower third", "Top"]);
+    assert_eq!(labels("backgroundColor", json!("#000000")), ["Black", "Dark Gray", "Navy", "Dark Red", "Dark Green"]);
+    assert_eq!(labels("fontColor", json!("#123456"))[0], "#123456");
+    assert_eq!(labels("textOutlineColor", json!("#ffffff")).len(), 9);
+    let text = labels("textOpacity", json!(100));
+    assert_eq!((text.len(), text[0].as_str(), text[9].as_str()), (10, "10%", "100%"));
+    let back = labels("backgroundOpacity", json!(73));
+    assert_eq!(back.len(), 12);
+    assert_eq!(back[0], "0%");
+    assert_eq!(back[7..10], ["70%", "73%", "80%"]);
+    assert!(appearance_row("backgroundOpacity").allows(&json!(73)));
+    assert!(!appearance_row("textOpacity").allows(&json!(0)));
+    assert!(appearance_row("fontColor").allows(&json!("#AbCdEf")));
+    assert!(!appearance_row("fontColor").allows(&json!("red")));
 }

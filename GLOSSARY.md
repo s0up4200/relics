@@ -184,6 +184,10 @@ A titled time range of a file version, from the file. The Chapters list in the P
 **Subtitle delay**:
 The time in seconds that the subtitles show later (positive) or earlier (negative) than the file says. It carries to the next episode of the same series, as the Track picker choice does. Another Item starts at zero.
 
+**Subtitle appearance**:
+How plain-text subtitles look on one device: the font, the size, the colors, the background and the position. Each device of a Profile keeps its own.
+_Avoid_: subtitle style, subtitle look
+
 **Version picker**:
 The list on the detail page where the user picks which file version of an Item plays.
 _Avoid_: quality picker

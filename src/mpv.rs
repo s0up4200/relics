@@ -15,7 +15,7 @@ use libmpv2::{Format, Mpv, mpv_end_file_reason};
 
 use crate::playback::{Input, tracks};
 use crate::player::{Handle, Media};
-use crate::settings::LocalSettings;
+use crate::settings::{LocalSettings, SubtitleAppearance};
 use crate::video::Surface;
 
 /// The media of the Player view. Each handle plays with no window, and the render thread of the Player view
@@ -98,6 +98,10 @@ impl Handle for Open {
 
     fn set_sub_delay(&self, seconds: f64) -> anyhow::Result<()> {
         Ok(self.player.set_sub_delay(seconds)?)
+    }
+
+    fn set_subtitle_appearance(&self, appearance: &SubtitleAppearance) -> anyhow::Result<()> {
+        Ok(self.player.set_subtitle_appearance(appearance)?)
     }
 }
 
@@ -224,6 +228,50 @@ impl Player {
         self.mpv.set_property("sub-delay", seconds)
     }
 
+    /// Sets the mpv options that draw plain-text subtitles, to match the look of the web player. mpv scales the
+    /// sizes and margins from a window height of 720, like the web. Styled (ASS) subtitles keep their own styles.
+    pub fn set_subtitle_appearance(&self, appearance: &SubtitleAppearance) -> Result<(), Error> {
+        let font_size = match appearance.font_size.as_str() {
+            "small" => "20",
+            "medium" => "26",
+            "xlarge" => "40",
+            "xxlarge" => "48",
+            _ => "32",
+        };
+        let style = appearance.background_style.as_str();
+        let (border_style, back_color, shadow_offset) = match style {
+            // The shadow offset is the margin of the background box.
+            "box" => ("background-box", color(&appearance.background_color, appearance.background_opacity), "4"),
+            // The black drop shadow of the web, at 90%.
+            "shadow" => ("outline-and-shadow", color("#000000", 90), "2"),
+            _ => ("outline-and-shadow", color("#000000", 0), "0"),
+        };
+        // mpv draws one outline, for the outline style and for Text outline.
+        let outline_size = if style == "outline" || appearance.text_outline { "2" } else { "0" };
+        // 7% and 12% of 720.
+        let (align, margin) = match appearance.position.as_str() {
+            "top" => ("top", "50"),
+            "lower-third" => ("bottom", "86"),
+            _ => ("bottom", "50"),
+        };
+        let options = [
+            ("sub-font-size", font_size),
+            ("sub-font", &appearance.font_family),
+            ("sub-color", &color(&appearance.font_color, appearance.text_opacity)),
+            ("sub-border-style", border_style),
+            ("sub-back-color", &back_color),
+            ("sub-shadow-offset", shadow_offset),
+            ("sub-outline-size", outline_size),
+            ("sub-outline-color", &color(&appearance.text_outline_color, 100)),
+            ("sub-align-y", align),
+            ("sub-margin-y", margin),
+        ];
+        for (name, value) in options {
+            self.mpv.set_property(name, value)?;
+        }
+        Ok(())
+    }
+
     /// The volume in percent, and whether the audio is muted.
     pub fn volume(&self) -> Result<(f64, bool), Error> {
         Ok((self.mpv.get_property("volume")?, self.mpv.get_property("mute")?))
@@ -260,6 +308,11 @@ impl Video {
             RenderParam::WaylandDisplay(wl_display),
         ])
     }
+}
+
+/// An mpv color `#AARRGGBB` from a `#rrggbb` color and an alpha in percent.
+fn color(rgb: &str, percent: u64) -> String {
+    format!("#{:02X}{}", (percent * 255 + 50) / 100, rgb.trim_start_matches('#').to_uppercase())
 }
 
 /// One `name=value` item of an mpv key-value list. The `%length%` prefix quotes the value,
