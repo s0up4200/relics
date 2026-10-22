@@ -53,3 +53,7 @@ hyper-util = { version = "=0.1.21", default-features = false, features = ["clien
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.7", features = ["test-support"] }
 http_client = { package = "gpui-pre-http-client", version = "=0.3.7", features = ["test-support"] }
+
+# Each unsafe block and unsafe impl needs a `// SAFETY:` comment that says why the code is sound.
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
