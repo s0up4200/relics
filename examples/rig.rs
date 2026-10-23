@@ -205,6 +205,8 @@ fn main() {
         std::process::exit(2);
     };
     std::fs::create_dir_all(&dir).expect("make the scratch directory");
+    // A sign-out in the rig window must not delete items of the real keyring.
+    relics::secrets::turn_off();
     let listener = TcpListener::bind("127.0.0.1:0").expect("listen on 127.0.0.1");
     let root = format!("http://{}/", listener.local_addr().unwrap());
     eprintln!("rig: fake Silo at {root}");
