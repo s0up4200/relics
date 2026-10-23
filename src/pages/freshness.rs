@@ -29,7 +29,7 @@ pub enum Change {
     Catalog { library: Option<String>, item: Option<String> },
     /// A Library was added, removed or changed. `None` is no Library.
     Libraries { library: Option<String> },
-    /// A Server setting of the Profile or of the account changed. `None` is no key.
+    /// A Server setting changed. `None` is no key.
     Settings { key: Option<String> },
 }
 
@@ -349,7 +349,8 @@ impl Pages {
 
     fn live(&mut self, change: LiveChange, cx: &mut Context<Self>) {
         match change {
-            LiveChange::Resync => self.refresh(&[Change::All], cx),
+            // The socket can have missed a change of a Server setting too.
+            LiveChange::Resync => self.refresh(&[Change::All, Change::Settings { key: None }], cx),
             LiveChange::UserState { item, series, progress: false } => {
                 self.refresh(&[Change::Item { item, series }], cx)
             }
@@ -426,6 +427,7 @@ impl Pages {
         }
         // Playback reads the Server settings at the start of each Item, so the client reads them also when no
         // Settings page shows. A Settings page that shows reads them itself.
+        // ponytail: a hidden Settings page reads them again when it shows, so that costs a second read.
         let settings = changes.iter().any(|change| matches!(change, Change::Settings { .. }));
         if settings && !(shown && matches!(self.page, Page::Settings(_))) {
             let client = self.client.clone();
@@ -505,6 +507,12 @@ mod tests {
         assert!(!Change::Item { item: Some("movie:m".into()), series: None }.reaches(&Deps::Recovery));
         assert!(!Change::Catalog { library: None, item: None }.reaches(&Deps::Recovery));
         assert!(!Change::Libraries { library: None }.reaches(&Deps::Recovery));
+        let setting = Change::Settings { key: None };
+        assert!(setting.reaches(&Deps::Settings));
+        assert!(Change::All.reaches(&Deps::Settings));
+        assert!(!setting.reaches(&Deps::Every), "a setting does not reload Home and the grids");
+        assert!(!setting.reaches(&Deps::Recovery));
+        assert!(!Change::Item { item: None, series: None }.reaches(&Deps::Settings));
     }
 
     #[test]

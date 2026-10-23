@@ -72,7 +72,8 @@ fn client(root: &str, seconds: u64, proxy: Option<Url>) -> Arc<Client> {
 }
 
 /// Plays the Server for one connection for each close code in `closes`. Each connection sends `hello`, a favorite
-/// event of another Profile, a favorite event of `movie:m<n>` for `p1`, and then a close frame with its code.
+/// event of another Profile, a favorite event of `movie:m<n>` for `p1`, a settings event of another Profile, and
+/// then a close frame with its code.
 /// `None` drops the connection with no close frame, as the Server does at the end of the connection time.
 fn serve(listener: TcpListener, closes: Vec<Option<CloseCode>>) -> (JoinHandle<()>, mpsc::Receiver<Seen>) {
     let (seen, saw) = mpsc::channel();
@@ -97,6 +98,10 @@ fn serve(listener: TcpListener, closes: Vec<Option<CloseCode>>) -> (JoinHandle<(
                     json!({"type": "event", "channel": "user_state", "event": "user_state.changed", "data": data});
                 socket.send(Message::text(event.to_string())).unwrap();
             }
+            let data = json!({"key": "playback.preferred_quality", "scope": "profile", "profile_id": "p2"});
+            let setting =
+                json!({"type": "event", "channel": "user_settings", "event": "user_settings.changed", "data": data});
+            socket.send(Message::text(setting.to_string())).unwrap();
             let Some(code) = code else {
                 continue;
             };

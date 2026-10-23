@@ -38,8 +38,7 @@ pub enum LiveChange {
     Catalog { library: Option<String>, item: Option<String> },
     /// A Library was added, removed or changed. `None` is no Library.
     Libraries { library: Option<String> },
-    /// A Server setting of the Profile or of the account changed on a client. The event has the key, never the
-    /// value. `None` is no key.
+    /// A Server setting changed on a client. The event has the key, never the value. `None` is no key.
     Settings { key: Option<String> },
 }
 
@@ -136,7 +135,7 @@ pub fn decode(text: &str, profile_id: &str) -> Frame {
             };
             LiveChange::UserState { item: id("content_id"), series: id("series_id"), progress }
         }
-        // A change with no Profile is a setting of the account, which also applies to this Profile.
+        // A change with no Profile applies to each Profile of the Account.
         ("event", "user_settings", "user_settings.changed")
             if id("profile_id").is_none_or(|changed| changed == profile_id) =>
         {
@@ -394,7 +393,7 @@ mod tests {
         let profile = serde_json::json!({"key": quality, "scope": "profile", "profile_id": "p1"});
         assert_eq!(changed(profile), settings(Some(quality)));
         let account = serde_json::json!({"key": "catalog.metadata_language", "scope": "account"});
-        assert_eq!(changed(account), settings(Some("catalog.metadata_language")), "no Profile is the account");
+        assert_eq!(changed(account), settings(Some("catalog.metadata_language")), "no Profile is the Account");
         assert_eq!(changed(serde_json::json!({})), settings(None));
         let other = serde_json::json!({"key": quality, "scope": "profile", "profile_id": "p2"});
         assert_eq!(changed(other), Frame::Other, "another Profile");

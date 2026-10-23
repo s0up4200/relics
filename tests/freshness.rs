@@ -309,20 +309,22 @@ fn catalog(library: Option<&str>) -> LiveChange {
 fn recovery_reloads_collections_my_requests_and_settings_after_a_failed_first_load(cx: &mut TestAppContext) {
     let (_, cx, server, changes, _) = rig(cx);
     for (row, path) in [(5, "collections/server"), (6, "requests/mine"), (7, "settings/values/effective")] {
+        // A Resync with the Settings page closed also reads the Server settings.
+        let before = server.count(path);
         server.fail(&[path]);
         open_row(cx, row);
-        assert_eq!(server.count(path), 1, "{path}: the first load fails");
+        assert_eq!(server.count(path) - before, 1, "{path}: the first load fails");
         server.fail(&[]);
         cx.run_until_parked();
-        assert_eq!(server.count(path), 1, "{path}: a failure alone does not retry");
+        assert_eq!(server.count(path) - before, 1, "{path}: a failure alone does not retry");
         send(cx, &changes, LiveChange::Resync);
-        assert_eq!(server.count(path), 2, "{path}: the recovery reloads it");
+        assert_eq!(server.count(path) - before, 2, "{path}: the recovery reloads it");
         send(cx, &changes, LiveChange::UserState { item: Some("movie:m".into()), series: None, progress: false });
         send(cx, &changes, catalog(None));
         cx.executor().advance_clock(Duration::from_secs(3));
         cx.run_until_parked();
         let expected = if path == "collections/server" { 3 } else { 2 };
-        assert_eq!(server.count(path), expected, "{path}: only a catalog change reaches the collections");
+        assert_eq!(server.count(path) - before, expected, "{path}: only a catalog change reaches the collections");
     }
 }
 
@@ -513,6 +515,15 @@ fn a_burst_of_settings_changes_reads_the_server_settings_one_time_with_the_setti
     cx.executor().advance_clock(Duration::from_secs(60));
     cx.run_until_parked();
     assert_eq!(server.count(effective), 1);
+}
+
+#[gpui::test]
+fn a_resync_reads_the_server_settings_with_the_settings_page_closed(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, client) = rig(cx);
+    *server.mode.lock().unwrap() = "always".into();
+    send(cx, &changes, LiveChange::Resync);
+    assert_eq!(server.count("settings/values/effective"), 1, "the socket can have missed a settings event");
+    assert_eq!(client.server_settings().subtitle_mode, SubtitleMode::Always);
 }
 
 #[gpui::test]
