@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
-use gpui::{App, Context, Entity, EntityId, Task};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Task};
 
 use super::{Page, Pages};
 use crate::api::live::LiveChange;
@@ -29,6 +29,8 @@ pub enum Change {
     Catalog { library: Option<String>, item: Option<String> },
     /// A Library was added, removed or changed. `None` is no Library.
     Libraries { library: Option<String> },
+    /// A Server setting of the Profile or of the account changed. `None` is no key.
+    Settings { key: Option<String> },
 }
 
 /// The changes that reach a part.
@@ -46,8 +48,10 @@ pub enum Deps {
     Catalog(Option<String>),
     /// The Library list of the sidebar.
     Libraries,
-    /// Only a full refresh: My requests, the Server settings and the request permission.
+    /// Only a full refresh: My requests and the request permission.
     Recovery,
+    /// The Server settings of the Settings page: a full refresh and a change of a Server setting.
+    Settings,
 }
 
 impl Change {
@@ -57,8 +61,10 @@ impl Change {
             _ => true,
         };
         match (self, deps) {
-            (Change::All, _) | (_, Deps::Every) => true,
-            (_, Deps::Recovery) => false,
+            (Change::All, _) => true,
+            (Change::Settings { .. }, deps) => *deps == Deps::Settings,
+            (_, Deps::Every) => true,
+            (_, Deps::Recovery | Deps::Settings) => false,
             (Change::Item { .. }, Deps::Library(_)) => true,
             (Change::Catalog { library, .. } | Change::Libraries { library }, Deps::Library(id)) => {
                 same(library, &Some(id.clone()))
@@ -229,12 +235,20 @@ impl Throttle {
     }
 }
 
+/// A burst of changes of Server settings, for example a save of several keys on another client, waits this long
+/// for one read.
+const SETTINGS_WINDOW: Duration = Duration::from_secs(1);
+
 /// The freshness state of the pages.
 pub struct Coordinator {
     /// The window of the progress events of the Live updates: 30 seconds.
     progress: Throttle,
     /// The window of the catalog and Library events: 2 seconds.
     catalog: Throttle,
+    /// The changes of Server settings that wait for the end of their window.
+    settings: Vec<Change>,
+    /// The timer of the window of the Server settings.
+    settings_window: Task<()>,
     /// The Library list of the sidebar.
     libraries: Fresh,
     /// The pages show in the window, not behind a full-screen picker or the PIN entry.
@@ -248,6 +262,8 @@ impl Default for Coordinator {
         Self {
             progress: Throttle::new(Duration::from_secs(30)),
             catalog: Throttle::new(Duration::from_secs(2)),
+            settings: Vec::new(),
+            settings_window: Task::ready(()),
             libraries: Fresh { shown: true, ..Fresh::default() },
             shown: true,
             _live: Task::ready(()),
@@ -346,6 +362,7 @@ impl Pages {
             LiveChange::Libraries { library } => {
                 self.throttled(|this| &mut this.freshness.catalog, Change::Libraries { library }, cx)
             }
+            LiveChange::Settings { key } => self.setting_changed(Change::Settings { key }, cx),
         }
     }
 
@@ -371,6 +388,25 @@ impl Pages {
         });
     }
 
+    /// Holds a change of a Server setting. The first change opens a window, and the end of the window lets the held
+    /// changes through together, so that a burst costs one read.
+    fn setting_changed(&mut self, change: Change, cx: &mut Context<Self>) {
+        let first = self.freshness.settings.is_empty();
+        if !self.freshness.settings.contains(&change) {
+            self.freshness.settings.push(change);
+        }
+        if first {
+            self.freshness.settings_window = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SETTINGS_WINDOW).await;
+                this.update(cx, |this, cx| {
+                    let held = std::mem::take(&mut this.freshness.settings);
+                    this.refresh(&held, cx);
+                })
+                .ok();
+            });
+        }
+    }
+
     /// Reloads each retained part that `changes` reach one time. A part that shows reloads now, and keeps its scroll
     /// position and focus. A hidden part reloads when it shows again.
     pub fn refresh(&mut self, changes: &[Change], cx: &mut Context<Self>) {
@@ -387,6 +423,18 @@ impl Pages {
             self.back.iter().cloned().chain(kept).chain(std::iter::once(Page::Home(self.home.clone()))).collect();
         for page in &hidden {
             walk.page(page, false, cx);
+        }
+        // Playback reads the Server settings at the start of each Item, so the client reads them also when no
+        // Settings page shows. A Settings page that shows reads them itself.
+        let settings = changes.iter().any(|change| matches!(change, Change::Settings { .. }));
+        if settings && !(shown && matches!(self.page, Page::Settings(_))) {
+            let client = self.client.clone();
+            cx.background_spawn(async move {
+                if let Err(err) = client.load_server_settings().await {
+                    eprintln!("relics: cannot read the Server settings again: {err}");
+                }
+            })
+            .detach();
         }
     }
 

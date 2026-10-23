@@ -117,7 +117,7 @@ fn the_client_subscribes_with_the_ticket_and_connects_again_after_a_planned_clos
     let changes: Vec<_> = block_on(client.live_updates().take(2).collect());
     assert_eq!(changes, [favorite("movie:m1"), favorite("movie:m2")], "no Resync, and no event of another Profile");
     server.join().unwrap();
-    let subscribe = r#"{"type":"subscribe","channels":["catalog","user_state"]}"#;
+    let subscribe = r#"{"type":"subscribe","channels":["catalog","user_state","user_settings"]}"#;
     for n in 1..=2 {
         let (path, protocols, first) = saw.recv().unwrap();
         assert_eq!(path, "/api/v2/events/ws", "no ticket in the URL");
