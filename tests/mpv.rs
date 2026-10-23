@@ -2,6 +2,7 @@
 //! 127.0.0.1. The stub serves the test video from tests/media/ (scripts/make-test-video.sh).
 #![allow(clippy::disallowed_types)]
 
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -554,11 +555,46 @@ fn file_of(raw: &Raw) -> Option<char> {
     }
 }
 
+/// The first value of a replaced file that arrives after the `end-file` of its entry and before the next `end-file`,
+/// with the id of the entry. mpv marks each observed value as stale when it queues `end-file`, and never returns a
+/// stale value (`notify_property_events` and `gen_property_change_event` in player/client.c of mpv 0.41.0). Before
+/// the `end-file`, a value of the old file can still arrive after the next `loadfile` returns (issue #148). The
+/// window uses only the order of the event thread, so it compares no times across threads.
+fn value_after_its_end_file<'a>(log: &'a [Raw], files: &HashMap<i64, char>) -> Option<(&'a Raw, i64)> {
+    log.iter().enumerate().find_map(|(at, raw)| {
+        let Raw::End { id, .. } = raw else { return None };
+        let rest = &log[at + 1..];
+        let until = rest.iter().position(|r| matches!(r, Raw::End { .. })).unwrap_or(rest.len());
+        rest[..until].iter().find(|r| file_of(r).is_some_and(|file| files.get(id) == Some(&file))).map(|r| (r, *id))
+    })
+}
+
 #[test]
-fn no_value_of_the_old_file_arrives_after_the_next_load_returns_and_no_end_before_the_file_loads() {
+fn a_value_of_the_old_file_counts_as_late_only_after_its_end_file() {
+    let time_pos = |value: &str| Raw::Property("time-pos".into(), Some(value.into()));
+    // The log of CI run 40021177535 around the failure: entry 8 is 'b', and entry 9 is 'a'.
+    let mut log = vec![
+        Raw::Start(8),
+        Raw::Property("track-list/count".into(), Some("4".into())),
+        Raw::Loaded,
+        time_pos("0.000000"),
+        Raw::Loadfile(9),
+        time_pos("0.040000"),
+        Raw::Property("track-list/count".into(), Some("0".into())),
+        Raw::End { id: 8, reason: REASON_STOP },
+        Raw::Start(9),
+    ];
+    let files = HashMap::from([(8, 'b'), (9, 'a')]);
+    assert_eq!(value_after_its_end_file(&log, &files), None);
+    log.push(time_pos("0.080000"));
+    assert_eq!(value_after_its_end_file(&log, &files), Some((&time_pos("0.080000"), 8)));
+}
+
+#[test]
+fn no_value_of_the_old_file_arrives_after_its_end_file_and_no_end_before_the_file_loads() {
     let stub = stub(usize::MAX);
     let rec = recorder();
-    let mut files = std::collections::HashMap::new();
+    let mut files = HashMap::new();
     // File 'a' reaches its end about 2 s after it loads, so the replacements fall before, at and after its end.
     for delay in [0, 500, 1000, 1500, 1900, 1950, 2000, 2050, 2100, 2500] {
         let from = rec.log().len();
@@ -571,17 +607,11 @@ fn no_value_of_the_old_file_arrives_after_the_next_load_returns_and_no_end_befor
         rec.wait(at, |r| *r == Raw::Loaded);
     }
     let log = rec.log();
-    let loads: Vec<(usize, i64)> = log
-        .iter()
-        .enumerate()
-        .filter_map(|(at, r)| if let Raw::Loadfile(id) = r { Some((at, *id)) } else { None })
-        .collect();
-    for pair in loads.windows(2) {
-        let ((_, old), (at, _)) = (pair[0], pair[1]);
-        let until = loads.iter().find(|(next, _)| *next > at).map_or(log.len(), |(next, _)| *next);
-        let late = log[at..until].iter().find(|r| file_of(r) == Some(files[&old]));
-        assert!(late.is_none(), "{late:?} of entry {old} after the next loadfile in {}", show(&log));
-    }
+    // Each replaced entry has its end-file, so the check below has a window for each one.
+    let ends = log.iter().filter(|r| matches!(r, Raw::End { .. })).count();
+    assert_eq!(ends, files.len() - 1, "{}", show(&log));
+    let late = value_after_its_end_file(&log, &files);
+    assert!(late.is_none(), "{late:?}: a value of the entry after its end-file in {}", show(&log));
     for (at, raw) in log.iter().enumerate() {
         let Raw::Start(id) = raw else { continue };
         let loaded = at + log[at..].iter().position(|r| *r == Raw::Loaded).unwrap();
