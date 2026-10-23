@@ -84,6 +84,8 @@ fn opening_a_profile_reads_the_server_settings() {
     assert_eq!(
         ServerSettings { origins: Default::default(), ..client.server_settings() },
         ServerSettings {
+            preferred_quality: "auto".into(),
+            max_bitrate_kbps: None,
             audio_language: Some("ja".into()),
             subtitle_language: Some("en".into()),
             subtitle_mode: SubtitleMode::Always,
@@ -100,6 +102,8 @@ fn opening_a_profile_reads_the_server_settings() {
     let seen = seen.lock().unwrap();
     let (url, profile) = (&seen[1].url, seen[1].header("X-Profile-Id"));
     let keys = [
+        "playback.preferred_quality",
+        "playback.max_bitrate_kbps",
         "playback.intro_skip_mode",
         "playback.auto_skip_recap",
         "playback.auto_skip_credits",
@@ -188,6 +192,8 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
     assert_eq!(
         ServerSettings { origins: Default::default(), ..client.server_settings() },
         ServerSettings {
+            preferred_quality: "auto".into(),
+            max_bitrate_kbps: None,
             audio_language: Some("ja".into()),
             subtitle_language: Some("en".into()),
             subtitle_mode: SubtitleMode::Always,
@@ -202,7 +208,7 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
         }
     );
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    assert_eq!(asked.len(), 8, "{asked:?}");
+    assert_eq!(asked.len(), 10, "{asked:?}");
     assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
     let shown: Vec<_> = relics::settings_page::sections(Some(&client.server_settings()), 0)
         .into_iter()
@@ -357,7 +363,7 @@ fn without_batched_reads_the_keys_after_revision_1_are_unknown() {
     let (client, seen) = fake_capabilities(json!({ "supports_batched_effective": false }));
     block_on(client.load_server_settings()).unwrap();
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    assert_eq!(asked.len(), 8, "{asked:?}");
+    assert_eq!(asked.len(), 10, "{asked:?}");
     assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
     let shown = relics::settings_page::sections(Some(&client.server_settings()), 0);
     let rows: Vec<_> = shown.into_iter().flat_map(|(_, rows)| rows).collect();
@@ -457,9 +463,11 @@ fn an_old_profiles_write_does_not_discard_the_new_profiles_settings() {
     assert_eq!(client.server_settings().subtitle_mode, SubtitleMode::Always);
 }
 
-/// A fake server at revision 17 that answers each write with `status`. The client has read the settings.
+/// A fake server at revision 17 that answers each write with `status`, and each delete with 204. The client has
+/// read the settings.
 fn fake_write(status: u16) -> (Client, Log) {
     let (client, seen) = common::fake(move |request| match request.method.as_str() {
+        "DELETE" => json(204, String::new()),
         "PUT" => {
             let reply = json!({
                 "key": "playback.subtitle_mode", "scope": "profile", "profile_id": "p-owner",
@@ -684,6 +692,48 @@ fn no_preference_sends_null() {
 }
 
 #[test]
+fn no_limit_deletes_the_profile_row_of_the_maximum_bitrate() {
+    let (client, seen) = fake_write(200);
+    block_on(client.set_server_setting("playback.max_bitrate_kbps", json!(6000))).unwrap();
+    assert_eq!(client.server_settings().max_bitrate_kbps, Some(6000));
+    block_on(client.set_server_setting("playback.max_bitrate_kbps", serde_json::Value::Null)).unwrap();
+    assert_eq!(client.server_settings().max_bitrate_kbps, None);
+    assert_eq!(
+        requests(&seen),
+        [
+            ("PUT".into(), "settings/values/playback.max_bitrate_kbps?scope=profile".into()),
+            ("DELETE".into(), "settings/values/playback.max_bitrate_kbps?scope=profile".into()),
+        ]
+    );
+}
+
+#[test]
+fn a_saved_quality_is_read_again_so_that_the_household_cap_applies() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let read = AtomicBool::new(false);
+    let (client, _) = common::fake(move |request| match request.method.as_str() {
+        "PUT" => common::ok("update_setting_value_ok.json"),
+        _ if request.path == CAPABILITIES => json(200, capabilities(17)),
+        _ => {
+            let item = if read.swap(true, Ordering::SeqCst) {
+                json!({
+                    "key": "playback.preferred_quality", "value": "1080p", "source": "profile", "definition_revision": 1,
+                    "constrained": true, "stored_value": "2160p",
+                })
+            } else {
+                value("playback.preferred_quality", json!("auto"))
+            };
+            json(200, json!({ "revision": 17, "items": [item] }).to_string())
+        }
+    });
+    block_on(client.load_server_settings()).unwrap();
+    block_on(client.set_server_setting("playback.preferred_quality", json!("2160p"))).unwrap();
+    let settings = client.server_settings();
+    assert_eq!(settings.preferred_quality, "1080p");
+    assert!(settings.origins["playback.preferred_quality"].constrained);
+}
+
+#[test]
 fn a_failed_write_keeps_the_old_value() {
     let (client, _) = fake_write(500);
     assert!(block_on(client.set_server_setting("playback.auto_play_next", json!(false))).is_err());
@@ -711,6 +761,8 @@ fn a_stored_language_outside_the_list_stays_a_choice() {
 fn each_value_reads_back_as_the_value_that_was_set() {
     let mut store = ServerSettings::default();
     for (key, value) in [
+        ("playback.preferred_quality", json!("1080p")),
+        ("playback.max_bitrate_kbps", json!(6000)),
         ("playback.audio_language", json!("ja")),
         ("playback.subtitle_language", json!("en-GB")),
         ("playback.subtitle_mode", json!("always")),
@@ -1025,7 +1077,8 @@ fn a_slow_subtitle_appearance_save_does_not_undo_a_newer_change(cx: &mut gpui::T
                                 held.await.ok();
                                 saved.lock().unwrap().push(value);
                                 done.send(()).ok();
-                            }) as futures::future::BoxFuture<'static, ()>);
+                            })
+                                as futures::future::BoxFuture<'static, ()>);
                             ended.await.ok();
                         }
                         None => saved.lock().unwrap().push(value),
@@ -1047,8 +1100,8 @@ fn a_slow_subtitle_appearance_save_does_not_undo_a_newer_change(cx: &mut gpui::T
     });
     cx.simulate_keystrokes(",");
     cx.run_until_parked();
-    // Font size is the ninth row. Its save waits at the server while the position changes.
-    cx.simulate_keystrokes("j j j j j j j j l");
+    // Font size is the eleventh row. Its save waits at the server while the position changes.
+    cx.simulate_keystrokes("j j j j j j j j j j l");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j j j j j j j j l");
     cx.run_until_parked();

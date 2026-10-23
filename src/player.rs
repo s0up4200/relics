@@ -200,7 +200,9 @@ impl Controller {
         self.in_view = self.media.is_some();
         // The Subtitle delay carries as the Track picker choice does. The handle keeps it, so another Item resets
         // it.
-        if !self.playing.start(item.clone(), client.server_settings())
+        let settings = client.server_settings();
+        let quality = settings.quality();
+        if !self.playing.start(item.clone(), settings)
             && let Some(Err(err)) = self.handle.as_ref().map(|handle| handle.set_sub_delay(0.0))
         {
             eprintln!("relics: cannot reset the subtitle delay: {err}");
@@ -224,7 +226,7 @@ impl Controller {
         let (content_id, file_id) = (item.content_id, item.file_id);
         // A new Item drops this task, so the reply of an older start never reaches the new session.
         self.starting = Some(cx.spawn(async move |this, cx| {
-            let input = match client.start_version(&content_id, file_id.as_deref(), start).await {
+            let input = match client.start_version(&content_id, file_id.as_deref(), start, &quality).await {
                 Ok(decision) => {
                     let wait = cx.background_executor().timer(DETAIL_WAIT);
                     let item = match futures::future::select(detail, wait).await {
@@ -689,9 +691,9 @@ impl Controller {
         self.session()?.plan()
     }
 
-    /// The step label of the Quality ladder that plays.
+    /// The quality preference of the Playback session: the preferred quality, or the step of a Quality ladder pick.
     pub fn quality(&self) -> &str {
-        self.session().map_or(crate::playback::ORIGINAL, Session::quality)
+        self.session().map_or("", Session::quality)
     }
 
     /// The file versions of the Item that plays.

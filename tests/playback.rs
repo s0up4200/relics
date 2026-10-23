@@ -4,7 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use relics::api::types::{Decision, Marker, MarkerKind};
 use relics::playback::tracks::{self, Choice, Kind, Track};
-use relics::playback::{Access, Command, Headers, Input, Operation, Replan, STILL_WATCHING_AFTER, Sample, Session};
+use relics::playback::{
+    Access, Command, Headers, Input, Operation, Quality, Replan, STILL_WATCHING_AFTER, Sample, Session,
+};
 use relics::settings::{IntroSkipMode, ServerSettings, SubtitleMode};
 use serde_json::Value;
 
@@ -710,7 +712,7 @@ fn replan(position: f64) -> Command {
         selected_tracks: serde_json::json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
         position,
         operation: Operation::FailureRecovery,
-        quality: "original".into(),
+        quality: Quality { preference: "auto".into(), bandwidth_cap_kbps: None },
     })
 }
 
@@ -720,7 +722,7 @@ fn quality_change(label: &str, position: f64) -> Command {
     Command::Replan(Replan {
         attempted_plan_keys: vec![],
         operation: Operation::QualityChange,
-        quality: label.into(),
+        quality: Quality { preference: label.into(), bandwidth_cap_kbps: None },
         ..failure
     })
 }
@@ -732,7 +734,7 @@ fn a_quality_step_replans_at_the_position_and_plays_the_new_plan_in_the_same_ses
         session.step(Input::PickQuality("1080p-medium".into()), at(2)),
         vec![quality_change("1080p-medium", 3600.0)]
     );
-    assert_eq!(session.quality(), "original", "the step plays only once the server answers");
+    assert_eq!(session.quality(), "auto", "the step plays only once the server answers");
     // The transcode starts at source 3600 s, which is player time 0.
     assert_eq!(session.step(Input::Replanned(Some(replanned())), at(3)), vec![load(&transcode(), headers(), 0.0)]);
     assert_eq!(session.quality(), "1080p-medium");
@@ -746,7 +748,7 @@ fn a_failed_quality_step_keeps_the_plan_that_plays() {
     let mut session = failed_at(3600.0);
     session.step(Input::PickQuality("720p-low".into()), at(2));
     assert_eq!(session.step(Input::Replanned(None), at(3)), vec![], "no Lost connection: the old stream still plays");
-    assert_eq!(session.quality(), "original");
+    assert_eq!(session.quality(), "auto");
     assert_eq!(session.step(Input::LoadFailed, at(4)), vec![Command::Refresh], "the recovery chain starts as usual");
 }
 
@@ -764,7 +766,7 @@ fn the_quality_that_plays_needs_no_replan_and_a_recovery_keeps_the_chosen_qualit
     let [Command::Replan(Replan { operation: Operation::FailureRecovery, quality, .. })] = &commands[..] else {
         panic!("{commands:?}");
     };
-    assert_eq!(quality, "1080p-medium");
+    assert_eq!(quality.preference, "1080p-medium");
 }
 
 #[test]

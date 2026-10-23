@@ -859,12 +859,13 @@ pub fn quality_rows(versions: &[wire::FileVersion], plan: &wire::PlaybackPlan, q
         };
         (Pick::Version(version.file_id.to_string()), row)
     });
+    let current = crate::playback::current_step(plan, quality);
     let steps = plan.available_qualities.iter().map(|step| {
         let row = Choice {
             label: step_name(step),
             detail: step.bitrate_kbps.map(bitrate).unwrap_or_default(),
             tags: Vec::new(),
-            current: step.label == quality,
+            current: current.is_some_and(|current| current.label == step.label),
         };
         (Pick::Quality(step.label.clone()), row)
     });
@@ -942,7 +943,7 @@ pub fn info_rows(
     let file = version.and_then(|v| v.file_name.clone().or_else(|| v.file_path.clone())).unwrap_or_default();
     let container = source.container.clone().or_else(|| version.map(|v| v.container.clone()));
     let size = version.map(|v| detail::file_size(v.file_size)).unwrap_or_default();
-    let step = plan.available_qualities.iter().find(|step| step.label == quality).map(step_name);
+    let step = crate::playback::current_step(plan, quality).map(step_name);
     let source_bitrate = source.bitrate_kbps.or(version.map(|v| v.bitrate)).filter(|kbps| *kbps > 0);
     let rows = [
         ("File", vec![file]),
@@ -1073,6 +1074,31 @@ mod tests {
         let single = quality_rows(&[version("42", "1080p")], &plan(json!({})), "original");
         let single: Vec<_> = single.iter().map(|(pick, row)| (pick.clone(), row.label.as_str(), row.current)).collect();
         assert_eq!(single, [(Pick::Quality("original".into()), "Original", true)]);
+    }
+
+    #[test]
+    fn the_quality_list_marks_the_step_that_the_server_plays_for_auto_and_a_plain_resolution() {
+        let marked = |plan: &wire::PlaybackPlan, quality| -> Vec<String> {
+            let rows = quality_rows(&[], plan, quality);
+            rows.into_iter().filter(|(_, row)| row.current).map(|(_, row)| row.label).collect()
+        };
+        let ladder = json!([
+            {"label": "original", "bitrate_kbps": 25_600, "height": 2160, "preserves_source": true},
+            {"label": "1080p-medium", "bitrate_kbps": 6000, "height": 1080, "preserves_source": false},
+            {"label": "720p-low", "bitrate_kbps": 1500, "height": 720, "preserves_source": false},
+            {"label": "480p", "bitrate_kbps": 1500, "height": 480, "preserves_source": false},
+        ]);
+        let direct = plan(json!({"delivery": "original_http", "available_qualities": ladder}));
+        assert_eq!(marked(&direct, "auto"), ["Original"], "the server keeps the source");
+        let transcode = |bitrate: i64, height: i64| {
+            plan(
+                json!({"available_qualities": ladder, "effective_recipe": {"bitrate_kbps": bitrate, "height": height}}),
+            )
+        };
+        assert_eq!(marked(&transcode(6000, 1080), "1080p"), ["1080p-medium"]);
+        assert_eq!(marked(&transcode(1500, 480), "auto"), ["480p"], "the height decides between equal bitrates");
+        assert_eq!(marked(&transcode(4321, 1080), "auto"), Vec::<String>::new(), "a bitrate of no step");
+        assert_eq!(marked(&transcode(6000, 1080), "720p-low"), ["720p-low"], "a pick of the ladder");
     }
 
     #[test]

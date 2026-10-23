@@ -69,8 +69,43 @@ pub struct Replan {
     /// The last good source position.
     pub position: f64,
     pub operation: Operation,
-    /// The `quality_preference`: a step label of the Quality ladder, or `original`.
-    pub quality: String,
+    /// The quality of the Playback session.
+    pub quality: Quality,
+}
+
+/// The quality that a start request or a replan asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quality {
+    /// The `quality_preference`: the preferred quality, or the step label of a Quality ladder pick.
+    pub preference: String,
+    /// The `bandwidth_cap_kbps`. `None` is no limit.
+    pub bandwidth_cap_kbps: Option<u64>,
+}
+
+/// The step of the Quality ladder that plays in `plan`, for the quality preference `quality` of the session.
+///
+/// - A step with the label of the preference plays.
+/// - Else, when the server keeps the source video, the source step plays.
+/// - Else the step at the bitrate of the transcode plays. When two steps have that bitrate, the step at the height
+///   of the transcode plays. With `auto` or a plain resolution, the server encodes at the bitrate of the Medium step
+///   of the resolution.
+// ponytail: an exact bitrate match. Under a bitrate cap the server encodes below each step, so no step is marked.
+// Read a step label from the plan when the server sends one.
+pub fn current_step<'a>(plan: &'a wire::PlaybackPlan, quality: &str) -> Option<&'a wire::AvailableQualityV3> {
+    let steps = &plan.available_qualities;
+    if let Some(step) = steps.iter().find(|step| step.label == quality) {
+        return Some(step);
+    }
+    if Delivery::from(plan.delivery.clone()) != Delivery::ServerTranscodeHls {
+        return steps.iter().find(|step| step.preserves_source);
+    }
+    let delivered = &plan.effective_recipe;
+    let at_bitrate = || {
+        steps
+            .iter()
+            .filter(|s| !s.preserves_source && delivered.bitrate_kbps.is_some_and(|b| s.bitrate_kbps == Some(b)))
+    };
+    at_bitrate().find(|step| step.height == delivered.height).or_else(|| at_bitrate().next())
 }
 
 /// Why the app asks for a new plan.
@@ -81,9 +116,6 @@ pub enum Operation {
     /// The user picked a step on the Quality ladder: `quality_change`.
     QualityChange,
 }
-
-/// The quality preference of a start request: the file as it is, with no lower step of the Quality ladder.
-pub const ORIGINAL: &str = "original";
 
 #[derive(Debug)]
 pub enum Input {
@@ -292,7 +324,7 @@ pub struct Session {
     carry: Carry,
     /// The part of `carry` that mpv has not played yet in the file that loads.
     pending: Carry,
-    /// The step of the Quality ladder that plays.
+    /// The quality preference of the session: the preferred quality, or the step of a Quality ladder pick.
     quality: String,
     /// The step of a quality change replan that runs.
     changing: Option<String>,
@@ -347,6 +379,7 @@ impl Session {
     pub fn new(runtime: Option<f64>, settings: ServerSettings) -> Self {
         Self {
             runtime,
+            quality: settings.preferred_quality.clone(),
             settings,
             plan: None,
             ended: false,
@@ -373,7 +406,6 @@ impl Session {
             tracks: Vec::new(),
             carry: Carry::default(),
             pending: Carry::default(),
-            quality: ORIGINAL.into(),
             changing: None,
             up_next: None,
             cancelled: false,
@@ -419,9 +451,14 @@ impl Session {
         self.plan.as_ref().map(|plan| &plan.wire)
     }
 
-    /// The step label of the Quality ladder that plays.
+    /// The quality preference of the session: the preferred quality, or the step of a Quality ladder pick.
     pub fn quality(&self) -> &str {
         &self.quality
+    }
+
+    /// What a replan asks for: the quality preference of the session and the bitrate cap that it started with.
+    fn replan_quality(&self) -> Quality {
+        Quality { preference: self.quality.clone(), ..self.settings.quality() }
     }
 
     pub fn step(&mut self, input: Input, now: SystemTime) -> Vec<Command> {
@@ -642,7 +679,8 @@ impl Session {
                 let Some(plan) = &self.plan else {
                     return Vec::new();
                 };
-                if label == self.quality || self.changing.is_some() || self.chain != Chain::Healthy {
+                let plays = current_step(&plan.wire, &self.quality).is_some_and(|step| step.label == label);
+                if plays || self.changing.is_some() || self.chain != Chain::Healthy {
                     return Vec::new();
                 }
                 let replan = Replan {
@@ -655,7 +693,7 @@ impl Session {
                     selected_tracks: plan.selected_tracks.clone(),
                     position: self.position.unwrap_or(self.load_start) + plan.offset,
                     operation: Operation::QualityChange,
-                    quality: label.clone(),
+                    quality: Quality { preference: label.clone(), ..self.settings.quality() },
                 };
                 self.changing = Some(label);
                 vec![Command::Replan(replan)]
@@ -854,7 +892,7 @@ impl Session {
                     selected_tracks: plan.selected_tracks.clone(),
                     position: good + plan.offset,
                     operation: Operation::FailureRecovery,
-                    quality: self.quality.clone(),
+                    quality: self.replan_quality(),
                 })]
             }
             Chain::Replanned => self.lose(),
