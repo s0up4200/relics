@@ -153,7 +153,7 @@ impl EventEmitter<AccountAction> for SettingsPage {}
 
 impl Reload for SettingsPage {
     fn deps(&self) -> Vec<Deps> {
-        vec![Deps::Recovery]
+        vec![Deps::Settings]
     }
 
     fn fresh(&mut self, _: usize) -> &mut Fresh {

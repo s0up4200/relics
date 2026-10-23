@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
-use gpui::{App, Context, Entity, EntityId, Task};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Task};
 
 use super::{Page, Pages};
 use crate::api::live::LiveChange;
@@ -29,6 +29,8 @@ pub enum Change {
     Catalog { library: Option<String>, item: Option<String> },
     /// A Library was added, removed or changed. `None` is no Library.
     Libraries { library: Option<String> },
+    /// A Server setting changed. `None` is no key.
+    Settings { key: Option<String> },
 }
 
 /// The changes that reach a part.
@@ -46,8 +48,10 @@ pub enum Deps {
     Catalog(Option<String>),
     /// The Library list of the sidebar.
     Libraries,
-    /// Only a full refresh: My requests, the Server settings and the request permission.
+    /// Only a full refresh: My requests and the request permission.
     Recovery,
+    /// The Server settings of the Settings page: a full refresh and a change of a Server setting.
+    Settings,
 }
 
 impl Change {
@@ -57,8 +61,10 @@ impl Change {
             _ => true,
         };
         match (self, deps) {
-            (Change::All, _) | (_, Deps::Every) => true,
-            (_, Deps::Recovery) => false,
+            (Change::All, _) => true,
+            (Change::Settings { .. }, deps) => *deps == Deps::Settings,
+            (_, Deps::Every) => true,
+            (_, Deps::Recovery | Deps::Settings) => false,
             (Change::Item { .. }, Deps::Library(_)) => true,
             (Change::Catalog { library, .. } | Change::Libraries { library }, Deps::Library(id)) => {
                 same(library, &Some(id.clone()))
@@ -195,9 +201,11 @@ pub trait Reload: Sized + 'static {
 pub struct Moved;
 
 /// Lets the first change through at once and opens a window of `period`. The window holds the changes that come in
-/// it, and lets them through together at its end. A window that held changes opens the next window.
+/// it, and lets them through together at its end. A window that held changes opens the next window. When `leading`
+/// is false, the window also holds the first change.
 struct Throttle {
     period: Duration,
+    leading: bool,
     open: bool,
     held: Vec<Change>,
     /// The timer of the open window.
@@ -206,19 +214,25 @@ struct Throttle {
 
 impl Throttle {
     fn new(period: Duration) -> Self {
-        Self { period, open: false, held: Vec::new(), window: Task::ready(()) }
+        Self { period, leading: true, open: false, held: Vec::new(), window: Task::ready(()) }
     }
 
-    /// Returns true when `change` runs now and a window opens. Otherwise the open window holds it.
-    fn push(&mut self, change: Change) -> bool {
-        if !self.open {
-            self.open = true;
-            return true;
+    /// A window that also holds its first change.
+    fn trailing(period: Duration) -> Self {
+        Self { leading: false, ..Self::new(period) }
+    }
+
+    /// Returns the changes to run now when a window opens, or `None` when the open window holds `change`.
+    fn push(&mut self, change: Change) -> Option<Vec<Change>> {
+        let opens = !self.open;
+        self.open = true;
+        if opens && self.leading {
+            return Some(vec![change]);
         }
         if !self.held.contains(&change) {
             self.held.push(change);
         }
-        false
+        opens.then(Vec::new)
     }
 
     /// The end of the window: the changes to run now. The next window stays open when there are any.
@@ -235,6 +249,9 @@ pub struct Coordinator {
     progress: Throttle,
     /// The window of the catalog and Library events: 2 seconds.
     catalog: Throttle,
+    /// The window of the Server settings events: 1 second, so that a burst, for example a save of several keys on
+    /// another client, costs one read.
+    settings: Throttle,
     /// The Library list of the sidebar.
     libraries: Fresh,
     /// The pages show in the window, not behind a full-screen picker or the PIN entry.
@@ -248,6 +265,7 @@ impl Default for Coordinator {
         Self {
             progress: Throttle::new(Duration::from_secs(30)),
             catalog: Throttle::new(Duration::from_secs(2)),
+            settings: Throttle::trailing(Duration::from_secs(1)),
             libraries: Fresh { shown: true, ..Fresh::default() },
             shown: true,
             _live: Task::ready(()),
@@ -333,7 +351,8 @@ impl Pages {
 
     fn live(&mut self, change: LiveChange, cx: &mut Context<Self>) {
         match change {
-            LiveChange::Resync => self.refresh(&[Change::All], cx),
+            // The socket can have missed a change of a Server setting too.
+            LiveChange::Resync => self.refresh(&[Change::All, Change::Settings { key: None }], cx),
             LiveChange::UserState { item, series, progress: false } => {
                 self.refresh(&[Change::Item { item, series }], cx)
             }
@@ -346,15 +365,20 @@ impl Pages {
             LiveChange::Libraries { library } => {
                 self.throttled(|this| &mut this.freshness.catalog, Change::Libraries { library }, cx)
             }
+            LiveChange::Settings { key } => {
+                self.throttled(|this| &mut this.freshness.settings, Change::Settings { key }, cx)
+            }
         }
     }
 
     /// Runs `change` through the window that `window` picks.
     fn throttled(&mut self, window: fn(&mut Self) -> &mut Throttle, change: Change, cx: &mut Context<Self>) {
-        if !window(self).push(change.clone()) {
+        let Some(now) = window(self).push(change) else {
             return;
+        };
+        if !now.is_empty() {
+            self.refresh(&now, cx);
         }
-        self.refresh(&[change], cx);
         let period = window(self).period;
         window(self).window = cx.spawn(async move |this, cx| {
             loop {
@@ -387,6 +411,19 @@ impl Pages {
             self.back.iter().cloned().chain(kept).chain(std::iter::once(Page::Home(self.home.clone()))).collect();
         for page in &hidden {
             walk.page(page, false, cx);
+        }
+        // Playback reads the Server settings at the start of each Item, so the client reads them also when no
+        // Settings page shows. A Settings page that shows reads them itself.
+        // ponytail: a hidden Settings page reads them again when it shows, so that costs a second read.
+        let settings = changes.iter().any(|change| matches!(change, Change::Settings { .. }));
+        if settings && !(shown && matches!(self.page, Page::Settings(_))) {
+            let client = self.client.clone();
+            cx.background_spawn(async move {
+                if let Err(err) = client.load_server_settings().await {
+                    eprintln!("relics: cannot read the Server settings again: {err}");
+                }
+            })
+            .detach();
         }
     }
 
@@ -457,6 +494,12 @@ mod tests {
         assert!(!Change::Item { item: Some("movie:m".into()), series: None }.reaches(&Deps::Recovery));
         assert!(!Change::Catalog { library: None, item: None }.reaches(&Deps::Recovery));
         assert!(!Change::Libraries { library: None }.reaches(&Deps::Recovery));
+        let setting = Change::Settings { key: None };
+        assert!(setting.reaches(&Deps::Settings));
+        assert!(Change::All.reaches(&Deps::Settings));
+        assert!(!setting.reaches(&Deps::Every), "a setting does not reload Home and the grids");
+        assert!(!setting.reaches(&Deps::Recovery));
+        assert!(!Change::Item { item: None, series: None }.reaches(&Deps::Settings));
     }
 
     #[test]
@@ -464,15 +507,28 @@ mod tests {
         let mut throttle = Throttle::new(Duration::from_secs(30));
         let a = Change::Catalog { library: Some("1".into()), item: None };
         let b = Change::Catalog { library: Some("2".into()), item: None };
-        assert!(throttle.push(a.clone()), "the first change runs now");
-        assert!(!throttle.push(a.clone()));
-        assert!(!throttle.push(b.clone()));
-        assert!(!throttle.push(a.clone()));
+        assert_eq!(throttle.push(a.clone()), Some(vec![a.clone()]), "the first change runs now");
+        assert_eq!(throttle.push(a.clone()), None);
+        assert_eq!(throttle.push(b.clone()), None);
+        assert_eq!(throttle.push(a.clone()), None);
         assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one of each change");
-        assert!(!throttle.push(a.clone()), "the trailing batch opened the next window");
+        assert_eq!(throttle.push(a.clone()), None, "the trailing batch opened the next window");
         assert_eq!(throttle.tick(), std::slice::from_ref(&a));
         assert_eq!(throttle.tick(), [], "a quiet window closes");
-        assert!(throttle.push(a), "the next change runs now");
+        assert_eq!(throttle.push(a.clone()), Some(vec![a]), "the next change runs now");
+    }
+
+    #[test]
+    fn a_trailing_window_holds_its_first_change_too() {
+        let mut throttle = Throttle::trailing(Duration::from_secs(1));
+        let a = Change::Settings { key: Some("a".into()) };
+        let b = Change::Settings { key: None };
+        assert_eq!(throttle.push(a.clone()), Some(vec![]), "a window opens and nothing runs now");
+        assert_eq!(throttle.push(b.clone()), None);
+        assert_eq!(throttle.push(a.clone()), None);
+        assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one of each change");
+        assert_eq!(throttle.tick(), [], "a quiet window closes");
+        assert_eq!(throttle.push(a), Some(vec![]), "the next change opens a new window");
     }
 
     #[test]

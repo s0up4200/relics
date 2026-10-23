@@ -38,6 +38,8 @@ pub enum LiveChange {
     Catalog { library: Option<String>, item: Option<String> },
     /// A Library was added, removed or changed. `None` is no Library.
     Libraries { library: Option<String> },
+    /// A Server setting changed on a client. The event has the key, never the value. `None` is no key.
+    Settings { key: Option<String> },
 }
 
 /// One text frame of the socket.
@@ -95,7 +97,7 @@ impl Lifetime {
 /// The close code that follows `access_changed`.
 const ACCESS_CHANGED: u16 = 4001;
 
-const SUBSCRIBE: &str = r#"{"type":"subscribe","channels":["catalog","user_state"]}"#;
+const SUBSCRIBE: &str = r#"{"type":"subscribe","channels":["catalog","user_state","user_settings"]}"#;
 
 #[derive(Deserialize)]
 struct Ticket {
@@ -116,8 +118,8 @@ struct Envelope {
     data: Value,
 }
 
-/// Reads one text frame. `profile_id` is the Profile of the socket: a `user_state` event of another Profile is
-/// `Other`.
+/// Reads one text frame. `profile_id` is the Profile of the socket: a `user_state` or `user_settings` event of
+/// another Profile is `Other`.
 pub fn decode(text: &str, profile_id: &str) -> Frame {
     let Ok(frame) = serde_json::from_str::<Envelope>(text) else {
         return Frame::Other;
@@ -132,6 +134,12 @@ pub fn decode(text: &str, profile_id: &str) -> Frame {
                 _ => return Frame::Other,
             };
             LiveChange::UserState { item: id("content_id"), series: id("series_id"), progress }
+        }
+        // A change with no Profile applies to each Profile of the Account.
+        ("event", "user_settings", "user_settings.changed")
+            if id("profile_id").is_none_or(|changed| changed == profile_id) =>
+        {
+            LiveChange::Settings { key: id("key") }
         }
         ("event", "catalog", "catalog.item.changed" | "metadata.updated" | "library.item_added") => {
             LiveChange::Catalog { library: id("library_id"), item: id("content_id") }
@@ -375,6 +383,20 @@ mod tests {
         assert_eq!(decode(r#"{"type":"snapshot","channel":"catalog","data":null}"#, "p1"), Frame::Other);
         assert_eq!(decode("not json", "p1"), Frame::Other);
         assert_eq!(decode(r#"{"type":"access_changed"}"#, "p1"), Frame::AccessChanged);
+    }
+
+    #[test]
+    fn a_settings_event_of_the_profile_or_of_the_account_names_its_key() {
+        let changed = |data| decode(&event("user_settings", "user_settings.changed", data), "p1");
+        let settings = |key: Option<&str>| Frame::Change(LiveChange::Settings { key: key.map(Into::into) });
+        let quality = "playback.preferred_quality";
+        let profile = serde_json::json!({"key": quality, "scope": "profile", "profile_id": "p1"});
+        assert_eq!(changed(profile), settings(Some(quality)));
+        let account = serde_json::json!({"key": "catalog.metadata_language", "scope": "account"});
+        assert_eq!(changed(account), settings(Some("catalog.metadata_language")), "no Profile is the Account");
+        assert_eq!(changed(serde_json::json!({})), settings(None));
+        let other = serde_json::json!({"key": quality, "scope": "profile", "profile_id": "p2"});
+        assert_eq!(changed(other), Frame::Other, "another Profile");
     }
 
     #[test]
