@@ -6,7 +6,8 @@
 //!   line of error text. The app keeps no queue of failed writes. Each key has one write at a time, so that an
 //!   older write cannot end after a newer one on the server. A change during a write waits, and the next write
 //!   sends the value that the page shows then. A row whose value comes from the device row
-//!   of this device says "Set for this device". A row of a key that the server does not know does not show.
+//!   of this device says "Set for this device". A row whose value the household cap lowered says "Limited to
+//!   <value> by the household". A row of a key that the server does not know does not show.
 //!   When Relics cannot read the settings contract capabilities, or they do not allow the settings, each change
 //!   fails.
 //! - Subtitle appearance: one row for each field. A change writes the whole Subtitle appearance at the device row
@@ -105,10 +106,17 @@ pub fn sections(server: Option<&ServerSettings>, pairs: usize) -> Vec<(&'static 
     sections
 }
 
-/// The one-line note below the row of a Server setting, when its Effective value is not the Profile value.
-pub fn note(server: &ServerSettings, definition: &Definition) -> Option<&'static str> {
-    let device = server.origins.get(definition.key).is_some_and(|origin| origin.is_device());
-    (device && definition.field.is_none()).then_some("Set for this device")
+/// The one-line note below the row of a Server setting, when its Effective value is not the Profile value. The
+/// household cap wins over the device row.
+pub fn note(server: &ServerSettings, definition: &Definition) -> Option<String> {
+    let origin = server.origins.get(definition.key).filter(|_| definition.field.is_none())?;
+    if origin.constrained {
+        let value = server.row_value(definition);
+        let options = definition.options(&value);
+        let label = options.iter().find(|(v, _)| *v == value).map_or(value.to_string(), |(_, label)| label.clone());
+        return Some(format!("Limited to {label} by the household"));
+    }
+    origin.is_device().then(|| "Set for this device".to_string())
 }
 
 pub struct SettingsPage {
@@ -320,7 +328,8 @@ impl SettingsPage {
                     this.write(next, cx);
                 } else {
                     // The store has the value that the write left: the new value, the old value after a failed
-                    // write, or the value of the read after a failed delete of the device row.
+                    // write, or the value of the read after a failed delete of the device row or after a saved
+                    // quality.
                     if let Some(server) = &mut this.server {
                         server.copy_key(key, &this.client.server_settings());
                     }
@@ -450,7 +459,7 @@ impl SettingsPage {
         &self,
         row: usize,
         label: SharedString,
-        note: Option<&'static str>,
+        note: Option<String>,
         value: SharedString,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -681,6 +690,7 @@ mod tests {
             })
             .collect();
         let expected = [
+            ("Quality", vec!["Preferred quality", "Maximum bitrate"]),
             ("Skipping", vec!["Skip intros", "Auto-skip recaps", "Auto-skip credits"]),
             ("Next episode", vec!["Auto-play next episode"]),
             (
@@ -718,7 +728,47 @@ mod tests {
         server.origins.insert(recaps.key, Origin { source: "profile".into(), ..Origin::default() });
         assert_eq!(note(&server, recaps), None);
         server.origins.insert(recaps.key, Origin { source: "profile_device".into(), ..Origin::default() });
-        assert_eq!(note(&server, recaps), Some("Set for this device"));
+        assert_eq!(note(&server, recaps).as_deref(), Some("Set for this device"));
+    }
+
+    #[test]
+    fn a_row_that_the_household_limits_says_so_with_the_effective_value() {
+        let quality = definition("playback.preferred_quality").unwrap();
+        let mut server = ServerSettings::default();
+        server.set(quality.key, &json!("1080p"));
+        let capped = Origin { source: "profile_device".into(), constrained: true, ..Origin::default() };
+        server.origins.insert(quality.key, capped);
+        assert_eq!(note(&server, quality).as_deref(), Some("Limited to 1080p by the household"));
+    }
+
+    #[test]
+    fn the_bitrate_has_no_limit_then_the_web_steps_and_keeps_a_stored_value_outside_them() {
+        let bitrate = definition("playback.max_bitrate_kbps").unwrap();
+        let labels = |current| bitrate.options(&current).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
+        let web = [
+            "No limit", "1.5 Mbps", "2 Mbps", "4 Mbps", "6 Mbps", "10 Mbps", "15 Mbps", "20 Mbps", "40 Mbps",
+            "60 Mbps", "100 Mbps", "200 Mbps",
+        ];
+        assert_eq!(labels(Value::Null), web);
+        assert_eq!(bitrate.options(&Value::Null)[0].0, Value::Null);
+        assert_eq!(labels(json!(3000))[3], "3 Mbps");
+        assert!(bitrate.allows(&json!(100)) && bitrate.allows(&Value::Null) && !bitrate.allows(&json!(99)));
+    }
+
+    #[test]
+    fn a_stored_quality_outside_the_list_stays_selected_as_the_first_choice() {
+        let quality = definition("playback.preferred_quality").unwrap();
+        let mut server = ServerSettings::default();
+        server.set(quality.key, &json!("1080p-high"));
+        assert_eq!(server.preferred_quality, "1080p-high");
+        let options = quality.options(&json!("1080p-high"));
+        assert_eq!(options[0], (json!("1080p-high"), "1080p-high".to_string()));
+        assert_eq!(
+            options[1..].iter().map(|(_, label)| label.as_str()).collect::<Vec<_>>(),
+            ["Auto", "480p", "720p", "1080p", "2160p / 4K", "Original quality"]
+        );
+        server.set(quality.key, &json!(""));
+        assert_eq!(server.preferred_quality, "auto", "an empty value is not a quality");
     }
 
     #[test]

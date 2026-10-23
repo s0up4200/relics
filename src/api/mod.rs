@@ -24,7 +24,7 @@ use types::Marker;
 pub use types::{Decision, Problem};
 
 use crate::artwork::Rung;
-use crate::playback::{Access, Operation, Replan, Sample};
+use crate::playback::{Access, Operation, Quality, Replan, Sample};
 use crate::settings::{self, ServerSettings};
 
 /// A Silo server that the user added. The app knows it by `id`, the stable id that
@@ -441,9 +441,11 @@ impl Client {
     }
 
     /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
-    /// when the write succeeds. A null value is "No preference". When the Effective value came from the device
-    /// row of this device, the device row would still win, so the write also deletes it, as the web does. When
-    /// that delete fails, the save fails, and the client reads the settings again to get the value that applies.
+    /// when the write succeeds. A null value is "No preference", and for the maximum bitrate "No limit", which
+    /// deletes the profile row. When the Effective value came from the device row of this device, the device row
+    /// would still win, so the write also deletes it, as the web does. When that delete fails, the save fails, and
+    /// the client reads the settings again to get the value that applies. After a saved quality or bitrate, the
+    /// client also reads the settings again, because the household cap can lower the value.
     /// The Subtitle appearance belongs to one device, as on the web: it is written at the device row of this
     /// device, and nothing is deleted.
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
@@ -459,9 +461,17 @@ impl Client {
         let device_row = scope == "profile" && settings.origins.get(key).is_some_and(|origin| origin.is_device());
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let path = format!("settings/values/{key}?scope={scope}");
-        let body = serde_json::json!({ "value": value });
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
-        let mut saved = self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await.map(|_| ());
+        // "No limit" deletes the profile row, as the web does. A 404 is a row that is already gone.
+        let mut saved = if value.is_null() && key == "playback.max_bitrate_kbps" {
+            match self.call::<()>(Method::DELETE, &path, None).await {
+                Err(err) if err.status() == Some(404) => Ok(()),
+                deleted => deleted,
+            }
+        } else {
+            let body = serde_json::json!({ "value": value });
+            self.call::<wire::SettingValue>(Method::PUT, &path, Some(body)).await.map(|_| ())
+        };
         let mut delete_failed = false;
         // The delete goes with the headers of the active Profile, so after a switch it would remove the device
         // row of the new Profile.
@@ -483,11 +493,14 @@ impl Client {
             // A write of the old Profile must not invalidate the read of the new Profile.
             self.settings_writes.fetch_add(1, Ordering::SeqCst);
         }
-        if same_profile && delete_failed {
-            // The profile row holds the new value, but the device row can still win.
-            if let Err(err) = self.load_server_settings().await {
-                eprintln!("relics: cannot read the Server settings again: {err}");
-            }
+        // The profile row holds the new value, but the device row can still win, or the household cap can lower
+        // the quality or the bitrate.
+        let capped = matches!(key, "playback.preferred_quality" | "playback.max_bitrate_kbps");
+        if same_profile
+            && (delete_failed || saved.is_ok() && capped)
+            && let Err(err) = self.load_server_settings().await
+        {
+            eprintln!("relics: cannot read the Server settings again: {err}");
         }
         saved
     }
@@ -624,7 +637,7 @@ impl Client {
     /// another step of the Quality ladder, at the position of `replan`.
     pub async fn replan(&self, replan: &Replan) -> Result<Decision, Error> {
         let installation_id = self.installation_id.lock().unwrap().clone();
-        let mut body = client_description(&self.features.lock().unwrap());
+        let mut body = client_description(&self.features.lock().unwrap(), &replan.quality);
         let keys = &replan.attempted_plan_keys;
         let operation = match replan.operation {
             Operation::FailureRecovery => "failure_recovery",
@@ -633,7 +646,6 @@ impl Client {
         // The server takes at most 16 keys and a count of at most 8.
         let mut fields = serde_json::json!({
             "operation": operation,
-            "quality_preference": replan.quality,
             "installation_id": installation_id,
             "playback_attempt_id": replan.attempt_id,
             "replan_request_id": uuid::Uuid::new_v4().to_string(),
@@ -660,9 +672,8 @@ impl Client {
                 let Some(item) = item else {
                     return Err(Error::Problem(problem));
                 };
-                return self
-                    .start_version(&item.content_id, item.file_id.as_deref(), Some(replan.position.max(0.0)))
-                    .await;
+                let position = Some(replan.position.max(0.0));
+                return self.start_version(&item.content_id, item.file_id.as_deref(), position, &replan.quality).await;
             }
             result => result?,
         };
@@ -684,10 +695,11 @@ impl Client {
         Ok(())
     }
 
-    /// Starts a Playback session for the Item `content_id`. With no `start_position`, the
-    /// server starts at the saved resume point of the Profile.
+    /// Starts a Playback session for the Item `content_id`, with the quality of the Server settings. With no
+    /// `start_position`, the server starts at the saved resume point of the Profile.
     pub async fn start_playback(&self, content_id: &str, start_position: Option<f64>) -> Result<Decision, Error> {
-        self.start_version(content_id, None, start_position).await
+        let quality = self.server_settings().quality();
+        self.start_version(content_id, None, start_position, &quality).await
     }
 
     /// The file versions of the Item `content_id`. The first one is the default.
@@ -705,6 +717,7 @@ impl Client {
         content_id: &str,
         file_id: Option<&str>,
         start_position: Option<f64>,
+        quality: &Quality,
     ) -> Result<Decision, Error> {
         let versions = self.versions(content_id).await?;
         let chosen = file_id.and_then(|id| versions.iter().find(|v| *v.file_id == *id));
@@ -724,7 +737,7 @@ impl Client {
         *self.features.lock().unwrap() = features.clone();
         let profile_id = self.auth.lock().unwrap().profile_id.clone().unwrap_or_default();
         let attempt = uuid::Uuid::new_v4().to_string();
-        let mut body = start_request(&version.file_id, &installation_id, &profile_id, &attempt, &features);
+        let mut body = start_request(&version.file_id, &installation_id, &profile_id, &attempt, &features, quality);
         if let Some(position) = start_position {
             body["start_position"] = position.into();
         }
@@ -1378,8 +1391,9 @@ fn start_request(
     profile_id: &str,
     attempt_id: &str,
     features: &[&str],
+    quality: &Quality,
 ) -> serde_json::Value {
-    let mut body = client_description(features);
+    let mut body = client_description(features, quality);
     let fields = serde_json::json!({
         "file_id": file_id,
         "installation_id": installation_id,
@@ -1391,8 +1405,9 @@ fn start_request(
     body
 }
 
-/// The fields that a start request and a replan request share: what the client is and what it can play.
-fn client_description(features: &[&str]) -> serde_json::Value {
+/// The fields that a start request and a replan request share: what the client is, what it can play, and the
+/// quality that it asks for.
+fn client_description(features: &[&str], quality: &Quality) -> serde_json::Value {
     let video = ["h264", "hevc", "av1", "vp9", "vp8", "mpeg2video", "mpeg4", "vc1"];
     let audio = ["aac", "mp3", "opus", "vorbis", "flac", "alac", "ac3", "eac3", "dts", "truehd", "pcm"];
     let containers = ["mp4", "mkv", "webm", "mov", "avi", "mpegts", "m2ts"];
@@ -1420,10 +1435,10 @@ fn client_description(features: &[&str]) -> serde_json::Value {
             "transformations": [],
         })
     };
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "protocol_version": 3,
         "client_features": features,
-        "quality_preference": "original",
+        "quality_preference": quality.preference,
         "metered": false,
         "client_capabilities": {
             "video_evidence": "declared",
@@ -1450,7 +1465,11 @@ fn client_description(features: &[&str]) -> serde_json::Value {
                 "hls": delivery(&["hls"], &[]),
             },
         },
-    })
+    });
+    if let Some(cap) = quality.bandwidth_cap_kbps {
+        body["bandwidth_cap_kbps"] = cap.into();
+    }
+    body
 }
 
 // Sign-in with a provider choice and device sign-in (#34).

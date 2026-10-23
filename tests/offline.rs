@@ -11,7 +11,7 @@ use common::{Log, Reply, Seen, fixture, json, ok, reply};
 use futures::executor::block_on;
 use relics::api::{Client, Decision, Error, Trouble};
 use relics::library::retry_delay;
-use relics::playback::{Operation, Replan, Sample};
+use relics::playback::{Operation, Quality, Replan, Sample};
 use serde_json::{Value, json};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -179,7 +179,8 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position_with_the_s
         p if p.ends_with("/replan") => problem(410, "playback_session_ended"),
         _ => playback(req),
     });
-    block_on(client.start_version("movie:heat-1995", Some("120"), None)).unwrap();
+    let auto = Quality { preference: "auto".into(), bandwidth_cap_kbps: None };
+    block_on(client.start_version("movie:heat-1995", Some("120"), None, &auto)).unwrap();
     let replan = Replan {
         session_id: SESSION.into(),
         attempt_id: "attempt".into(),
@@ -189,7 +190,7 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position_with_the_s
         selected_tracks: json!({}),
         position: 1234.5,
         operation: Operation::FailureRecovery,
-        quality: "original".into(),
+        quality: Quality { preference: "720p-low".into(), bandwidth_cap_kbps: Some(2000) },
     };
     let decision = block_on(client.replan(&replan)).unwrap();
     assert!(matches!(decision, Decision::Playable { .. }), "{decision:?}");
@@ -198,6 +199,10 @@ fn a_replan_for_an_ended_session_starts_a_new_session_at_the_position_with_the_s
         seen.iter().filter(|s| s.path == "playback/start").map(|s| serde_json::from_str(&s.body).unwrap()).collect();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[1]["start_position"], 1234.5);
+    assert_eq!(
+        (&starts[1]["quality_preference"], &starts[1]["bandwidth_cap_kbps"]),
+        (&json!("720p-low"), &json!(2000))
+    );
     assert_eq!((&starts[1]["file_id"], &starts[1]["allow_alternate_versions"]), (&json!("120"), &json!(false)));
 }
 

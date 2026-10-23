@@ -197,6 +197,8 @@ struct Server {
     detail: Arc<Mutex<Option<Value>>>,
     /// The stored Subtitle appearance that the effective read gives.
     appearance: Arc<Mutex<Value>>,
+    /// The other items of the effective read.
+    settings: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Server {
@@ -268,7 +270,9 @@ impl Server {
                     "key": "playback.subtitle_appearance", "source": "profile_device", "definition_revision": 1,
                     "value": self.appearance.lock().unwrap().clone(),
                 });
-                json(200, json!({ "revision": 17, "items": [item] }).to_string())
+                let mut items = self.settings.lock().unwrap().clone();
+                items.push(item);
+                json(200, json!({ "revision": 17, "items": items }).to_string())
             }
             ("POST", "playback/start") => {
                 let mut starts = self.starts.lock().unwrap();
@@ -918,4 +922,40 @@ fn the_subtitle_appearance_applies_when_the_player_opens_and_a_change_applies_fr
     let top = SubtitleAppearance { position: "top".into(), ..SubtitleAppearance::default() };
     assert_eq!(rig.fake.0.borrow().appearances, [(0, small), (1, top)]);
     assert_eq!(rig.fake.count(|op| *op == Op::Open), 1);
+}
+
+/// The `quality_preference` and the `bandwidth_cap_kbps` of each request whose path ends with `suffix`.
+fn qualities(rig: &Rig, suffix: &str) -> Vec<(Value, Value)> {
+    let requests = rig.server.requests("POST", "playback/");
+    let bodies = requests.iter().filter(|r| r.path.ends_with(suffix)).map(|r| serde_json::from_str(&r.body).unwrap());
+    bodies.map(|body: Value| (body["quality_preference"].clone(), body["bandwidth_cap_kbps"].clone())).collect()
+}
+
+#[gpui::test]
+fn a_session_asks_for_the_preferred_quality_and_the_cap_and_a_ladder_pick_lasts_until_the_next_item(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig(cx);
+    *rig.server.settings.lock().unwrap() = vec![
+        json!({ "key": "playback.preferred_quality", "value": "720p", "source": "profile", "definition_revision": 1 }),
+        json!({ "key": "playback.max_bitrate_kbps", "value": 4000, "source": "profile", "definition_revision": 1 }),
+    ];
+    futures::executor::block_on(rig.client.load_server_settings()).unwrap();
+    let preferred = (json!("720p"), json!(4000));
+    let pick = (json!("1080p-medium"), json!(4000));
+    rig.play(movie(), cx);
+    rig.loaded(7200.0, 300.0, cx);
+    rig.step(Input::PickQuality("original".into()), cx);
+    assert_eq!(qualities(&rig, "/replan"), [], "the source plays already");
+    rig.step(Input::PickQuality("1080p-medium".into()), cx);
+    rig.loaded(7200.0, 30.0, cx);
+    rig.events([Input::LoadFailed], cx);
+    rig.events([Input::LoadFailed], cx);
+    assert_eq!(qualities(&rig, "/replan"), [pick.clone(), pick.clone()], "the pick, then a recovery");
+    rig.play(episode(1), cx);
+    rig.loaded(3420.0, 50.0, cx);
+    rig.events([Input::LoadFailed], cx);
+    rig.events([Input::LoadFailed], cx);
+    assert_eq!(qualities(&rig, "playback/start"), [preferred.clone(), preferred.clone()]);
+    assert_eq!(qualities(&rig, "/replan")[2..], [preferred], "the next Item starts with the preferred quality");
 }

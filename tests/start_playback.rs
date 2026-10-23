@@ -6,7 +6,7 @@ mod common;
 use common::{Log, fixture, json, jwt};
 use futures::executor::block_on;
 use relics::api::{Client, Decision, types};
-use relics::playback::{Operation, Replan, Sample};
+use relics::playback::{Operation, Quality, Replan, Sample};
 use serde_json::{Value, json};
 
 const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -14,8 +14,17 @@ const SESSION: &str = "11111111-1111-4111-8111-111111111111";
 /// A fake Silo server at `https://silo.test/media/`. It answers the versions and capability
 /// requests with server fixtures, and the start request with `start`, a fixture name.
 fn fake(start: &'static str) -> (Client, Log) {
+    fake_with(start, json!([]))
+}
+
+/// Like `fake`, and the effective read of the Server settings gives the items `settings`.
+fn fake_with(start: &'static str, settings: Value) -> (Client, Log) {
     let (http, seen) = common::http(move |req| {
         let (status, body) = match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "settings/contract/capabilities") => (200, fixture("get_settings_contract_capabilities_ok.json")),
+            ("GET", p) if p.starts_with("settings/values/effective?") => {
+                (200, json!({ "revision": 17, "items": settings }).to_string())
+            }
             ("GET", "catalog/items/movie:heat-1995/versions") => (200, fixture("list_catalog_item_versions_ok.json")),
             ("GET", "catalog/items/movie:two-files/versions") => (200, two_versions()),
             ("GET", "playback/capabilities") => (200, fixture("playback_capability_available.json")),
@@ -94,14 +103,39 @@ fn the_start_request_matches_the_snapshot() {
 }
 
 #[test]
+fn with_no_stored_quality_the_start_asks_for_auto_and_no_bandwidth_cap() {
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!(body["quality_preference"], json!("auto"));
+    assert!(body.get("bandwidth_cap_kbps").is_none(), "{body}");
+}
+
+#[test]
+fn the_start_asks_for_the_effective_quality_and_bitrate_also_under_a_household_cap() {
+    let capped = json!({
+        "key": "playback.preferred_quality", "value": "1080p", "source": "profile", "definition_revision": 1,
+        "constrained": true, "stored_value": "2160p", "permitted_values": ["auto", "480p", "720p", "1080p"],
+    });
+    let bitrate =
+        json!({ "key": "playback.max_bitrate_kbps", "value": 6000, "source": "profile", "definition_revision": 1 });
+    let (client, seen) = fake_with("playback_start_opaque_ids.json", json!([capped, bitrate]));
+    block_on(client.load_server_settings()).unwrap();
+    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    let body = body_of(&seen, "POST", "playback/start");
+    assert_eq!((&body["quality_preference"], &body["bandwidth_cap_kbps"]), (&json!("1080p"), &json!(6000)));
+}
+
+#[test]
 fn the_start_request_asks_for_the_chosen_version_and_keeps_it() {
     let (client, seen) = fake("playback_start_opaque_ids.json");
-    block_on(client.start_version("movie:two-files", Some("121"), None)).unwrap();
+    let auto = Quality { preference: "auto".into(), bandwidth_cap_kbps: None };
+    block_on(client.start_version("movie:two-files", Some("121"), None, &auto)).unwrap();
     let body = body_of(&seen, "POST", "playback/start");
     assert_eq!((&body["file_id"], &body["allow_alternate_versions"]), (&json!("121"), &json!(false)));
     // With no choice, the first version plays and the server can pick another one.
     let (client, seen) = fake("playback_start_opaque_ids.json");
-    block_on(client.start_version("movie:two-files", None, None)).unwrap();
+    block_on(client.start_version("movie:two-files", None, None, &auto)).unwrap();
     let body = body_of(&seen, "POST", "playback/start");
     assert_eq!((&body["file_id"], body.get("allow_alternate_versions")), (&json!("120"), None));
 }
@@ -227,7 +261,7 @@ fn a_replan_sends_the_failed_plan_and_the_last_good_position() {
         selected_tracks: json!({ "audio": { "id": "file:42:audio:0", "index": 0 } }),
         position: 3600.0,
         operation: Operation::FailureRecovery,
-        quality: "original".into(),
+        quality: Quality { preference: "auto".into(), bandwidth_cap_kbps: None },
     };
     let Decision::Playable { plan, .. } = block_on(client.replan(&replan)).unwrap() else {
         panic!("not playable");
@@ -263,16 +297,16 @@ fn a_quality_step_replans_with_its_label_and_no_failure() {
         selected_tracks: json!({}),
         position: 1800.0,
         operation: Operation::QualityChange,
-        quality: "1080p-medium".into(),
+        quality: Quality { preference: "1080p-medium".into(), bandwidth_cap_kbps: Some(4000) },
     };
     block_on(client.replan(&replan)).unwrap();
     let body = body_of(&seen, "POST", "/replan");
     assert_eq!(body["operation"], json!("quality_change"));
-    assert_eq!(body["quality_preference"], json!("1080p-medium"));
+    assert_eq!((&body["quality_preference"], &body["bandwidth_cap_kbps"]), (&json!("1080p-medium"), &json!(4000)));
     assert_eq!(body["position_seconds"], json!(1800.0));
     assert_eq!((&body["attempted_plan_keys"], &body["attempt_count"]), (&json!([]), &json!(1)));
     assert!(body.get("failure").is_none(), "nothing failed");
-    assert_eq!(body_of(&seen, "POST", "playback/start")["quality_preference"], json!("original"));
+    assert_eq!(body_of(&seen, "POST", "playback/start")["quality_preference"], json!("auto"));
 }
 
 #[test]

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::wire;
+use crate::playback::Quality;
 
 /// A group of the Settings page. The order is the order of the groups on the web Settings pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +64,14 @@ pub enum Choices {
     OnOff,
     /// The values with their labels, in the order of the web Settings pages.
     List(&'static [(&'static str, &'static str)]),
+    /// Like `List`, but a stored value that is not in the list is the first choice, so that it stays selected.
+    Open(&'static [(&'static str, &'static str)]),
     /// A `#rrggbb` color. The swatches of the web Settings pages, with their names. A stored color that is not a
     /// swatch is the first choice, so that it stays selected.
     Color(&'static [(&'static str, &'static str)]),
+    /// Null ("No limit") or a bitrate in kbps from 100 to 200000. The choices are these steps, in Mbps. A stored
+    /// bitrate that is not a step is a choice between them, so that it stays selected.
+    Kbps(&'static [u64]),
     /// A percent from 0 (or 1 when the first step is above 0) to 100. The choices are the steps of 10% from the
     /// first step. A stored value between two steps is a choice between them, so that it stays selected.
     Percent(u64),
@@ -93,9 +99,11 @@ impl Definition {
             Choices::Language => value.is_null() || value.is_string(),
             Choices::OnOff => value.is_boolean(),
             Choices::List(list) => list.iter().any(|&(v, _)| value.as_str() == Some(v)),
+            Choices::Open(_) => value.as_str().is_some_and(|v| !v.is_empty()),
             Choices::Color(_) => value.as_str().is_some_and(|color| {
                 color.len() == 7 && color.starts_with('#') && color[1..].bytes().all(|b| b.is_ascii_hexdigit())
             }),
+            Choices::Kbps(_) => value.is_null() || value.as_u64().is_some_and(|n| (100..=200_000).contains(&n)),
             Choices::Percent(first) => value.as_u64().is_some_and(|n| n >= first.min(1) && n <= 100),
         }
     }
@@ -118,14 +126,23 @@ impl Definition {
             }
             Choices::OnOff => vec![(Value::Bool(true), "On".to_string()), (Value::Bool(false), "Off".to_string())],
             Choices::List(list) => pairs(list),
-            Choices::Color(list) => {
+            Choices::Color(list) | Choices::Open(list) => {
                 let mut options = pairs(list);
-                if let Some(color) = current.as_str()
-                    && !list.iter().any(|&(hex, _)| hex == color)
+                if let Some(stored) = current.as_str()
+                    && !list.iter().any(|&(value, _)| value == stored)
                 {
-                    options.insert(0, (current.clone(), color.to_string()));
+                    options.insert(0, (current.clone(), stored.to_string()));
                 }
                 options
+            }
+            Choices::Kbps(list) => {
+                let mut steps = list.to_vec();
+                if let Some(n) = current.as_u64().filter(|n| !steps.contains(n)) {
+                    steps.push(n);
+                    steps.sort_unstable();
+                }
+                let steps = steps.into_iter().map(|n| (Value::from(n), bitrate_label(n)));
+                std::iter::once((Value::Null, "No limit".to_string())).chain(steps).collect()
             }
             Choices::Percent(first) => {
                 let mut steps: Vec<u64> = (first..=100).step_by(10).collect();
@@ -136,6 +153,16 @@ impl Definition {
                 steps.into_iter().map(|n| (Value::from(n), format!("{n}%"))).collect()
             }
         }
+    }
+}
+
+/// A bitrate as the web Settings page shows it: `1.5 Mbps`, `20 Mbps`, or `800 kbps`. The Quality list of the
+/// Player view shows `20.0 Mbps`.
+fn bitrate_label(kbps: u64) -> String {
+    match kbps {
+        0..1000 => format!("{kbps} kbps"),
+        _ if kbps.is_multiple_of(1000) => format!("{} Mbps", kbps / 1000),
+        _ => format!("{:.1} Mbps", kbps as f64 / 1000.0),
     }
 }
 
@@ -157,7 +184,7 @@ const FONT_COLORS: &[(&str, &str)] = &[
 
 /// The Server settings that the app reads, in the order of the Settings page. The rows of the Subtitle
 /// appearance come one after the other.
-pub static DEFINITIONS: LazyLock<[Definition; 18]> = LazyLock::new(|| {
+pub static DEFINITIONS: LazyLock<[Definition; 20]> = LazyLock::new(|| {
     let setting = |key, revision, label, default, choices, group| Definition {
         key,
         revision,
@@ -177,6 +204,30 @@ pub static DEFINITIONS: LazyLock<[Definition; 18]> = LazyLock::new(|| {
         field: Some(field),
     };
     [
+        setting(
+            "playback.preferred_quality",
+            1,
+            "Preferred quality",
+            json!("auto"),
+            Choices::Open(&[
+                ("auto", "Auto"),
+                ("480p", "480p"),
+                ("720p", "720p"),
+                ("1080p", "1080p"),
+                ("2160p", "2160p / 4K"),
+                ("original", "Original quality"),
+            ]),
+            Group::Quality,
+        ),
+        // The steps of the web Settings page.
+        setting(
+            "playback.max_bitrate_kbps",
+            1,
+            "Maximum bitrate",
+            Value::Null,
+            Choices::Kbps(&[1500, 2000, 4000, 6000, 10_000, 15_000, 20_000, 40_000, 60_000, 100_000, 200_000]),
+            Group::Quality,
+        ),
         setting(
             "playback.intro_skip_mode",
             7,
@@ -291,6 +342,10 @@ pub fn definition(key: &str) -> Option<&'static Definition> {
 /// The playback Server settings of a Profile. `Default` gives the defaults of the settings contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerSettings {
+    /// The `quality_preference` of a start request: `auto`, `480p`, `720p`, `1080p`, `2160p` or `original`.
+    pub preferred_quality: String,
+    /// The `bandwidth_cap_kbps` of a start request. `None` is no limit.
+    pub max_bitrate_kbps: Option<u64>,
     /// The spoken language that the Profile prefers, a language tag or `x-silo-original`. `None` is no preference.
     pub audio_language: Option<String>,
     /// The subtitle language. `None` is no preference.
@@ -335,6 +390,8 @@ impl Default for ServerSettings {
     fn default() -> Self {
         // `set` replaces each of these values with the default of its definition.
         let mut settings = Self {
+            preferred_quality: String::new(),
+            max_bitrate_kbps: None,
             audio_language: None,
             subtitle_language: None,
             subtitle_mode: SubtitleMode::Auto,
@@ -474,6 +531,11 @@ impl ServerSettings {
         }
     }
 
+    /// The quality that a Playback session starts with.
+    pub fn quality(&self) -> Quality {
+        Quality { preference: self.preferred_quality.clone(), bandwidth_cap_kbps: self.max_bitrate_kbps }
+    }
+
     /// Reads the effective values. A key that is missing, or a value of the wrong type, keeps its default.
     pub fn from_effective(values: &[wire::EffectiveSettingValue]) -> Self {
         let mut settings = Self::default();
@@ -506,6 +568,8 @@ impl ServerSettings {
         let text = value.as_str();
         let on = value.as_bool() == Some(true);
         match key {
+            "playback.preferred_quality" => self.preferred_quality = text.unwrap_or_default().into(),
+            "playback.max_bitrate_kbps" => self.max_bitrate_kbps = value.as_u64(),
             "playback.audio_language" => self.audio_language = text.map(String::from),
             "playback.subtitle_language" => self.subtitle_language = text.map(String::from),
             "playback.subtitle_mode" => {
@@ -533,6 +597,8 @@ impl ServerSettings {
     /// The value of one key, as the server stores it. An unknown key gives null.
     pub fn value(&self, key: &str) -> Value {
         match key {
+            "playback.preferred_quality" => self.preferred_quality.clone().into(),
+            "playback.max_bitrate_kbps" => self.max_bitrate_kbps.into(),
             "playback.audio_language" => self.audio_language.clone().into(),
             "playback.subtitle_language" => self.subtitle_language.clone().into(),
             "playback.subtitle_mode" => match self.subtitle_mode {
