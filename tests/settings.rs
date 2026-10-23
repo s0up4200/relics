@@ -695,11 +695,12 @@ fn no_preference_sends_null() {
 fn no_limit_deletes_the_profile_row_of_the_maximum_bitrate() {
     let (client, seen) = fake_write(200);
     block_on(client.set_server_setting("playback.max_bitrate_kbps", json!(6000))).unwrap();
-    assert_eq!(client.server_settings().max_bitrate_kbps, Some(6000));
     block_on(client.set_server_setting("playback.max_bitrate_kbps", serde_json::Value::Null)).unwrap();
     assert_eq!(client.server_settings().max_bitrate_kbps, None);
+    // Each save also reads the settings again.
+    let writes: Vec<_> = requests(&seen).into_iter().filter(|(method, _)| method != "GET").collect();
     assert_eq!(
-        requests(&seen),
+        writes,
         [
             ("PUT".into(), "settings/values/playback.max_bitrate_kbps?scope=profile".into()),
             ("DELETE".into(), "settings/values/playback.max_bitrate_kbps?scope=profile".into()),
@@ -731,6 +732,37 @@ fn a_saved_quality_is_read_again_so_that_the_household_cap_applies() {
     let settings = client.server_settings();
     assert_eq!(settings.preferred_quality, "1080p");
     assert!(settings.origins["playback.preferred_quality"].constrained);
+}
+
+#[test]
+fn a_saved_bitrate_is_read_again_so_that_the_household_ceiling_applies() {
+    // No limit deletes the profile row, and a higher cap is above the ceiling. The household ceiling of 8 Mbps
+    // applies to both.
+    for saved in [serde_json::Value::Null, json!(20_000)] {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let read = AtomicBool::new(false);
+        let (client, _) = common::fake(move |request| match request.method.as_str() {
+            "PUT" => common::ok("update_setting_value_ok.json"),
+            "DELETE" => json(204, String::new()),
+            _ if request.path == CAPABILITIES => json(200, capabilities(17)),
+            _ => {
+                let item = if read.swap(true, Ordering::SeqCst) {
+                    json!({
+                        "key": "playback.max_bitrate_kbps", "value": 8000, "source": "default", "definition_revision": 1,
+                        "constrained": true, "stored_value": null,
+                    })
+                } else {
+                    value("playback.max_bitrate_kbps", json!(6000))
+                };
+                json(200, json!({ "revision": 17, "items": [item] }).to_string())
+            }
+        });
+        block_on(client.load_server_settings()).unwrap();
+        block_on(client.set_server_setting("playback.max_bitrate_kbps", saved.clone())).unwrap();
+        let settings = client.server_settings();
+        assert_eq!(settings.max_bitrate_kbps, Some(8000), "after a save of {saved}");
+        assert!(settings.origins["playback.max_bitrate_kbps"].constrained);
+    }
 }
 
 #[test]

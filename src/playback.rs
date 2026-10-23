@@ -680,7 +680,12 @@ impl Session {
                     return Vec::new();
                 };
                 let plays = current_step(&plan.wire, &self.quality).is_some_and(|step| step.label == label);
-                if plays || self.changing.is_some() || self.chain != Chain::Healthy {
+                if self.changing.is_some() || self.chain != Chain::Healthy {
+                    return Vec::new();
+                }
+                // The step plays already, so it needs no replan. A later recovery still asks for it.
+                if plays {
+                    self.quality = label;
                     return Vec::new();
                 }
                 let replan = Replan {

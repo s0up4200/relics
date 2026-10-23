@@ -444,8 +444,8 @@ impl Client {
     /// when the write succeeds. A null value is "No preference", and for the maximum bitrate "No limit", which
     /// deletes the profile row. When the Effective value came from the device row of this device, the device row
     /// would still win, so the write also deletes it, as the web does. When that delete fails, the save fails, and
-    /// the client reads the settings again to get the value that applies. After a saved quality, the client also
-    /// reads the settings again, because the household cap can lower the quality.
+    /// the client reads the settings again to get the value that applies. After a saved quality or bitrate, the
+    /// client also reads the settings again, because the household cap can lower the value.
     /// The Subtitle appearance belongs to one device, as on the web: it is written at the device row of this
     /// device, and nothing is deleted.
     pub async fn set_server_setting(&self, key: &str, value: serde_json::Value) -> Result<(), Error> {
@@ -494,9 +494,10 @@ impl Client {
             self.settings_writes.fetch_add(1, Ordering::SeqCst);
         }
         // The profile row holds the new value, but the device row can still win, or the household cap can lower
-        // the quality.
+        // the quality or the bitrate.
+        let capped = matches!(key, "playback.preferred_quality" | "playback.max_bitrate_kbps");
         if same_profile
-            && (delete_failed || saved.is_ok() && key == "playback.preferred_quality")
+            && (delete_failed || saved.is_ok() && capped)
             && let Err(err) = self.load_server_settings().await
         {
             eprintln!("relics: cannot read the Server settings again: {err}");

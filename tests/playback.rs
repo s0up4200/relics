@@ -770,6 +770,20 @@ fn the_quality_that_plays_needs_no_replan_and_a_recovery_keeps_the_chosen_qualit
 }
 
 #[test]
+fn a_pick_of_the_step_that_plays_is_the_quality_of_a_later_recovery() {
+    let mut session = failed_at(3600.0);
+    assert_eq!(session.step(Input::PickQuality("original".into()), at(2)), vec![]);
+    assert_eq!(session.quality(), "original");
+    session.step(Input::LoadFailed, at(3));
+    session.step(Input::Refreshed(Some(refreshed(3))), at(4));
+    let commands = session.step(Input::LoadFailed, at(5));
+    let [Command::Replan(Replan { operation: Operation::FailureRecovery, quality, .. })] = &commands[..] else {
+        panic!("{commands:?}");
+    };
+    assert_eq!(quality.preference, "original");
+}
+
+#[test]
 fn a_version_switch_ends_the_session_at_the_position_and_starts_the_other_file_there() {
     let mut session = playing(None);
     session.step(Input::Position(300.0), at(1));
