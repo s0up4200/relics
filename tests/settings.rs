@@ -771,11 +771,10 @@ impl gpui::Render for PageWindow {
 fn a_settings_page_in_the_back_history_keeps_the_changes_of_a_newer_one(cx: &mut gpui::TestAppContext) {
     use gpui::AppContext as _;
     let dir = config_dir("stacked");
-    // Only this test in this file reads the Local settings through XDG_CONFIG_HOME.
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
     cx.update(|cx| {
         gpui_kit::init(cx);
         gpui_omarchy::Theme::tokyo_night().apply(cx);
+        relics::settings::use_directory(dir.join("relics"), cx);
     });
     // The effective read fails, so the page shows no Server rows.
     let (client, _) =

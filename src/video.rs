@@ -128,12 +128,13 @@ impl Surface {
         };
         let display = display.display.as_ptr();
         // ADR 0003: GPUI gives the libwayland wl_display and wl_surface of its window.
-        // SAFETY: the display stays open while the window lives, and the surface is a wl_surface of it.
+        // SAFETY: the display stays open while the window lives.
         let conn = Connection::from_backend(unsafe { Backend::from_foreign_display(display.cast()) });
         let (globals, queue) = registry_queue_init::<Events>(&conn).map_err(text)?;
         let qh = queue.handle();
         let compositor: WlCompositor = globals.bind(&qh, 4..=6, ()).map_err(text)?;
         let subcompositor: WlSubcompositor = globals.bind(&qh, 1..=1, ()).map_err(text)?;
+        // SAFETY: the surface is a wl_surface of the display, and it stays valid while the window lives.
         let parent = unsafe { ObjectId::from_ptr(WlSurface::interface(), handle.surface.as_ptr().cast()) };
         let parent = WlSurface::from_id(&conn, parent.map_err(text)?).map_err(text)?;
         let surface = compositor.create_surface(&qh, ());
