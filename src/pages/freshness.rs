@@ -201,9 +201,11 @@ pub trait Reload: Sized + 'static {
 pub struct Moved;
 
 /// Lets the first change through at once and opens a window of `period`. The window holds the changes that come in
-/// it, and lets them through together at its end. A window that held changes opens the next window.
+/// it, and lets them through together at its end. A window that held changes opens the next window. When `leading`
+/// is false, the window also holds the first change.
 struct Throttle {
     period: Duration,
+    leading: bool,
     open: bool,
     held: Vec<Change>,
     /// The timer of the open window.
@@ -212,19 +214,25 @@ struct Throttle {
 
 impl Throttle {
     fn new(period: Duration) -> Self {
-        Self { period, open: false, held: Vec::new(), window: Task::ready(()) }
+        Self { period, leading: true, open: false, held: Vec::new(), window: Task::ready(()) }
     }
 
-    /// Returns true when `change` runs now and a window opens. Otherwise the open window holds it.
-    fn push(&mut self, change: Change) -> bool {
-        if !self.open {
-            self.open = true;
-            return true;
+    /// A window that also holds its first change.
+    fn trailing(period: Duration) -> Self {
+        Self { leading: false, ..Self::new(period) }
+    }
+
+    /// Returns the changes to run now when a window opens, or `None` when the open window holds `change`.
+    fn push(&mut self, change: Change) -> Option<Vec<Change>> {
+        let opens = !self.open;
+        self.open = true;
+        if opens && self.leading {
+            return Some(vec![change]);
         }
         if !self.held.contains(&change) {
             self.held.push(change);
         }
-        false
+        opens.then(Vec::new)
     }
 
     /// The end of the window: the changes to run now. The next window stays open when there are any.
@@ -235,20 +243,15 @@ impl Throttle {
     }
 }
 
-/// A burst of changes of Server settings, for example a save of several keys on another client, waits this long
-/// for one read.
-const SETTINGS_WINDOW: Duration = Duration::from_secs(1);
-
 /// The freshness state of the pages.
 pub struct Coordinator {
     /// The window of the progress events of the Live updates: 30 seconds.
     progress: Throttle,
     /// The window of the catalog and Library events: 2 seconds.
     catalog: Throttle,
-    /// The changes of Server settings that wait for the end of their window.
-    settings: Vec<Change>,
-    /// The timer of the window of the Server settings.
-    settings_window: Task<()>,
+    /// The window of the Server settings events: 1 second, so that a burst, for example a save of several keys on
+    /// another client, costs one read.
+    settings: Throttle,
     /// The Library list of the sidebar.
     libraries: Fresh,
     /// The pages show in the window, not behind a full-screen picker or the PIN entry.
@@ -262,8 +265,7 @@ impl Default for Coordinator {
         Self {
             progress: Throttle::new(Duration::from_secs(30)),
             catalog: Throttle::new(Duration::from_secs(2)),
-            settings: Vec::new(),
-            settings_window: Task::ready(()),
+            settings: Throttle::trailing(Duration::from_secs(1)),
             libraries: Fresh { shown: true, ..Fresh::default() },
             shown: true,
             _live: Task::ready(()),
@@ -363,16 +365,20 @@ impl Pages {
             LiveChange::Libraries { library } => {
                 self.throttled(|this| &mut this.freshness.catalog, Change::Libraries { library }, cx)
             }
-            LiveChange::Settings { key } => self.setting_changed(Change::Settings { key }, cx),
+            LiveChange::Settings { key } => {
+                self.throttled(|this| &mut this.freshness.settings, Change::Settings { key }, cx)
+            }
         }
     }
 
     /// Runs `change` through the window that `window` picks.
     fn throttled(&mut self, window: fn(&mut Self) -> &mut Throttle, change: Change, cx: &mut Context<Self>) {
-        if !window(self).push(change.clone()) {
+        let Some(now) = window(self).push(change) else {
             return;
+        };
+        if !now.is_empty() {
+            self.refresh(&now, cx);
         }
-        self.refresh(&[change], cx);
         let period = window(self).period;
         window(self).window = cx.spawn(async move |this, cx| {
             loop {
@@ -387,25 +393,6 @@ impl Pages {
                 }
             }
         });
-    }
-
-    /// Holds a change of a Server setting. The first change opens a window, and the end of the window lets the held
-    /// changes through together, so that a burst costs one read.
-    fn setting_changed(&mut self, change: Change, cx: &mut Context<Self>) {
-        let first = self.freshness.settings.is_empty();
-        if !self.freshness.settings.contains(&change) {
-            self.freshness.settings.push(change);
-        }
-        if first {
-            self.freshness.settings_window = cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(SETTINGS_WINDOW).await;
-                this.update(cx, |this, cx| {
-                    let held = std::mem::take(&mut this.freshness.settings);
-                    this.refresh(&held, cx);
-                })
-                .ok();
-            });
-        }
     }
 
     /// Reloads each retained part that `changes` reach one time. A part that shows reloads now, and keeps its scroll
@@ -520,15 +507,28 @@ mod tests {
         let mut throttle = Throttle::new(Duration::from_secs(30));
         let a = Change::Catalog { library: Some("1".into()), item: None };
         let b = Change::Catalog { library: Some("2".into()), item: None };
-        assert!(throttle.push(a.clone()), "the first change runs now");
-        assert!(!throttle.push(a.clone()));
-        assert!(!throttle.push(b.clone()));
-        assert!(!throttle.push(a.clone()));
+        assert_eq!(throttle.push(a.clone()), Some(vec![a.clone()]), "the first change runs now");
+        assert_eq!(throttle.push(a.clone()), None);
+        assert_eq!(throttle.push(b.clone()), None);
+        assert_eq!(throttle.push(a.clone()), None);
         assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one of each change");
-        assert!(!throttle.push(a.clone()), "the trailing batch opened the next window");
+        assert_eq!(throttle.push(a.clone()), None, "the trailing batch opened the next window");
         assert_eq!(throttle.tick(), std::slice::from_ref(&a));
         assert_eq!(throttle.tick(), [], "a quiet window closes");
-        assert!(throttle.push(a), "the next change runs now");
+        assert_eq!(throttle.push(a.clone()), Some(vec![a]), "the next change runs now");
+    }
+
+    #[test]
+    fn a_trailing_window_holds_its_first_change_too() {
+        let mut throttle = Throttle::trailing(Duration::from_secs(1));
+        let a = Change::Settings { key: Some("a".into()) };
+        let b = Change::Settings { key: None };
+        assert_eq!(throttle.push(a.clone()), Some(vec![]), "a window opens and nothing runs now");
+        assert_eq!(throttle.push(b.clone()), None);
+        assert_eq!(throttle.push(a.clone()), None);
+        assert_eq!(throttle.tick(), [a.clone(), b], "the window ends with one of each change");
+        assert_eq!(throttle.tick(), [], "a quiet window closes");
+        assert_eq!(throttle.push(a), Some(vec![]), "the next change opens a new window");
     }
 
     #[test]
