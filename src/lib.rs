@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod api;
 pub mod artwork;
+pub mod assets;
 pub mod browse;
 pub mod choice_list;
 pub mod click;
