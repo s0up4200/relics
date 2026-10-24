@@ -466,6 +466,22 @@ fn a_burn_in_pick_while_another_replan_runs_asks_once_the_replan_ends() {
     assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(6))), [Some(index)]);
 }
 
+#[test]
+fn a_direct_play_plan_shows_the_picked_burn_in_track_from_the_file_with_no_replan() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(None), at(1));
+    session.step(Input::PickBurnIn(3), at(2));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(3));
+    session.step(Input::FileLoaded, at(4));
+    // The Server answers a quality change with the Original file.
+    session.step(Input::PickQuality("1080p-medium".into()), at(5));
+    session.step(Input::Replanned(Some(decision(|_| {}))), at(6));
+    let commands = session.step(Input::FileLoaded, at(7));
+    assert_eq!(commands, vec![Command::SelectSubtitle(Some(3))], "the French track of the file, and no replan");
+    assert_eq!(session.step(Input::Position(30.0), at(8)), vec![]);
+}
+
 // The skip state machine.
 
 fn marker(kind: MarkerKind, start: f64, end: f64) -> Marker {

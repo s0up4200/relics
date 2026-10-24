@@ -919,8 +919,12 @@ impl Session {
 
     /// The subtitle track that the Server must draw into the video of the plan, or `None` for no burn-in: the
     /// last pick of the user, else no burn-in when the subtitles are off, else the burn-in of the start choice.
+    /// Direct play shows the track from the file, so it wants no burn-in.
     fn wanted_burn_in(&self) -> Option<i64> {
+        let direct =
+            self.plan.as_ref().is_some_and(|plan| Delivery::from(plan.wire.delivery.clone()) == Delivery::OriginalHttp);
         match self.burn_pick {
+            _ if direct => None,
             Some(pick) => pick,
             None if self.carry.subtitle == Some(Choice::Off) => None,
             None => self.plan.as_ref().and_then(|plan| plan.burn_in),
