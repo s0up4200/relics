@@ -482,6 +482,18 @@ fn a_direct_play_plan_shows_the_picked_burn_in_track_from_the_file_with_no_repla
     assert_eq!(session.step(Input::Position(30.0), at(8)), vec![]);
 }
 
+#[test]
+fn a_track_of_the_file_picked_in_direct_play_asks_for_its_burn_in_on_a_later_transcode() {
+    let mut session = french("original_http", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Tracks(tracks::parse(r#"[{"id":3,"type":"sub","lang":"fre","codec":"dvd_subtitle"}]"#)), at(1));
+    session.step(Input::PickTrack { kind: Kind::Sub, id: Some(3) }, at(2));
+    session.step(Input::PickQuality("1080p-medium".into()), at(3));
+    session.step(Input::Replanned(Some(replanned())), at(4));
+    let index = serde_json::json!({ "id": "", "index": 3 });
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(5))), [Some(index)]);
+}
+
 // The skip state machine.
 
 fn marker(kind: MarkerKind, start: f64, end: f64) -> Marker {

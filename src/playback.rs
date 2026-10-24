@@ -733,8 +733,11 @@ impl Session {
                 match kind {
                     Kind::Audio => id.map(Command::SelectAudio).into_iter().collect(),
                     _ => {
-                        // The Server stops a burn-in, so that only the picked track shows.
-                        if picked_any {
+                        // On a transcode, the Server stops a burn-in, so that only the picked track shows. In direct
+                        // play, the pick of a track of the file is the choice, and a later transcode can burn it in.
+                        if picked_any && self.direct() {
+                            self.burn_pick = None;
+                        } else if picked_any {
                             self.pick_burn_in(None);
                         }
                         [vec![Command::SelectSubtitle(id)], self.ask_burn_in()].concat()
@@ -921,14 +924,17 @@ impl Session {
     /// last pick of the user, else no burn-in when the subtitles are off, else the burn-in of the start choice.
     /// Direct play shows the track from the file, so it wants no burn-in.
     fn wanted_burn_in(&self) -> Option<i64> {
-        let direct =
-            self.plan.as_ref().is_some_and(|plan| Delivery::from(plan.wire.delivery.clone()) == Delivery::OriginalHttp);
         match self.burn_pick {
-            _ if direct => None,
+            _ if self.direct() => None,
             Some(pick) => pick,
             None if self.carry.subtitle == Some(Choice::Off) => None,
             None => self.plan.as_ref().and_then(|plan| plan.burn_in),
         }
+    }
+
+    /// The plan is direct play: mpv plays the file itself, with each of its tracks.
+    fn direct(&self) -> bool {
+        self.plan.as_ref().is_some_and(|plan| Delivery::from(plan.wire.delivery.clone()) == Delivery::OriginalHttp)
     }
 
     /// Records a subtitle pick of the user: `index` is the track that the Server must draw into the video, or
