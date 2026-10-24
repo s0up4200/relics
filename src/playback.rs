@@ -339,6 +339,9 @@ pub struct Session {
     tracks: Vec<Track>,
     /// The track choice of the Track picker, in this session or carried from the last episode.
     carry: Carry,
+    /// The burn-in of the last subtitle pick in this session: the picked track, or `None` for Off or a track of
+    /// mpv.
+    burn_pick: Option<Option<i64>>,
     /// The part of `carry` that mpv has not played yet in the file that loads.
     pending: Carry,
     /// The quality preference of the session: the preferred quality, or the step of a Quality ladder pick.
@@ -386,10 +389,11 @@ struct Plan {
     offset: f64,
     /// The command that shows the subtitle track of the subtitle choice, when the file loads.
     subtitle: Option<Command>,
-    /// The burn-in that the app asks for when the file loads: `Some(index)` for the subtitle choice when the
-    /// Server must draw it into the video and this plan does not, `None` to stop the burn-in of this plan when the
-    /// user turned the subtitles off. Each plan asks once.
-    burn_in: Option<Option<i64>>,
+    /// The subtitle track that the Server must draw into the video for the start choice, when no pick of the user
+    /// says otherwise: the track that this plan burns in, or the choice when it needs a burn-in.
+    burn_in: Option<i64>,
+    /// The app asked the Server to fix the burn-in of this plan, so it does not ask again. A pick asks again.
+    asked: bool,
     /// The Markers in player time.
     markers: Vec<Marker>,
     /// The plan as the server sent it, for the Playback info panel.
@@ -427,6 +431,7 @@ impl Session {
             failed_keys: Vec::new(),
             tracks: Vec::new(),
             carry: Carry::default(),
+            burn_pick: None,
             pending: Carry::default(),
             changing: None,
             up_next: None,
@@ -558,11 +563,12 @@ impl Session {
                         let commands = self.play_replan(session_id, attempt_id, &plan);
                         match change {
                             Some(Change::Quality(label)) => self.quality = label,
-                            // If the Server did not do what the app asked, the app does not ask again. A change of
-                            // the subtitle choice while the replan ran still asks.
+                            // If the Server did not do what the app asked, the app does not ask again. A pick
+                            // while the replan ran still asks.
                             Some(Change::Subtitle(asked)) => {
-                                if let Some(plan) = self.plan.as_mut().filter(|plan| plan.burn_in == Some(asked)) {
-                                    plan.burn_in = None;
+                                let wanted = self.wanted_burn_in();
+                                if let Some(plan) = &mut self.plan {
+                                    plan.asked = wanted == asked;
                                 }
                             }
                             None => {}
@@ -720,18 +726,18 @@ impl Session {
                     Kind::Other => return Vec::new(),
                 };
                 *pending = None;
-                if picked.is_some() {
+                let picked_any = picked.is_some();
+                if picked_any {
                     *choice = picked;
                 }
                 match kind {
                     Kind::Audio => id.map(Command::SelectAudio).into_iter().collect(),
                     _ => {
-                        let mut commands = vec![Command::SelectSubtitle(id)];
-                        // The Server stops the burn-in, so that only the picked track shows.
-                        if self.plan.as_ref().is_some_and(|plan| subtitles::burned_in(&plan.wire).is_some()) {
-                            commands.extend(self.change_subtitle(None));
+                        // The Server stops a burn-in, so that only the picked track shows.
+                        if picked_any {
+                            self.pick_burn_in(None);
                         }
-                        commands
+                        [vec![Command::SelectSubtitle(id)], self.ask_burn_in()].concat()
                     }
                 }
             }
@@ -743,17 +749,13 @@ impl Session {
                 else {
                     return Vec::new();
                 };
-                if subtitles::burned_in(&plan.wire) == Some(index) {
-                    return Vec::new();
-                }
+                let burned = subtitles::burned_in(&plan.wire) == Some(index);
                 let choice = Choice::Track { language: track.language.clone(), forced: track.forced };
-                let replan = self.change_subtitle(Some(index));
-                if replan.is_empty() {
-                    return replan;
-                }
                 (self.carry.subtitle, self.pending.subtitle) = (Some(choice), None);
+                self.pick_burn_in(Some(index));
                 // The burn-in replaces the subtitles that mpv shows.
-                [vec![Command::SelectSubtitle(None)], replan].concat()
+                let hide = (!burned).then_some(Command::SelectSubtitle(None));
+                [hide.into_iter().collect(), self.ask_burn_in()].concat()
             }
             Input::PickQuality(label) => {
                 let Some(plan) = &self.plan else {
@@ -856,10 +858,9 @@ impl Session {
         let direct = Delivery::from(plan.delivery.clone()) == Delivery::OriginalHttp;
         let aid = plan.selected_tracks.audio.as_ref().and_then(|audio| audio.index).filter(|_| direct).map(|i| i + 1);
         let chosen = tracks.iter().find(|track| Some(track.combined_index) == chosen);
-        let burn_in = match subtitles::burned_in(plan) {
-            Some(_) => Some(None),
-            None => chosen.filter(|track| !direct && subtitles::needs_burn_in(track)).map(|t| Some(t.combined_index)),
-        };
+        let burn_in = subtitles::burned_in(plan).or_else(|| {
+            chosen.filter(|track| !direct && subtitles::needs_burn_in(track)).map(|track| track.combined_index)
+        });
         let subtitle = chosen.and_then(|track| {
             if direct && track.source == "embedded" {
                 // The file has the track, so a sidecar of it would show twice. The server lists the embedded
@@ -890,6 +891,7 @@ impl Session {
             offset,
             subtitle,
             burn_in,
+            asked: false,
             markers,
             wire: plan.clone(),
         });
@@ -915,12 +917,31 @@ impl Session {
         self.load_now(start)
     }
 
-    /// Asks for the burn-in of the subtitle choice of the plan, or stops the burn-in of the plan when the user
-    /// turned the subtitles off.
+    /// The subtitle track that the Server must draw into the video of the plan, or `None` for no burn-in: the
+    /// last pick of the user, else no burn-in when the subtitles are off, else the burn-in of the start choice.
+    fn wanted_burn_in(&self) -> Option<i64> {
+        match self.burn_pick {
+            Some(pick) => pick,
+            None if self.carry.subtitle == Some(Choice::Off) => None,
+            None => self.plan.as_ref().and_then(|plan| plan.burn_in),
+        }
+    }
+
+    /// Records a subtitle pick of the user: `index` is the track that the Server must draw into the video, or
+    /// `None` for no burn-in. The plan can ask again.
+    fn pick_burn_in(&mut self, index: Option<i64>) {
+        self.burn_pick = Some(index);
+        if let Some(plan) = &mut self.plan {
+            plan.asked = false;
+        }
+    }
+
+    /// Asks the Server once for each plan to fix its burn-in when it is not the wanted burn-in. While another
+    /// replan runs, the ask waits for the next load or position.
     fn ask_burn_in(&mut self) -> Vec<Command> {
-        let off = self.carry.subtitle == Some(Choice::Off);
-        match self.plan.as_ref().and_then(|plan| plan.burn_in) {
-            Some(index) if index.is_some() != off => self.change_subtitle(index),
+        let wanted = self.wanted_burn_in();
+        match &self.plan {
+            Some(plan) if !plan.asked && wanted != subtitles::burned_in(&plan.wire) => self.change_subtitle(wanted),
             _ => Vec::new(),
         }
     }
@@ -939,7 +960,7 @@ impl Session {
         tracks.subtitle = index.map(|index| wire::TrackIdentityV3 { id: String::new(), index: Some(index) });
         let tracks = serde_json::to_value(&tracks).unwrap_or_default();
         if let Some(plan) = &mut self.plan {
-            plan.burn_in = None;
+            plan.asked = true;
         }
         self.change(Change::Subtitle(index), Operation::TrackChange, tracks, self.replan_quality())
     }

@@ -365,7 +365,8 @@ fn a_pick_of_a_burn_in_track_hides_the_subtitles_of_mpv_and_asks_the_server_to_d
         session.step(Input::PickBurnIn(3), at(3)),
         vec![Command::SelectSubtitle(None), track_change(Some(3), 30.0)]
     );
-    assert_eq!(session.step(Input::PickBurnIn(3), at(4)), vec![], "one replan at a time");
+    let commands = session.step(Input::PickBurnIn(3), at(4));
+    assert_eq!(commands, vec![Command::SelectSubtitle(None)], "one replan at a time");
     assert_eq!(session.carry().subtitle, Some(Choice::Track { language: Some("fre".into()), forced: false }));
     session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(5));
     assert_eq!(session.step(Input::PickBurnIn(3), at(6)), vec![], "the video has the track already");
@@ -420,6 +421,49 @@ fn off_while_a_quality_change_of_a_burn_in_runs_stops_the_burn_in_of_the_new_pla
     let [Command::Replan(replan)] = &commands[..] else { panic!("{commands:?}") };
     assert_eq!((replan.operation, replan.selected_tracks.get("subtitle")), (Operation::TrackChange, None));
     assert_eq!(session.step(Input::Position(30.0), at(7)), vec![], "one ask");
+}
+
+/// The subtitle commands and the subtitle of each `track_change` replan in `commands`.
+fn subtitle_asks(commands: &[Command]) -> Vec<Option<Value>> {
+    let asks = commands.iter().filter_map(|command| match command {
+        Command::Replan(replan) if replan.operation == Operation::TrackChange => Some(replan),
+        _ => None,
+    });
+    asks.map(|replan| replan.selected_tracks.get("subtitle").cloned()).collect()
+}
+
+#[test]
+fn a_track_of_mpv_picked_while_the_ask_for_a_burn_in_runs_stops_the_burn_in_of_the_answer() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Tracks(track_list(false)), at(1));
+    let commands = session.step(Input::PickTrack { kind: Kind::Sub, id: Some(2) }, at(2));
+    assert_eq!(commands, vec![Command::SelectSubtitle(Some(2))], "the ask for the burn-in still runs");
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(3));
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(4))), [None], "no subtitle: stop the burn-in");
+}
+
+#[test]
+fn a_burn_in_pick_while_another_replan_runs_asks_once_the_replan_ends() {
+    // A pick while a quality change runs.
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(None), at(1));
+    session.step(Input::PickQuality("1080p-medium".into()), at(2));
+    assert_eq!(session.step(Input::PickBurnIn(3), at(3)), vec![Command::SelectSubtitle(None)]);
+    session.step(Input::Replanned(Some(replanned())), at(4));
+    let index = serde_json::json!({ "id": "", "index": 3 });
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(5))), [Some(index.clone())]);
+
+    // A pick of the burned-in track while the stop of its burn-in runs.
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(1));
+    session.step(Input::FileLoaded, at(2));
+    assert_eq!(subtitle_asks(&session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(3))), [None]);
+    assert_eq!(session.step(Input::PickBurnIn(3), at(4)), vec![], "the video still has the track");
+    session.step(Input::Replanned(Some(burn_in_plan(None))), at(5));
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(6))), [Some(index)]);
 }
 
 // The skip state machine.
