@@ -386,6 +386,42 @@ fn off_in_the_track_picker_asks_the_server_to_stop_the_burn_in() {
     assert_eq!((replan.operation, replan.position, &replan.selected_tracks), (Operation::TrackChange, 3630.0, &audio));
 }
 
+#[test]
+fn off_while_the_ask_for_a_burn_in_runs_stops_the_burn_in_of_the_answer() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(1)),
+        vec![Command::SelectSubtitle(None)]
+    );
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(2));
+    let commands = session.step(Input::FileLoaded, at(3));
+    let [Command::Replan(replan)] = &commands[..] else { panic!("{commands:?}") };
+    assert_eq!((replan.operation, replan.selected_tracks.get("subtitle")), (Operation::TrackChange, None));
+    // The Server keeps the burn-in, so the app asks no more.
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(4));
+    assert_eq!(session.step(Input::FileLoaded, at(5)), vec![]);
+    assert_eq!(session.step(Input::Position(30.0), at(6)), vec![]);
+}
+
+#[test]
+fn off_while_a_quality_change_of_a_burn_in_runs_stops_the_burn_in_of_the_new_plan() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(1));
+    session.step(Input::FileLoaded, at(2));
+    session.step(Input::PickQuality("1080p-medium".into()), at(3));
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(4)),
+        vec![Command::SelectSubtitle(None)]
+    );
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(5));
+    let commands = session.step(Input::FileLoaded, at(6));
+    let [Command::Replan(replan)] = &commands[..] else { panic!("{commands:?}") };
+    assert_eq!((replan.operation, replan.selected_tracks.get("subtitle")), (Operation::TrackChange, None));
+    assert_eq!(session.step(Input::Position(30.0), at(7)), vec![], "one ask");
+}
+
 // The skip state machine.
 
 fn marker(kind: MarkerKind, start: f64, end: f64) -> Marker {

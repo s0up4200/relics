@@ -284,8 +284,8 @@ enum Chain {
 enum Change {
     /// A step of the Quality ladder, with its label.
     Quality(String),
-    /// The subtitle track that the Server draws into the video.
-    Subtitle,
+    /// The subtitle track that the Server draws into the video, or `None` for no burn-in.
+    Subtitle(Option<i64>),
 }
 
 /// What the app does when a refresh outside the recovery chain ends.
@@ -386,9 +386,10 @@ struct Plan {
     offset: f64,
     /// The command that shows the subtitle track of the subtitle choice, when the file loads.
     subtitle: Option<Command>,
-    /// The `combined_index` of the subtitle choice when the Server must draw it into the video and this plan does
-    /// not. The app asks for it when the file loads.
-    burn_in: Option<i64>,
+    /// The burn-in that the app asks for when the file loads: `Some(index)` for the subtitle choice when the
+    /// Server must draw it into the video and this plan does not, `None` to stop the burn-in of this plan when the
+    /// user turned the subtitles off. Each plan asks once.
+    burn_in: Option<Option<i64>>,
     /// The Markers in player time.
     markers: Vec<Marker>,
     /// The plan as the server sent it, for the Playback info panel.
@@ -557,12 +558,14 @@ impl Session {
                         let commands = self.play_replan(session_id, attempt_id, &plan);
                         match change {
                             Some(Change::Quality(label)) => self.quality = label,
-                            // The app asks for a burn-in once. A plan without it shows no subtitles.
-                            _ => {
-                                if let Some(plan) = &mut self.plan {
+                            // If the Server did not do what the app asked, the app does not ask again. A change of
+                            // the subtitle choice while the replan ran still asks.
+                            Some(Change::Subtitle(asked)) => {
+                                if let Some(plan) = self.plan.as_mut().filter(|plan| plan.burn_in == Some(asked)) {
                                     plan.burn_in = None;
                                 }
                             }
+                            None => {}
                         }
                         commands
                     }
@@ -853,8 +856,10 @@ impl Session {
         let direct = Delivery::from(plan.delivery.clone()) == Delivery::OriginalHttp;
         let aid = plan.selected_tracks.audio.as_ref().and_then(|audio| audio.index).filter(|_| direct).map(|i| i + 1);
         let chosen = tracks.iter().find(|track| Some(track.combined_index) == chosen);
-        let burn_in =
-            chosen.filter(|track| !direct && subtitles::needs_burn_in(track)).map(|track| track.combined_index);
+        let burn_in = match subtitles::burned_in(plan) {
+            Some(_) => Some(None),
+            None => chosen.filter(|track| !direct && subtitles::needs_burn_in(track)).map(|t| Some(t.combined_index)),
+        };
         let subtitle = chosen.and_then(|track| {
             if direct && track.source == "embedded" {
                 // The file has the track, so a sidecar of it would show twice. The server lists the embedded
@@ -910,12 +915,12 @@ impl Session {
         self.load_now(start)
     }
 
-    /// Asks for the burn-in of the subtitle choice of the plan, when the plan needs one and the user did not turn
-    /// the subtitles off.
+    /// Asks for the burn-in of the subtitle choice of the plan, or stops the burn-in of the plan when the user
+    /// turned the subtitles off.
     fn ask_burn_in(&mut self) -> Vec<Command> {
         let off = self.carry.subtitle == Some(Choice::Off);
         match self.plan.as_ref().and_then(|plan| plan.burn_in) {
-            Some(index) if !off => self.change_subtitle(Some(index)),
+            Some(index) if index.is_some() != off => self.change_subtitle(index),
             _ => Vec::new(),
         }
     }
@@ -936,7 +941,7 @@ impl Session {
         if let Some(plan) = &mut self.plan {
             plan.burn_in = None;
         }
-        self.change(Change::Subtitle, Operation::TrackChange, tracks, self.replan_quality())
+        self.change(Change::Subtitle(index), Operation::TrackChange, tracks, self.replan_quality())
     }
 
     /// Asks for the replan `change` of the user at the position that plays.
