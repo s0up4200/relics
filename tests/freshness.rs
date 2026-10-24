@@ -150,6 +150,7 @@ impl Server {
                 let item = serde_json::json!({"key": "playback.subtitle_mode", "value": mode, "source": "profile", "definition_revision": 1});
                 json(200, serde_json::json!({"revision": 1, "items": [item]}).to_string())
             }
+            ("PUT", "settings/values/catalog.metadata_language") => ok("update_setting_value_ok.json"),
             ("PUT", "settings/values/playback.subtitle_mode") => {
                 let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
                 *self.mode.lock().unwrap() = body["value"].as_str().unwrap().to_string();
@@ -545,6 +546,48 @@ fn the_open_settings_page_shows_the_values_of_another_client_after_one_read(cx: 
     cx.run_until_parked();
     let writes = server.requests("PUT", "settings/values/playback.subtitle_mode");
     assert_eq!(writes.last().map(|req| req.body.as_str()), Some(r#"{"value":"off"}"#), "the row shows always");
+}
+
+#[gpui::test]
+fn a_metadata_language_event_reloads_the_open_pages_and_an_event_for_another_key_does_not(cx: &mut TestAppContext) {
+    let (_, cx, server, changes, _) = rig(cx);
+    let home = server.count("home/layout");
+    send(cx, &changes, setting("playback.subtitle_mode"));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home, "another key does not reload Home");
+    for (n, key) in ["catalog.metadata_language", "catalog.metadata_language_overrides"].into_iter().enumerate() {
+        send(cx, &changes, setting(key));
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(server.count("home/layout"), home + n + 1, "{key} reloads Home");
+    }
+}
+
+#[gpui::test]
+fn a_metadata_language_change_on_the_settings_page_reloads_the_open_pages(cx: &mut TestAppContext) {
+    let (_, cx, server, _, _) = rig(cx);
+    let home = server.count("home/layout");
+    // Row 8 is the subtitle mode. Its change does not reload the pages.
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j j j j j j l");
+    cx.run_until_parked();
+    assert_eq!(server.requests("PUT", "settings/values/playback.subtitle_mode").len(), 1);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home, "a change of the subtitle mode does not reload Home");
+    // Row 10 is the Metadata language: Library default, then Original language.
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j j j j j j j j l");
+    cx.run_until_parked();
+    let writes = server.requests("PUT", "settings/values/catalog.metadata_language");
+    assert_eq!(writes.last().map(|req| req.body.as_str()), Some(r#"{"value":"x-silo-original"}"#));
+    assert_eq!(server.count("home/layout"), home, "Home is in the back history");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(server.count("home/layout"), home + 1, "Home reloads when it shows again");
 }
 
 #[gpui::test]

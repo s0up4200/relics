@@ -95,6 +95,8 @@ fn opening_a_profile_reads_the_server_settings() {
             auto_skip_recap: true,
             auto_play_next: false,
             subtitle_appearance: SubtitleAppearance::default(),
+            metadata_language: None,
+            metadata_exceptions: Default::default(),
             manifest_revision: Some(17),
             origins: Default::default(),
         }
@@ -112,6 +114,8 @@ fn opening_a_profile_reads_the_server_settings() {
         "playback.subtitle_language",
         "playback.subtitle_mode",
         "playback.show_forced_subtitles",
+        "catalog.metadata_language",
+        "catalog.metadata_language_overrides",
         "playback.subtitle_appearance",
     ];
     let query = keys.map(|key| format!("keys={key}")).join("&");
@@ -203,12 +207,14 @@ fn a_server_before_revision_7_is_not_asked_for_the_intro_skip_mode() {
             auto_skip_recap: true,
             auto_play_next: false,
             subtitle_appearance: SubtitleAppearance::default(),
+            metadata_language: None,
+            metadata_exceptions: Default::default(),
             manifest_revision: Some(6),
             origins: Default::default(),
         }
     );
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    assert_eq!(asked.len(), 10, "{asked:?}");
+    assert_eq!(asked.len(), 12, "{asked:?}");
     assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
     let shown: Vec<_> = relics::settings_page::sections(Some(&client.server_settings()), 0)
         .into_iter()
@@ -330,7 +336,8 @@ fn without_the_capabilities_the_rows_stay_and_each_change_is_refused() {
     let settings = client.server_settings();
     assert_eq!(settings.manifest_revision, None);
     let rows = relics::settings_page::sections(Some(&settings), 0).into_iter().flat_map(|(_, rows)| rows);
-    assert_eq!(rows.filter(|row| matches!(row, Row::Server(_))).count(), settings::DEFINITIONS.len());
+    // The Metadata exceptions show as one row for each exception, and Add exception.
+    assert_eq!(rows.filter(|row| matches!(row, Row::Server(_))).count(), settings::DEFINITIONS.len() - 1);
     let err = block_on(client.set_server_setting("playback.auto_play_next", json!(false))).unwrap_err();
     assert_eq!(err.to_string(), "Relics cannot reach the settings of the Server");
     assert!(client.server_settings().auto_play_next);
@@ -363,7 +370,7 @@ fn without_batched_reads_the_keys_after_revision_1_are_unknown() {
     let (client, seen) = fake_capabilities(json!({ "supports_batched_effective": false }));
     block_on(client.load_server_settings()).unwrap();
     let asked = asked_keys(&seen.lock().unwrap()[1]);
-    assert_eq!(asked.len(), 10, "{asked:?}");
+    assert_eq!(asked.len(), 11, "{asked:?}");
     assert!(!asked.iter().any(|key| key == "playback.intro_skip_mode"), "{asked:?}");
     let shown = relics::settings_page::sections(Some(&client.server_settings()), 0);
     let rows: Vec<_> = shown.into_iter().flat_map(|(_, rows)| rows).collect();
@@ -1132,8 +1139,8 @@ fn a_slow_subtitle_appearance_save_does_not_undo_a_newer_change(cx: &mut gpui::T
     });
     cx.simulate_keystrokes(",");
     cx.run_until_parked();
-    // Font size is the eleventh row. Its save waits at the server while the position changes.
-    cx.simulate_keystrokes("j j j j j j j j j j l");
+    // Font size is the thirteenth row. Its save waits at the server while the position changes.
+    cx.simulate_keystrokes("j j j j j j j j j j j j l");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j j j j j j j j l");
     cx.run_until_parked();
@@ -1143,4 +1150,174 @@ fn a_slow_subtitle_appearance_save_does_not_undo_a_newer_change(cx: &mut gpui::T
     let saved = saved.lock().unwrap();
     let last = saved.last().unwrap();
     assert_eq!((&last["fontSize"], &last["position"]), (&json!("xlarge"), &json!("lower-third")), "{saved:?}");
+}
+
+#[test]
+fn library_default_deletes_the_profile_row_of_the_metadata_language() {
+    let (client, seen) = fake_write(200);
+    block_on(client.set_server_setting(settings::METADATA_LANGUAGE, json!("ja"))).unwrap();
+    assert_eq!(client.server_settings().metadata_language.as_deref(), Some("ja"));
+    block_on(client.set_server_setting(settings::METADATA_LANGUAGE, serde_json::Value::Null)).unwrap();
+    assert_eq!(client.server_settings().metadata_language, None);
+    assert_eq!(
+        requests(&seen),
+        [
+            ("PUT".into(), "settings/values/catalog.metadata_language?scope=profile".into()),
+            ("DELETE".into(), "settings/values/catalog.metadata_language?scope=profile".into()),
+        ]
+    );
+    assert_eq!(body(&seen.lock().unwrap()[0]), json!({ "value": "ja" }));
+}
+
+#[test]
+fn each_change_of_the_exceptions_writes_the_whole_map_and_an_empty_map_deletes_the_row() {
+    let (client, seen) = fake_write(200);
+    let exceptions = json!({ "ja": "en", "ko": "x-silo-original" });
+    block_on(client.set_server_setting(settings::METADATA_EXCEPTIONS, exceptions.clone())).unwrap();
+    assert_eq!(client.server_settings().value(settings::METADATA_EXCEPTIONS), exceptions);
+    block_on(client.set_server_setting(settings::METADATA_EXCEPTIONS, json!({}))).unwrap();
+    assert_eq!(client.server_settings().value(settings::METADATA_EXCEPTIONS), json!({}));
+    let path = "settings/values/catalog.metadata_language_overrides?scope=profile";
+    assert_eq!(requests(&seen), [("PUT".into(), path.into()), ("DELETE".into(), path.into())]);
+    assert_eq!(body(&seen.lock().unwrap()[0]), json!({ "value": exceptions }));
+}
+
+#[test]
+fn the_metadata_language_and_its_exceptions_reach_the_store() {
+    let (client, _) = fake(json!({
+        "revision": 17,
+        "items": [
+            value(settings::METADATA_LANGUAGE, json!("x-silo-original")),
+            value(settings::METADATA_EXCEPTIONS, json!({ "ja": "en" })),
+        ],
+    }));
+    block_on(client.load_server_settings()).unwrap();
+    let store = client.server_settings();
+    assert_eq!(store.metadata_language.as_deref(), Some("x-silo-original"));
+    assert_eq!(store.metadata_exceptions, [("ja".to_string(), "en".to_string())].into());
+}
+
+#[test]
+fn an_exception_that_the_contract_does_not_allow_drops_and_the_others_stay() {
+    let mut store = ServerSettings::default();
+    store.set(settings::METADATA_EXCEPTIONS, &json!({ "ko": "en", "JA": "en", "jpn-x": "en", "de": 7, "fil": "en" }));
+    let kept = [("fil".to_string(), "en".to_string()), ("ko".to_string(), "en".to_string())];
+    assert_eq!(store.metadata_exceptions, kept.into());
+    store.set(settings::METADATA_EXCEPTIONS, &json!(["ja"]));
+    assert!(store.metadata_exceptions.is_empty(), "a value that is not a map");
+}
+
+#[test]
+fn before_revision_3_the_exceptions_are_unknown() {
+    let (client, seen) = fake_at(2, json!({ "revision": 2, "items": [] }));
+    block_on(client.load_server_settings()).unwrap();
+    let store = client.server_settings();
+    assert!(!store.knows(settings::definition(settings::METADATA_EXCEPTIONS).unwrap()));
+    assert!(store.knows(settings::definition(settings::METADATA_LANGUAGE).unwrap()));
+    let asked = asked_keys(&seen.lock().unwrap()[1]);
+    assert!(asked.contains(&settings::METADATA_LANGUAGE.to_string()));
+    assert!(!asked.contains(&settings::METADATA_EXCEPTIONS.to_string()));
+}
+
+#[test]
+fn the_metadata_language_has_library_default_and_original_language_before_the_web_list() {
+    let options = settings::options(settings::METADATA_LANGUAGE, &serde_json::Value::Null);
+    assert_eq!(options.len(), 48);
+    assert_eq!(options[0], (serde_json::Value::Null, "Library default".to_string()));
+    assert_eq!(options[1], (json!("x-silo-original"), "Original language".to_string()));
+    assert_eq!(options[2], (json!("ar"), "Arabic".to_string()));
+    let options = settings::options(settings::METADATA_LANGUAGE, &json!("x-silo-original"));
+    assert_eq!(options.len(), 48, "Original language is in the list");
+    let options = settings::options(settings::METADATA_LANGUAGE, &json!("nn"));
+    assert_eq!(options.len(), 49);
+    assert_eq!(options[2], (json!("nn"), "nn".to_string()), "a stored language outside the list stays a choice");
+}
+
+#[gpui::test]
+fn add_asks_for_the_original_language_and_then_the_language_to_show_and_remove_deletes_the_row(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::AppContext as _;
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_omarchy::Theme::tokyo_night().apply(cx);
+        common::isolate(cx)
+    });
+    // The server keeps the exceptions that the page writes.
+    let stored = std::sync::Mutex::new(None);
+    let (client, seen) = common::fake(move |request| match request.method.as_str() {
+        "PUT" => {
+            *stored.lock().unwrap() = Some(body(request)["value"].clone());
+            common::ok("update_setting_value_ok.json")
+        }
+        "DELETE" => {
+            *stored.lock().unwrap() = None;
+            json(204, String::new())
+        }
+        _ if request.path == CAPABILITIES => json(200, capabilities(17)),
+        _ => {
+            let items: Vec<_> =
+                stored.lock().unwrap().iter().map(|map| value(settings::METADATA_EXCEPTIONS, map.clone())).collect();
+            json(200, json!({ "revision": 17, "items": items }).to_string())
+        }
+    });
+    let client = std::sync::Arc::new(client);
+    let pages_client = client.clone();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        PageWindow(cx.new(|cx| relics::pages::Pages::new(pages_client, "Test".into(), window, cx)))
+    });
+    // Row 11 is Add exception. The first list has the original languages, Arabic first. The second list has the
+    // languages to show: Original language, then Arabic and Bangla.
+    cx.simulate_keystrokes(",");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j j j j j j j j j enter enter j j enter");
+    cx.run_until_parked();
+    assert_eq!(client.server_settings().metadata_exceptions, [("ar".to_string(), "bn".to_string())].into());
+    let path = "settings/values/catalog.metadata_language_overrides?scope=profile";
+    let writes: Vec<_> =
+        seen.lock().unwrap().iter().filter(|r| r.path.starts_with("settings/values/catalog")).cloned().collect();
+    assert_eq!(writes.iter().map(|r| (r.method.as_str(), r.path.as_str())).collect::<Vec<_>>(), [("PUT", path)]);
+    assert_eq!(body(&writes[0]), json!({ "value": { "ar": "bn" } }));
+    let server = client.server_settings();
+    let rows: Vec<_> =
+        relics::settings_page::sections(Some(&server), 0).into_iter().flat_map(|(_, rows)| rows).collect();
+    assert_eq!(rows[11..13], [Row::Exception(0), Row::AddException]);
+    assert_eq!(relics::settings_page::exception_label("ar", "bn"), "Items in Arabic: show Bangla");
+    // Enter on the exception removes it. The map is empty, so the profile row goes.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(client.server_settings().metadata_exceptions.is_empty());
+    let last = seen.lock().unwrap().iter().rfind(|r| r.path.starts_with("settings/values/catalog")).cloned().unwrap();
+    assert_eq!((last.method.as_str(), last.path.as_str()), ("DELETE", path));
+}
+
+#[test]
+fn exceptions_show_in_the_order_of_the_names_and_add_offers_only_the_free_iso_639_languages() {
+    let mut store = ServerSettings::default();
+    store.set(settings::METADATA_EXCEPTIONS, &json!({ "ja": "en", "de": "x-silo-original", "nn": "no" }));
+    let shown: Vec<_> = relics::settings_page::exceptions(&store)
+        .into_iter()
+        .map(|(source, target)| relics::settings_page::exception_label(source, target))
+        .collect();
+    assert_eq!(
+        shown,
+        ["Items in German: show Original language", "Items in Japanese: show English", "Items in nn: show Norwegian"]
+    );
+    let sources: Vec<_> = relics::settings_page::sources(&store).into_iter().map(|(code, _)| code).collect();
+    assert!(!sources.contains(&json!("ja")) && !sources.contains(&json!("de")), "a language with an exception");
+    assert!(!sources.contains(&json!("pt-BR")), "a language that is not an ISO 639 code");
+    assert!(sources.contains(&json!("ko")));
+    let targets = relics::settings_page::targets();
+    assert_eq!(targets[0], (json!("x-silo-original"), "Original language".to_string()));
+    assert!(targets.contains(&(json!("pt-BR"), "Brazilian Portuguese".to_string())));
+}
+
+#[test]
+fn before_revision_3_the_exception_rows_hide() {
+    let mut store = ServerSettings { manifest_revision: Some(2), ..ServerSettings::default() };
+    store.set(settings::METADATA_EXCEPTIONS, &json!({ "ja": "en" }));
+    let rows: Vec<_> =
+        relics::settings_page::sections(Some(&store), 0).into_iter().flat_map(|(_, rows)| rows).collect();
+    assert!(!rows.iter().any(|row| matches!(row, Row::Exception(_) | Row::AddException)));
+    assert!(rows.iter().any(|row| matches!(row, Row::Server(d) if d.key == settings::METADATA_LANGUAGE)));
 }

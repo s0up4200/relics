@@ -29,7 +29,8 @@ pub enum Change {
     Catalog { library: Option<String>, item: Option<String> },
     /// A Library was added, removed or changed. `None` is no Library.
     Libraries { library: Option<String> },
-    /// A Server setting changed. `None` is no key.
+    /// A Server setting changed. `None` is no key. A change of the Metadata language or the Metadata exceptions
+    /// reaches each part.
     Settings { key: Option<String> },
 }
 
@@ -62,7 +63,11 @@ impl Change {
         };
         match (self, deps) {
             (Change::All, _) => true,
-            (Change::Settings { .. }, deps) => *deps == Deps::Settings,
+            // The Server applies the Metadata language to its catalog answers, so it reloads each part, as a
+            // Profile switch does.
+            (Change::Settings { key }, deps) => {
+                *deps == Deps::Settings || key.as_deref().is_some_and(crate::settings::changes_the_catalog)
+            }
             (_, Deps::Every) => true,
             (_, Deps::Recovery | Deps::Settings) => false,
             (Change::Item { .. }, Deps::Library(_)) => true,
