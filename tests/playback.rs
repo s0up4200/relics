@@ -865,11 +865,36 @@ fn an_early_end_starts_the_same_chain_and_never_reports_the_duration() {
     let mut session = failed_at(3600.0);
     assert_eq!(session.step(Input::EndOfFile, at(2)), vec![Command::Refresh]);
     session.step(Input::Refreshed(Some(refreshed(2))), at(3));
+    session.step(Input::FileLoaded, at(4));
     assert_eq!(session.step(Input::EndOfFile, at(4)), vec![replan(3600.0)]);
     assert_eq!(session.step(Input::Replanned(Some(Decision::Unknown("queued".into()))), at(5)), vec![]);
     assert_eq!(session.prompt(), LOST);
     assert_eq!(session.step(Input::Shutdown, at(6)), vec![stop(3600.0, 1), Command::ClosePlayer]);
     assert_eq!(session.prompt(), "");
+}
+
+// Issue #151: mpv can send the end of the old file after the next load returns.
+#[test]
+fn a_late_end_of_the_old_file_does_not_end_the_reloaded_file() {
+    let mut session = failed_at(3600.0);
+    session.step(Input::EndOfFile, at(2));
+    session.step(Input::Refreshed(Some(refreshed(2))), at(3));
+    assert_eq!(session.step(Input::EndOfFile, at(3)), vec![], "the end of the file before the reload");
+    session.step(Input::FileLoaded, at(4));
+    assert_eq!(session.step(Input::EndOfFile, at(5)), vec![replan(3600.0)]);
+}
+
+#[test]
+fn a_late_end_of_the_old_file_does_not_end_the_next_session() {
+    let mut session = Session::new(None, ServerSettings::default());
+    assert_eq!(session.step(Input::EndOfFile, at(0)), vec![], "before the start request answers");
+    let commands = session.step(Input::Started { decision: decision(|_| {}), access: access(), item: None }, at(1));
+    assert!(matches!(&commands[..], [Command::Load { .. }]), "{commands:?}");
+    assert_eq!(session.step(Input::EndOfFile, at(2)), vec![], "before the file loads");
+    session.step(Input::FileLoaded, at(3));
+    session.step(Input::Duration(7200.0), at(3));
+    session.step(Input::Position(7195.0), at(4));
+    assert_eq!(session.step(Input::EndOfFile, at(5)), vec![stop(7200.0, 1), Command::ClosePlayer]);
 }
 
 #[test]

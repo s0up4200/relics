@@ -687,7 +687,6 @@ fn events_of_a_closed_handle_do_not_reach_the_next_item(cx: &mut TestAppContext)
 // handle name no file. So the session of the next Item gets the events of the old file until then.
 
 #[gpui::test]
-#[ignore = "fault found in #115; the fix needs its own spec"]
 fn the_end_of_the_old_file_does_not_end_the_next_item_before_it_loads(cx: &mut TestAppContext) {
     let rig = rig(cx);
     rig.play(episode(1), cx);
