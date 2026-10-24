@@ -441,9 +441,11 @@ impl Client {
     }
 
     /// Writes one Server setting of the active Profile at the `profile` scope, and keeps the new value in memory
-    /// when the write succeeds. A null value is "No preference", and for the maximum bitrate "No limit", which
-    /// deletes the profile row. When the Effective value came from the device row of this device, the device row
-    /// would still win, so the write also deletes it, as the web does. When that delete fails, the save fails, and
+    /// when the write succeeds. A null value is "No preference". For the maximum bitrate, null is "No limit", and
+    /// the write deletes the profile row. For the Metadata language, null is "Library default", and the write
+    /// deletes the profile row. An empty map of Metadata exceptions also deletes the profile row. When the
+    /// Effective value came from the device row of this device, the device row would still win, so the write also
+    /// deletes it, as the web does. When that delete fails, the save fails, and
     /// the client reads the settings again to get the value that applies. After a saved quality or bitrate, the
     /// client also reads the settings again, because the household cap can lower the value.
     /// The Subtitle appearance belongs to one device, as on the web: it is written at the device row of this
@@ -462,8 +464,14 @@ impl Client {
         let profile_id = self.auth.lock().unwrap().profile_id.clone();
         let path = format!("settings/values/{key}?scope={scope}");
         self.settings_writes.fetch_add(1, Ordering::SeqCst);
-        // "No limit" deletes the profile row, as the web does. A 404 is a row that is already gone.
-        let mut saved = if value.is_null() && key == "playback.max_bitrate_kbps" {
+        // "No limit", "Library default" and an empty map of Metadata exceptions delete the profile row, as the web
+        // does. A 404 is a row that is already gone.
+        let deletes = match key {
+            "playback.max_bitrate_kbps" | settings::METADATA_LANGUAGE => value.is_null(),
+            settings::METADATA_EXCEPTIONS => value.as_object().is_some_and(|map| map.is_empty()),
+            _ => false,
+        };
+        let mut saved = if deletes {
             match self.call::<()>(Method::DELETE, &path, None).await {
                 Err(err) if err.status() == Some(404) => Ok(()),
                 deleted => deleted,

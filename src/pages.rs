@@ -30,9 +30,9 @@ use crate::person::PersonPage;
 use crate::release::ReleaseCheck;
 use crate::requests::Requests;
 use crate::search::{OpenPerson, Search};
-use crate::settings_page::{AccountAction, SettingsPage};
+use crate::settings_page::{AccountAction, CatalogSettingSaved, SettingsPage};
 use crate::state::Pair;
-use freshness::{Coordinator, Moved};
+use freshness::{Change, Coordinator, Moved};
 
 pub mod freshness;
 pub mod loading;
@@ -389,6 +389,10 @@ impl Pages {
         let (client, (pairs, active), release) = (self.client.clone(), self.pairs.clone(), self.release.clone());
         let page = cx.new(|cx| SettingsPage::new(client, pairs, active, release, cx));
         cx.subscribe(&page, |_, _, action: &AccountAction, cx| cx.emit(action.clone())).detach();
+        cx.subscribe(&page, |pages, _, CatalogSettingSaved(key), cx| {
+            pages.refresh(&[Change::Settings { key: Some(key.to_string()) }], cx)
+        })
+        .detach();
         self.sidebar = None;
         self.open(Page::Settings(page), cx);
     }

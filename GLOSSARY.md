@@ -188,6 +188,14 @@ The time in seconds that the subtitles show later (positive) or earlier (negativ
 How plain-text subtitles look on one device: the font, the size, the colors, the background and the position. Each device of a Profile keeps its own.
 _Avoid_: subtitle style, subtitle look
 
+**Metadata language**:
+The language in which the Server gives the titles, descriptions and artwork of Items to a Profile. "Library default" uses the language of each Library.
+_Avoid_: display language, UI language
+
+**Metadata exception**:
+A rule that gives the Items of one original language their own Metadata language. For example: for Items in Japanese, show English.
+_Avoid_: override (that word is for Server settings)
+
 **Version picker**:
 The list on the detail page where the user picks which file version of an Item plays.
 _Avoid_: quality picker

@@ -2,7 +2,7 @@
 //! API client reads them when a Profile opens, and each new Playback session uses them.
 //! The Local settings of this computer live in `$XDG_CONFIG_HOME/relics/settings.toml`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -60,6 +60,12 @@ impl Group {
 pub enum Choices {
     /// Null ("No preference") or a language tag. The labels come from `LANGUAGES`.
     Language,
+    /// Null ("Library default"), "Original language" (`x-silo-original`) or a language tag from `LANGUAGES`.
+    MetadataLanguage,
+    /// The Metadata exceptions: a map from the ISO 639 code of an original language to a language tag or
+    /// `x-silo-original`, 256 entries at most. An entry with another key or a value that is not a text does not
+    /// count. The Settings page shows one row for each exception, so the setting has no choices.
+    Exceptions,
     /// true ("On") or false ("Off").
     OnOff,
     /// The values with their labels, in the order of the web Settings pages.
@@ -96,7 +102,9 @@ impl Definition {
     /// True when the setting can have this value.
     pub fn allows(&self, value: &Value) -> bool {
         match self.choices {
-            Choices::Language => value.is_null() || value.is_string(),
+            Choices::Language | Choices::MetadataLanguage => value.is_null() || value.is_string(),
+            // `set` drops each entry that the contract does not allow, as the web does.
+            Choices::Exceptions => value.is_object(),
             Choices::OnOff => value.is_boolean(),
             Choices::List(list) => list.iter().any(|&(v, _)| value.as_str() == Some(v)),
             Choices::Open(_) => value.as_str().is_some_and(|v| !v.is_empty()),
@@ -113,17 +121,24 @@ impl Definition {
     pub fn options(&self, current: &Value) -> Vec<(Value, String)> {
         let pairs = |list: &[(&str, &str)]| list.iter().map(|&(v, l)| (Value::from(v), l.to_string())).collect();
         match self.choices {
-            Choices::Language => {
-                let mut options = vec![(Value::Null, "No preference".to_string())];
+            Choices::Language | Choices::MetadataLanguage => {
+                let mut options = match self.choices {
+                    Choices::Language => vec![(Value::Null, "No preference".to_string())],
+                    _ => vec![
+                        (Value::Null, "Library default".to_string()),
+                        (Value::from(ORIGINAL), language_name(ORIGINAL).to_string()),
+                    ],
+                };
                 if let Some(tag) = current.as_str()
+                    && !options.iter().any(|(value, _)| value == current)
                     && !LANGUAGES.iter().any(|&(code, _)| code == tag)
                 {
-                    let name = if tag == "x-silo-original" { "Original language" } else { tag };
-                    options.push((current.clone(), name.to_string()));
+                    options.push((current.clone(), language_name(tag).to_string()));
                 }
                 options.extend(pairs(&LANGUAGES));
                 options
             }
+            Choices::Exceptions => Vec::new(),
             Choices::OnOff => vec![(Value::Bool(true), "On".to_string()), (Value::Bool(false), "Off".to_string())],
             Choices::List(list) => pairs(list),
             Choices::Color(list) | Choices::Open(list) => {
@@ -156,6 +171,17 @@ impl Definition {
     }
 }
 
+/// The tag of "Original language": the original language of each Item.
+pub const ORIGINAL: &str = "x-silo-original";
+
+/// The English name of a language tag from `LANGUAGES`, "Original language", or else the tag itself.
+pub fn language_name(tag: &str) -> &str {
+    if tag == ORIGINAL {
+        return "Original language";
+    }
+    LANGUAGES.iter().find(|&&(code, _)| code == tag).map_or(tag, |&(_, name)| name)
+}
+
 /// A bitrate as the web Settings page shows it: `1.5 Mbps`, `20 Mbps`, or `800 kbps`. The Quality list of the
 /// Player view shows `20.0 Mbps`.
 fn bitrate_label(kbps: u64) -> String {
@@ -164,6 +190,17 @@ fn bitrate_label(kbps: u64) -> String {
         _ if kbps.is_multiple_of(1000) => format!("{} Mbps", kbps / 1000),
         _ => format!("{:.1} Mbps", kbps as f64 / 1000.0),
     }
+}
+
+/// The key of the Metadata language.
+pub const METADATA_LANGUAGE: &str = "catalog.metadata_language";
+/// The key of the Metadata exceptions.
+pub const METADATA_EXCEPTIONS: &str = "catalog.metadata_language_overrides";
+
+/// The Server applies the key to the titles, descriptions and artwork in its answers, so a change of it reloads
+/// the open pages.
+pub fn changes_the_catalog(key: &str) -> bool {
+    key == METADATA_LANGUAGE || key == METADATA_EXCEPTIONS
 }
 
 /// The key of the Subtitle appearance. Its value is one object, and each of its fields is one row.
@@ -184,7 +221,7 @@ const FONT_COLORS: &[(&str, &str)] = &[
 
 /// The Server settings that the app reads, in the order of the Settings page. The rows of the Subtitle
 /// appearance come one after the other.
-pub static DEFINITIONS: LazyLock<[Definition; 20]> = LazyLock::new(|| {
+pub static DEFINITIONS: LazyLock<[Definition; 22]> = LazyLock::new(|| {
     let setting = |key, revision, label, default, choices, group| Definition {
         key,
         revision,
@@ -278,6 +315,23 @@ pub static DEFINITIONS: LazyLock<[Definition; 20]> = LazyLock::new(|| {
             Choices::OnOff,
             Group::LanguageAndSubtitles,
         ),
+        // The option set `catalog_metadata_languages` is the same list as `LANGUAGES`.
+        setting(
+            METADATA_LANGUAGE,
+            1,
+            "Metadata language",
+            Value::Null,
+            Choices::MetadataLanguage,
+            Group::LanguageAndSubtitles,
+        ),
+        setting(
+            METADATA_EXCEPTIONS,
+            3,
+            "Metadata exceptions",
+            json!({}),
+            Choices::Exceptions,
+            Group::LanguageAndSubtitles,
+        ),
         // The fields, labels and swatches of the web Subtitles settings page. Revision 14 added the text opacity.
         appearance(
             "fontSize",
@@ -357,6 +411,10 @@ pub struct ServerSettings {
     pub auto_skip_recap: bool,
     pub auto_play_next: bool,
     pub subtitle_appearance: SubtitleAppearance,
+    /// The Metadata language, a language tag or `x-silo-original`. `None` is "Library default".
+    pub metadata_language: Option<String>,
+    /// The Metadata exceptions: the ISO 639 code of an original language, and the language tag to show.
+    pub metadata_exceptions: BTreeMap<String, String>,
     /// The revision of the settings contract that the server gives to the app: the `manifest_revision` of its
     /// capabilities, or 1 when it has no batched effective reads. The server knows a key when this is equal to or
     /// higher than the revision of its definition. `None` until the app reads capabilities that allow the settings.
@@ -401,6 +459,8 @@ impl Default for ServerSettings {
             auto_skip_recap: false,
             auto_play_next: false,
             subtitle_appearance: SubtitleAppearance::default(),
+            metadata_language: None,
+            metadata_exceptions: BTreeMap::new(),
             manifest_revision: None,
             origins: HashMap::new(),
         };
@@ -590,6 +650,13 @@ impl ServerSettings {
             "playback.auto_skip_credits" => self.auto_skip_credits = on,
             "playback.auto_skip_recap" => self.auto_skip_recap = on,
             "playback.auto_play_next" => self.auto_play_next = on,
+            METADATA_LANGUAGE => self.metadata_language = text.map(String::from),
+            METADATA_EXCEPTIONS => {
+                let code = |code: &str| (2..=3).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_lowercase());
+                let map = value.as_object().into_iter().flatten().filter(|(source, _)| code(source));
+                self.metadata_exceptions =
+                    map.filter_map(|(source, target)| Some((source.clone(), target.as_str()?.to_string()))).collect();
+            }
             _ => {}
         }
     }
@@ -617,6 +684,8 @@ impl ServerSettings {
             "playback.auto_skip_credits" => self.auto_skip_credits.into(),
             "playback.auto_skip_recap" => self.auto_skip_recap.into(),
             "playback.auto_play_next" => self.auto_play_next.into(),
+            METADATA_LANGUAGE => self.metadata_language.clone().into(),
+            METADATA_EXCEPTIONS => json!(self.metadata_exceptions),
             APPEARANCE => serde_json::to_value(&self.subtitle_appearance).expect("the Subtitle appearance serializes"),
             _ => Value::Null,
         }

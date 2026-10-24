@@ -10,6 +10,10 @@
 //!   <value> by the household". A row of a key that the server does not know does not show.
 //!   When Relics cannot read the settings contract capabilities, or they do not allow the settings, each change
 //!   fails.
+//! - Metadata exceptions: one row for each exception, for example "Items in Japanese: show English", in the order
+//!   of the names of the original languages. Enter or a click removes it. "Add exception" asks for the original
+//!   language and then for the language to show. Each change writes the whole map, and an empty map deletes the
+//!   profile row. After a saved change of the Metadata language or the exceptions, the open pages reload.
 //! - Subtitle appearance: one row for each field. A change writes the whole Subtitle appearance at the device row
 //!   of this device, so the rows have no "Set for this device" note. The group says "Applies to this computer
 //!   only".
@@ -26,7 +30,7 @@
 //!
 //! The footer shows the build identity, and a link to the release page when a newer release exists.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
@@ -35,7 +39,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_omarchy::{ActiveTheme, ButtonVariant, button};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::api::Client;
 use crate::choice_list::{Choice, ChoiceList, Outcome};
@@ -44,7 +48,10 @@ use crate::keys::Key;
 use crate::pages::freshness::{Deps, Fresh, Reload};
 use crate::pages::loading::{Failure, Loader};
 use crate::release::ReleaseCheck;
-use crate::settings::{DEFINITIONS, Definition, Group, LocalSettings, ServerSettings};
+use crate::settings::{
+    Choices, DEFINITIONS, Definition, Group, LANGUAGES, LocalSettings, METADATA_EXCEPTIONS, METADATA_LANGUAGE,
+    ServerSettings, changes_the_catalog, definition, language_name,
+};
 use crate::state::Pair;
 
 /// An Accounts action. The Library window does it.
@@ -54,6 +61,11 @@ pub enum AccountAction {
     Remove(Pair),
     AddServer,
 }
+
+/// The Server saved a change of the Metadata language or the Metadata exceptions. The Server applies these
+/// settings to its catalog answers, so the open pages reload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatalogSettingSaved(pub &'static str);
 
 /// The choice `step` places away from the `current` value: the next one for 1, the previous one for -1. It wraps
 /// at the ends. A value that is not in the list goes to the first choice.
@@ -77,6 +89,10 @@ pub enum Local {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Row {
     Server(&'static Definition),
+    /// The index of a Metadata exception in `exceptions`.
+    Exception(usize),
+    /// Add a Metadata exception.
+    AddException,
     Local(Local),
     /// The index of the Server and Account pair.
     Account(usize),
@@ -92,8 +108,15 @@ pub fn sections(server: Option<&ServerSettings>, pairs: usize) -> Vec<(&'static 
         .map(|group| {
             let mut rows: Vec<_> = DEFINITIONS
                 .iter()
-                .filter(|definition| definition.group == group && server.is_some_and(|server| server.knows(definition)))
-                .map(Row::Server)
+                .filter(|definition| definition.group == group)
+                .filter_map(|definition| Some((definition, server.filter(|server| server.knows(definition))?)))
+                .flat_map(|(definition, server)| match definition.choices {
+                    Choices::Exceptions => {
+                        let add = (!sources(server).is_empty()).then_some(Row::AddException);
+                        (0..server.metadata_exceptions.len()).map(Row::Exception).chain(add).collect()
+                    }
+                    _ => vec![Row::Server(definition)],
+                })
                 .collect();
             if group == Group::ThisComputer {
                 rows.extend([Row::Local(Local::HardwareDecoding), Row::Local(Local::CheckReleases)]);
@@ -104,6 +127,33 @@ pub fn sections(server: Option<&ServerSettings>, pairs: usize) -> Vec<(&'static 
         .collect();
     sections.push(("Accounts", (0..pairs).map(Row::Account).chain([Row::AddServer]).collect()));
     sections
+}
+
+/// The Metadata exceptions, as pairs of the original language and the language to show, in the order of the
+/// names of the original languages.
+pub fn exceptions(server: &ServerSettings) -> Vec<(&str, &str)> {
+    let mut list: Vec<_> = server.metadata_exceptions.iter().map(|(s, t)| (s.as_str(), t.as_str())).collect();
+    list.sort_by_key(|&(source, _)| language_name(source));
+    list
+}
+
+/// The row text of a Metadata exception.
+pub fn exception_label(source: &str, target: &str) -> String {
+    format!("Items in {}: show {}", language_name(source), language_name(target))
+}
+
+/// The original languages that "Add exception" offers: the languages of the list with an ISO 639 code and no
+/// exception yet.
+pub fn sources(server: &ServerSettings) -> Vec<(Value, String)> {
+    let free = |code: &str| !code.contains('-') && !server.metadata_exceptions.contains_key(code);
+    LANGUAGES.iter().filter(|(code, _)| free(code)).map(|&(code, name)| (code.into(), name.into())).collect()
+}
+
+/// The languages that a Metadata exception can show: the choices of the Metadata language without "Library
+/// default".
+pub fn targets() -> Vec<(Value, String)> {
+    let options = definition(METADATA_LANGUAGE).expect("the app reads the key").options(&Value::Null);
+    options.into_iter().filter(|(value, _)| !value.is_null()).collect()
 }
 
 /// The one-line note below the row of a Server setting, when its Effective value is not the Profile value. The
@@ -140,6 +190,8 @@ pub struct SettingsPage {
     action: usize,
     /// The open Choice list below the focused row.
     picker: Option<ChoiceList>,
+    /// The original language that "Add exception" picked. The open list then asks for the language to show.
+    adding: Option<String>,
     /// The page has the keyboard focus.
     pub active: bool,
     fresh: Loader,
@@ -150,6 +202,7 @@ pub struct SettingsPage {
 }
 
 impl EventEmitter<AccountAction> for SettingsPage {}
+impl EventEmitter<CatalogSettingSaved> for SettingsPage {}
 
 impl Reload for SettingsPage {
     fn deps(&self) -> Vec<Deps> {
@@ -187,6 +240,7 @@ impl SettingsPage {
             row: 0,
             action: 0,
             picker: None,
+            adding: None,
             active: true,
             fresh: Loader::default(),
             writes: HashMap::new(),
@@ -239,12 +293,41 @@ impl SettingsPage {
         sections(self.server.as_ref(), self.pairs.len()).into_iter().flat_map(|(_, rows)| rows).collect()
     }
 
-    /// The Server setting of the focused row.
-    fn focused_setting(&self) -> Option<&'static Definition> {
-        match self.rows().get(self.row) {
-            Some(Row::Server(definition)) => Some(definition),
-            _ => None,
+    /// The choices of the open list of a row: the choices of a Server setting, or the original languages and then
+    /// the languages to show of "Add exception".
+    fn row_options(&self, row: Option<Row>) -> Vec<(Value, String)> {
+        match (row, &self.server) {
+            (Some(Row::Server(definition)), _) => self.options(definition),
+            (Some(Row::AddException), Some(_)) if self.adding.is_some() => targets(),
+            (Some(Row::AddException), Some(server)) => sources(server),
+            _ => Vec::new(),
         }
+    }
+
+    /// The choices of the open list of a row, as the rows of a Choice list.
+    fn row_choices(&self, row: Option<Row>) -> Vec<Choice> {
+        match row {
+            Some(Row::Server(definition)) => self.choices(definition),
+            row => self.row_options(row).into_iter().map(|(_, label)| Choice::new(label, false)).collect(),
+        }
+    }
+
+    /// Changes the Metadata exceptions with `edit`, and writes the whole map.
+    fn edit_exceptions(&mut self, edit: impl FnOnce(&mut BTreeMap<String, String>), cx: &mut Context<Self>) {
+        let Some(server) = &self.server else {
+            return;
+        };
+        let mut map = server.metadata_exceptions.clone();
+        edit(&mut map);
+        self.set(definition(METADATA_EXCEPTIONS).expect("the app reads the key"), json!(map), cx);
+    }
+
+    /// Removes the Metadata exception at `index`.
+    fn remove_exception(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(source) = self.server.as_ref().and_then(|s| exceptions(s).get(index).map(|e| e.0.to_string())) else {
+            return;
+        };
+        self.edit_exceptions(|map| drop(map.remove(&source)), cx);
     }
 
     /// The choices of a Server setting. They are empty before the page read the settings.
@@ -281,13 +364,24 @@ impl SettingsPage {
         self.picker = Some(ChoiceList::open(&choices));
     }
 
-    /// Picks the choice at `focus` in the open list, and closes the list.
+    /// Picks the choice at `focus` in the open list, and closes the list. The first pick of "Add exception" opens
+    /// the list of the languages to show.
     fn pick(&mut self, focus: usize, cx: &mut Context<Self>) {
         self.picker = None;
-        if let Some(definition) = self.focused_setting()
-            && let Some((value, _)) = self.options(definition).into_iter().nth(focus)
-        {
-            self.set(definition, value, cx);
+        let row = self.rows().get(self.row).copied();
+        if let Some((value, _)) = self.row_options(row).into_iter().nth(focus) {
+            let tag = value.as_str().map(String::from);
+            match (row, self.adding.take(), tag) {
+                (Some(Row::Server(definition)), _, _) => self.set(definition, value, cx),
+                (Some(Row::AddException), None, Some(source)) => {
+                    self.adding = Some(source);
+                    self.picker = Some(ChoiceList::open(&self.row_choices(row)));
+                }
+                (Some(Row::AddException), Some(source), Some(target)) => {
+                    self.edit_exceptions(|map| drop(map.insert(source, target)), cx);
+                }
+                _ => {}
+            }
         }
         cx.notify();
     }
@@ -318,6 +412,9 @@ impl SettingsPage {
         let write = cx.spawn(async move |this, cx| {
             let result = client.set_server_setting(key, value).await;
             this.update(cx, |this, cx| {
+                if result.is_ok() && changes_the_catalog(key) {
+                    cx.emit(CatalogSettingSaved(key));
+                }
                 // The task ends here, so it must not drop itself.
                 if let Some(write) = this.writes.remove(key) {
                     write.detach();
@@ -399,7 +496,7 @@ impl SettingsPage {
     /// A key while the page has the focus. Returns false for a key that the page does not use.
     pub fn key(&mut self, key: Key, cx: &mut Context<Self>) -> bool {
         if self.picker.is_some() {
-            let len = self.focused_setting().map_or(0, |definition| self.options(definition).len());
+            let len = self.row_options(self.rows().get(self.row).copied()).len();
             let outcome = self.picker.as_mut().map_or(Outcome::Unused, |picker| picker.key(key, len));
             match outcome {
                 Outcome::Moved => {}
@@ -426,6 +523,11 @@ impl SettingsPage {
             (Key::Right, Row::Server(definition)) => self.change(definition, 1, cx),
             (Key::Other("enter"), Row::Server(definition)) => self.open_picker(definition, cx),
             (Key::Left, Row::Server(definition)) => self.change(definition, -1, cx),
+            (Key::Other("enter"), Row::Exception(index)) => self.remove_exception(index, cx),
+            (Key::Other("enter"), Row::AddException) => {
+                self.adding = None;
+                self.picker = Some(ChoiceList::open(&self.row_choices(Some(Row::AddException))));
+            }
             (Key::Right | Key::Other("enter") | Key::Left, Row::Local(Local::HardwareDecoding)) => {
                 self.toggle_hwdec(cx)
             }
@@ -586,6 +688,20 @@ impl Render for SettingsPage {
                         let note = self.server.as_ref().and_then(|server| note(server, definition));
                         self.row(index, definition.label.into(), note, value.into(), cx).into_any_element()
                     }
+                    Row::Exception(i) => {
+                        let server = self.server.as_ref().expect("an exception row has the Server settings");
+                        let (source, target) = exceptions(server)[i];
+                        let label = exception_label(source, target);
+                        self.row(index, label.into(), None, "Remove".into(), cx).into_any_element()
+                    }
+                    Row::AddException => {
+                        let open = self.picker.is_some() && self.row == index;
+                        let label = match self.adding.as_deref().filter(|_| open) {
+                            Some(source) => format!("Items in {}: show…", language_name(source)),
+                            None => "Add exception".into(),
+                        };
+                        self.row(index, label.into(), None, "".into(), cx).into_any_element()
+                    }
                     Row::Local(local) => {
                         let (label, on) = match local {
                             Local::HardwareDecoding => ("Hardware decoding", self.local.hardware_decoding),
@@ -596,10 +712,10 @@ impl Render for SettingsPage {
                     Row::Account(i) => self.pair_row(index, i, &self.pairs[i], cx).into_any_element(),
                     Row::AddServer => self.row(index, "Add server".into(), None, "".into(), cx).into_any_element(),
                 });
-                if let (Row::Server(definition), Some(picker)) =
+                if let (Row::Server(_) | Row::AddException, Some(picker)) =
                     (row, self.picker.as_ref().filter(|_| self.row == index))
                 {
-                    elements.push(self.picker(picker, self.choices(definition), cx).into_any_element());
+                    elements.push(self.picker(picker, self.row_choices(Some(row)), cx).into_any_element());
                 }
                 index += 1;
             }
@@ -695,7 +811,14 @@ mod tests {
             ("Next episode", vec!["Auto-play next episode"]),
             (
                 "Language & subtitles",
-                vec!["Spoken language", "Subtitle language", "Subtitle behavior", "Show forced subtitles"],
+                vec![
+                    "Spoken language",
+                    "Subtitle language",
+                    "Subtitle behavior",
+                    "Show forced subtitles",
+                    "Metadata language",
+                    "AddException",
+                ],
             ),
             (
                 "Subtitle appearance",
