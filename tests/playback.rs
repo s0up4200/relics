@@ -233,15 +233,265 @@ fn a_stream_without_the_embedded_tracks_adds_the_sidecar_of_an_embedded_track() 
 }
 
 #[test]
-fn a_track_that_needs_a_burn_in_shows_from_the_file_in_direct_play_and_else_not_at_all() {
+fn a_track_that_needs_a_burn_in_shows_from_the_file_in_direct_play() {
+    let mut session = french("original_http", None);
+    // French is the third embedded track of the fixture.
+    assert_eq!(session.step(Input::FileLoaded, at(0)), vec![Command::SelectSubtitle(Some(3))], "no replan");
+}
+
+// The burn-in of a subtitle track by the Server.
+
+/// A session with French subtitles always on, and the fixture plan with `delivery`. The French track of the
+/// plan (index 3) has no URL, so the Server must draw it into the video on each plan but direct play. `item` is
+/// the Item detail.
+fn french(delivery: &str, item: Option<Value>) -> Session {
     let settings = ServerSettings {
         subtitle_mode: SubtitleMode::Always,
         subtitle_language: Some("fr".into()),
         ..ServerSettings::default()
     };
-    // French is the third embedded track of the fixture.
-    assert_eq!(load_with(settings.clone(), "en"), vec![Command::SelectSubtitle(Some(3))]);
-    assert_eq!(load_with_delivery(settings, "en", "server_transcode_hls"), vec![]);
+    let mut session = Session::new(None, if item.is_some() { ServerSettings::default() } else { settings });
+    let mut decision = decision(|body| body["playback_plan"]["delivery"] = delivery.into());
+    let Decision::Playable { attempt_id, .. } = &mut decision else { unreachable!() };
+    *attempt_id = "attempt-1".into();
+    let item = item.map(|item| std::sync::Arc::new(serde_json::from_value(item).unwrap()));
+    session.step(Input::Started { decision, access: access(), item }, at(0));
+    session
+}
+
+/// The `track_change` replan of the session of `french` at `position`, which asks the Server to draw the subtitle
+/// track `index`, or no track.
+fn track_change(index: Option<i64>, position: f64) -> Command {
+    let Command::Replan(failure) = replan(position) else { unreachable!() };
+    let mut selected_tracks = failure.selected_tracks.clone();
+    if let Some(index) = index {
+        selected_tracks["subtitle"] = serde_json::json!({ "id": "", "index": index });
+    }
+    Command::Replan(Replan {
+        attempted_plan_keys: vec![],
+        selected_tracks,
+        operation: Operation::TrackChange,
+        ..failure
+    })
+}
+
+/// The answer to a replan: the transcode of the own fixture, which draws the subtitle track `index` into the video.
+fn burn_in_plan(index: Option<i64>) -> Decision {
+    let Decision::Playable { session_id, mut plan, audio_language, markers, attempt_id, quality_preference } =
+        replanned()
+    else {
+        unreachable!()
+    };
+    if let Some(index) = index {
+        plan.subtitle.mode = "burn_in".into();
+        plan.selected_tracks.subtitle =
+            Some(serde_json::from_value(serde_json::json!({ "id": "file:42:subtitle:3", "index": index })).unwrap());
+    }
+    Decision::Playable { session_id, plan, audio_language, markers, attempt_id, quality_preference }
+}
+
+#[test]
+fn a_track_that_needs_a_burn_in_asks_the_server_to_draw_it_when_the_file_loads() {
+    let mut session = french("server_transcode_hls", None);
+    assert_eq!(session.step(Input::FileLoaded, at(0)), vec![track_change(Some(3), 12.5)]);
+    session.step(Input::Position(30.0), at(1));
+    let commands = session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(2));
+    assert_eq!(commands, vec![load(&transcode(), headers(), 0.0)], "the new plan plays at the same position");
+    assert_eq!(session.step(Input::FileLoaded, at(3)), vec![], "the video has the subtitles, so mpv shows none");
+    // A quality change keeps the burn-in, so the app asks for it no more.
+    session.step(Input::PickQuality("1080p-medium".into()), at(4));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(5));
+    assert_eq!(session.step(Input::FileLoaded, at(6)), vec![]);
+}
+
+#[test]
+fn the_app_asks_for_a_burn_in_once_and_a_failed_ask_keeps_the_plan_that_plays() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(Some(burn_in_plan(None))), at(1));
+    assert_eq!(session.step(Input::FileLoaded, at(2)), vec![], "the server gave no burn-in, so no second ask");
+
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    assert_eq!(session.step(Input::Replanned(None), at(1)), vec![]);
+    assert_eq!(session.step(Input::FileLoaded, at(2)), vec![], "a reload of the old plan asks no more");
+}
+
+#[test]
+fn after_a_recovery_the_app_asks_for_the_burn_in_once_the_stream_is_healthy_again() {
+    let mut session = french("server_transcode_hls", None);
+    assert_eq!(session.step(Input::LoadFailed, at(0)), vec![Command::Refresh]);
+    session.step(Input::Refreshed(Some(access())), at(1));
+    assert_eq!(session.step(Input::FileLoaded, at(2)), vec![], "the recovery chain still runs");
+    assert_eq!(session.step(Input::Position(20.0), at(3)), vec![]);
+    assert_eq!(session.step(Input::Position(30.0), at(4)), vec![track_change(Some(3), 30.0)]);
+    assert_eq!(session.step(Input::Position(31.0), at(5)), vec![], "one ask");
+}
+
+#[test]
+fn a_remembered_series_track_that_needs_a_burn_in_asks_the_server_to_draw_it() {
+    let path = format!("{}/tests/fixtures/own/get_catalog_item_effective_subtitles.json", env!("CARGO_MANIFEST_DIR"));
+    let mut item: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    item["effective_subtitle_track_signature"] = serde_json::json!({
+        "source": "embedded", "language": "fre", "codec": "dvd_subtitle", "label": "French",
+        "forced": false, "hearing_impaired": false,
+    });
+    let mut session = french("server_transcode_hls", Some(item));
+    assert_eq!(session.step(Input::FileLoaded, at(0)), vec![track_change(Some(3), 12.5)]);
+}
+
+#[test]
+fn subtitles_turned_off_ask_for_no_burn_in() {
+    let mut first = playing(None);
+    first.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(1));
+    let settings = ServerSettings {
+        subtitle_mode: SubtitleMode::Always,
+        subtitle_language: Some("fr".into()),
+        ..ServerSettings::default()
+    };
+    let mut session = Session::new(None, settings).with_carry(first.carry());
+    let decision = decision(|body| body["playback_plan"]["delivery"] = "server_transcode_hls".into());
+    session.step(Input::Started { decision, access: access(), item: None }, at(2));
+    assert_eq!(session.step(Input::FileLoaded, at(2)), vec![]);
+}
+
+#[test]
+fn a_pick_of_a_burn_in_track_hides_the_subtitles_of_mpv_and_asks_the_server_to_draw_it() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(None), at(1));
+    session.step(Input::Position(30.0), at(2));
+    assert_eq!(
+        session.step(Input::PickBurnIn(3), at(3)),
+        vec![Command::SelectSubtitle(None), track_change(Some(3), 30.0)]
+    );
+    let commands = session.step(Input::PickBurnIn(3), at(4));
+    assert_eq!(commands, vec![Command::SelectSubtitle(None)], "one replan at a time");
+    assert_eq!(session.carry().subtitle, Some(Choice::Track { language: Some("fre".into()), forced: false }));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(5));
+    assert_eq!(session.step(Input::PickBurnIn(3), at(6)), vec![], "the video has the track already");
+    assert_eq!(session.step(Input::PickBurnIn(9), at(6)), vec![], "no track 9 in the plan");
+}
+
+#[test]
+fn off_in_the_track_picker_asks_the_server_to_stop_the_burn_in() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(1));
+    session.step(Input::FileLoaded, at(2));
+    session.step(Input::Position(30.0), at(3));
+    let commands = session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(4));
+    let [Command::SelectSubtitle(None), Command::Replan(replan)] = &commands[..] else { panic!("{commands:?}") };
+    // The transcode starts at source 3600 s. A track change with no subtitle turns the burn-in off.
+    let audio = serde_json::json!({ "audio": { "id": "file:42:audio:0", "index": 0 } });
+    assert_eq!((replan.operation, replan.position, &replan.selected_tracks), (Operation::TrackChange, 3630.0, &audio));
+}
+
+#[test]
+fn off_while_the_ask_for_a_burn_in_runs_stops_the_burn_in_of_the_answer() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(1)),
+        vec![Command::SelectSubtitle(None)]
+    );
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(2));
+    let commands = session.step(Input::FileLoaded, at(3));
+    let [Command::Replan(replan)] = &commands[..] else { panic!("{commands:?}") };
+    assert_eq!((replan.operation, replan.selected_tracks.get("subtitle")), (Operation::TrackChange, None));
+    // The Server keeps the burn-in, so the app asks no more.
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(4));
+    assert_eq!(session.step(Input::FileLoaded, at(5)), vec![]);
+    assert_eq!(session.step(Input::Position(30.0), at(6)), vec![]);
+}
+
+#[test]
+fn off_while_a_quality_change_of_a_burn_in_runs_stops_the_burn_in_of_the_new_plan() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(1));
+    session.step(Input::FileLoaded, at(2));
+    session.step(Input::PickQuality("1080p-medium".into()), at(3));
+    assert_eq!(
+        session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(4)),
+        vec![Command::SelectSubtitle(None)]
+    );
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(5));
+    let commands = session.step(Input::FileLoaded, at(6));
+    let [Command::Replan(replan)] = &commands[..] else { panic!("{commands:?}") };
+    assert_eq!((replan.operation, replan.selected_tracks.get("subtitle")), (Operation::TrackChange, None));
+    assert_eq!(session.step(Input::Position(30.0), at(7)), vec![], "one ask");
+}
+
+/// The subtitle commands and the subtitle of each `track_change` replan in `commands`.
+fn subtitle_asks(commands: &[Command]) -> Vec<Option<Value>> {
+    let asks = commands.iter().filter_map(|command| match command {
+        Command::Replan(replan) if replan.operation == Operation::TrackChange => Some(replan),
+        _ => None,
+    });
+    asks.map(|replan| replan.selected_tracks.get("subtitle").cloned()).collect()
+}
+
+#[test]
+fn a_track_of_mpv_picked_while_the_ask_for_a_burn_in_runs_stops_the_burn_in_of_the_answer() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Tracks(track_list(false)), at(1));
+    let commands = session.step(Input::PickTrack { kind: Kind::Sub, id: Some(2) }, at(2));
+    assert_eq!(commands, vec![Command::SelectSubtitle(Some(2))], "the ask for the burn-in still runs");
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(3));
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(4))), [None], "no subtitle: stop the burn-in");
+}
+
+#[test]
+fn a_burn_in_pick_while_another_replan_runs_asks_once_the_replan_ends() {
+    // A pick while a quality change runs.
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(None), at(1));
+    session.step(Input::PickQuality("1080p-medium".into()), at(2));
+    assert_eq!(session.step(Input::PickBurnIn(3), at(3)), vec![Command::SelectSubtitle(None)]);
+    session.step(Input::Replanned(Some(replanned())), at(4));
+    let index = serde_json::json!({ "id": "", "index": 3 });
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(5))), [Some(index.clone())]);
+
+    // A pick of the burned-in track while the stop of its burn-in runs.
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(1));
+    session.step(Input::FileLoaded, at(2));
+    assert_eq!(subtitle_asks(&session.step(Input::PickTrack { kind: Kind::Sub, id: None }, at(3))), [None]);
+    assert_eq!(session.step(Input::PickBurnIn(3), at(4)), vec![], "the video still has the track");
+    session.step(Input::Replanned(Some(burn_in_plan(None))), at(5));
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(6))), [Some(index)]);
+}
+
+#[test]
+fn a_direct_play_plan_shows_the_picked_burn_in_track_from_the_file_with_no_replan() {
+    let mut session = french("server_transcode_hls", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Replanned(None), at(1));
+    session.step(Input::PickBurnIn(3), at(2));
+    session.step(Input::Replanned(Some(burn_in_plan(Some(3)))), at(3));
+    session.step(Input::FileLoaded, at(4));
+    // The Server answers a quality change with the Original file.
+    session.step(Input::PickQuality("1080p-medium".into()), at(5));
+    session.step(Input::Replanned(Some(decision(|_| {}))), at(6));
+    let commands = session.step(Input::FileLoaded, at(7));
+    assert_eq!(commands, vec![Command::SelectSubtitle(Some(3))], "the French track of the file, and no replan");
+    assert_eq!(session.step(Input::Position(30.0), at(8)), vec![]);
+}
+
+#[test]
+fn a_track_of_the_file_picked_in_direct_play_asks_for_its_burn_in_on_a_later_transcode() {
+    let mut session = french("original_http", None);
+    session.step(Input::FileLoaded, at(0));
+    session.step(Input::Tracks(tracks::parse(r#"[{"id":3,"type":"sub","lang":"fre","codec":"dvd_subtitle"}]"#)), at(1));
+    session.step(Input::PickTrack { kind: Kind::Sub, id: Some(3) }, at(2));
+    session.step(Input::PickQuality("1080p-medium".into()), at(3));
+    session.step(Input::Replanned(Some(replanned())), at(4));
+    let index = serde_json::json!({ "id": "", "index": 3 });
+    assert_eq!(subtitle_asks(&session.step(Input::FileLoaded, at(5))), [Some(index)]);
 }
 
 // The skip state machine.
