@@ -99,6 +99,15 @@ To get a transcode plan, store the setting and send its event, as "Change the Se
 
 Each request of mpv for the video adds a line to `$S/rig.log`, for example `rig: GET /rig/media/hls/index.m3u8 -> 206`.
 
+### Ask for a burn-in
+
+Each plan has one subtitle track, `English (PGS)`. Only a burn-in can show it. A burn-in is a transcode in which the Server draws the subtitles into the video. On a transcode plan, the app asks for the burn-in with a `track_change` replan in two cases:
+
+- The subtitle choice at the start is the track. To get this choice, store `always` in `playback.subtitle_mode` and `en` in `playback.subtitle_language`, and send the event of each setting.
+- The user picks the track in the Track picker of the subtitles (the `s` key).
+
+A pick of Off in that Track picker stops the burn-in. Each replan adds a line to `$S/rig.log`, for example `rig: replan "track_change" with subtitle {"id":"","index":0}`. The fake then gives a plan that draws the track. The video does not change, so the rig shows no subtitles.
+
 ### Start a recovery
 
 Make the next request for the video fail with a 503. Each call adds one failure:

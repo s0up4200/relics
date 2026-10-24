@@ -8,7 +8,7 @@
 use std::cmp::Reverse;
 
 use super::tracks::Choice;
-use crate::api::wire::{SubtitleInventoryItemV3 as Track, WatchSubtitleSignature as Signature};
+use crate::api::wire::{self, SubtitleInventoryItemV3 as Track, WatchSubtitleSignature as Signature};
 use crate::settings::{ServerSettings, SubtitleMode};
 
 /// The `playback.audio_language` values that mean "the original language of the Item".
@@ -62,6 +62,16 @@ pub fn choose(
 pub fn carried(tracks: &[Track], choice: &Choice) -> Option<i64> {
     let matching = tracks.iter().filter(|track| choice.matches(track.language.as_deref(), track.forced));
     matching.min_by_key(|track| priority(track)).map(|track| track.combined_index)
+}
+
+/// The Server must draw `track` into the video, because it has no file that mpv can show.
+pub fn needs_burn_in(track: &Track) -> bool {
+    track.delivery == "burn_in_only" || track.url.is_none()
+}
+
+/// The `combined_index` of the subtitle track that the Server draws into the video of `plan`.
+pub fn burned_in(plan: &wire::PlaybackPlan) -> Option<i64> {
+    (plan.subtitle.mode == "burn_in").then(|| plan.selected_tracks.subtitle.as_ref()?.index).flatten()
 }
 
 fn normalize(value: Option<&str>) -> String {
@@ -131,7 +141,7 @@ fn score(track: &Track, remembered: Option<&Signature>) -> u8 {
 }
 
 /// The label that the web player shows and remembers for a track.
-fn label_of(track: &Track) -> String {
+pub fn label_of(track: &Track) -> String {
     track
         .label
         .clone()

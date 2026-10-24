@@ -127,9 +127,14 @@ impl Fake {
     /// The playable answer to the start or replan request `body` for the test video, in the Playback session
     /// `session`. A start has no session, so the fake gives it a new one. The quality `original`, `auto` or none
     /// gives the Original file. Each other quality gives a transcode plan, at the step of the Quality ladder with
-    /// that label, or else at the 1080p Medium step. A start position past the end of the video starts at 0.
+    /// that label, or else at the 1080p Medium step. A start position past the end of the video starts at 0. The
+    /// plan has one subtitle track, which only a burn-in can show. A replan that names it gives a plan that draws
+    /// it into the video. The video does not change, so the rig shows no subtitles.
     fn plan(&self, body: &str, session: Option<&str>) -> Value {
         let body: Value = serde_json::from_str(body).unwrap_or_default();
+        if session.is_some() {
+            eprintln!("rig: replan {} with subtitle {}", body["operation"], body["selected_tracks"]["subtitle"]);
+        }
         let quality = body["quality_preference"].as_str().unwrap_or_default();
         let original = matches!(quality, "" | "auto" | "original");
         let (fixture, url) = match original {
@@ -156,7 +161,16 @@ impl Fake {
             "source_start_seconds": position, "stream_origin_seconds": 0, "player_start_seconds": position,
             "timeline_offset_seconds": 0, "can_seek_anywhere": true, "seek_restoration": "player_position",
         });
-        plan["subtitle"]["inventory"] = json!([]);
+        plan["subtitle"]["inventory"] = json!([{
+            "track_id": "rig:subtitle:0", "combined_index": 0, "source": "embedded", "codec": "hdmv_pgs_subtitle",
+            "language": "eng", "label": "English (PGS)", "forced": false, "default": false, "hearing_impaired": false,
+            "delivery": "burn_in_only",
+        }]);
+        let subtitle = &body["selected_tracks"]["subtitle"];
+        if body["operation"].is_string() && subtitle["index"] == 0 {
+            plan["subtitle"]["mode"] = "burn_in".into();
+            plan["selected_tracks"]["subtitle"] = subtitle.clone();
+        }
         plan["source"]["duration_seconds"] = VIDEO_SECONDS.into();
         if !original {
             let step = steps.as_array().unwrap().iter().skip(1).find(|step| step["label"] == quality);

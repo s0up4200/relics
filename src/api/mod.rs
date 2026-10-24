@@ -650,6 +650,7 @@ impl Client {
         let operation = match replan.operation {
             Operation::FailureRecovery => "failure_recovery",
             Operation::QualityChange => "quality_change",
+            Operation::TrackChange => "track_change",
         };
         // The server takes at most 16 keys and a count of at most 8.
         let mut fields = serde_json::json!({

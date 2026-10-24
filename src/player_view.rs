@@ -21,8 +21,8 @@ use crate::choice_list::{Choice, ChoiceList, Outcome};
 use crate::click::Clickable as _;
 use crate::filter_panel::bar_pill;
 use crate::keys::Key;
-use crate::playback::Input;
 use crate::playback::tracks::{Kind, Track};
+use crate::playback::{Input, subtitles};
 use crate::player::Controller;
 use crate::video::Surface;
 use crate::{artwork, detail};
@@ -95,6 +95,8 @@ pub enum List {
 pub enum Pick {
     /// A track id, or `None` for subtitles off.
     Track(Option<i64>),
+    /// The `combined_index` of a subtitle track that the Server must draw into the video.
+    BurnIn(i64),
     /// A file id.
     Version(String),
     /// A step label of the Quality ladder.
@@ -233,7 +235,7 @@ impl PlayerView {
             |kind| track_rows(player.tracks(), kind).into_iter().map(|(id, row)| (Pick::Track(id), row)).collect();
         match list {
             List::Audio => tracks(Kind::Audio),
-            List::Subtitles => tracks(Kind::Sub),
+            List::Subtitles => subtitle_rows(player.tracks(), player.plan()),
             List::Quality => match player.plan() {
                 Some(plan) => quality_rows(player.versions(), plan, player.quality()),
                 None => Vec::new(),
@@ -259,6 +261,7 @@ impl PlayerView {
         match (list, pick) {
             (List::Audio, Pick::Track(id)) => self.step(Input::PickTrack { kind: Kind::Audio, id }, cx),
             (_, Pick::Track(id)) => self.step(Input::PickTrack { kind: Kind::Sub, id }, cx),
+            (_, Pick::BurnIn(index)) => self.step(Input::PickBurnIn(index), cx),
             (_, Pick::Version(file_id)) => self.step(Input::SwitchVersion(file_id), cx),
             (_, Pick::Quality(label)) => self.step(Input::PickQuality(label), cx),
             (_, Pick::Chapter(start)) => self.step(Input::SetPosition(start), cx),
@@ -845,6 +848,32 @@ pub fn track_rows(tracks: &[Track], kind: Kind) -> Vec<(Option<i64>, Choice)> {
     off.into_iter().chain(rows).collect()
 }
 
+/// The rows of the Subtitles list: the rows of `track_rows`, then the tracks of `plan` that the Server must draw
+/// into the video, and the track that it draws. Direct play shows the tracks of the file, so it adds none.
+pub fn subtitle_rows(tracks: &[Track], plan: Option<&wire::PlaybackPlan>) -> Vec<(Pick, Choice)> {
+    let mut rows: Vec<_> = track_rows(tracks, Kind::Sub).into_iter().map(|(id, row)| (Pick::Track(id), row)).collect();
+    let Some(plan) = plan.filter(|plan| Delivery::from(plan.delivery.clone()) != Delivery::OriginalHttp) else {
+        return rows;
+    };
+    let burned = subtitles::burned_in(plan);
+    if burned.is_some() {
+        // Off is the first row.
+        rows[0].1.current = false;
+    }
+    let inventory = plan.subtitle.inventory.iter();
+    rows.extend(inventory.filter(|t| subtitles::needs_burn_in(t) || burned == Some(t.combined_index)).map(|track| {
+        let tags = [(track.forced, "Forced"), (track.hearing_impaired, "SDH"), (true, "Burn-in")];
+        let row = Choice {
+            label: subtitles::label_of(track),
+            detail: track.codec.as_deref().unwrap_or_default().to_uppercase(),
+            tags: tags.into_iter().filter_map(|(on, tag)| on.then_some(tag)).collect(),
+            current: burned == Some(track.combined_index),
+        };
+        (Pick::BurnIn(track.combined_index), row)
+    }));
+    rows
+}
+
 /// The rows of the Quality list: the file versions when the Item has more than one, then the steps of the
 /// Quality ladder, also when the plan offers only one. A pick of a version sends its file id, a pick of a step its
 /// label.
@@ -1016,8 +1045,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Pick, chapter_rows, clock, delay_label, info_rows, marker_span, quality_rows, seek_target, thumb_tile,
-        track_rows,
+        Pick, chapter_rows, clock, delay_label, info_rows, marker_span, quality_rows, seek_target, subtitle_rows,
+        thumb_tile, track_rows,
     };
     use crate::api::wire;
     use crate::playback::tracks::{Kind, parse};
@@ -1180,6 +1209,27 @@ mod tests {
         assert_eq!(ids, [(Some(1), true), (Some(2), false)], "no Off row for audio");
         let off = track_rows(&parse(r#"[{"id":1,"type":"sub"}]"#), Kind::Sub);
         assert!(off[0].1.current, "Off plays when no subtitle track does");
+    }
+
+    #[test]
+    fn the_subtitle_list_adds_the_tracks_that_the_server_must_draw_into_the_video() {
+        let tracks = parse(r#"[{"id":1,"type":"sub","lang":"eng","external":true}]"#);
+        let rows = |plan: &wire::PlaybackPlan| {
+            let rows = subtitle_rows(&tracks, Some(plan));
+            rows.into_iter().map(|(pick, row)| (pick, row.label, row.tags, row.current)).collect::<Vec<_>>()
+        };
+        // French (index 3) has no URL in the inventory of the fixture.
+        let french = |current| (Pick::BurnIn(3), "French".to_string(), vec!["Burn-in"], current);
+        let off = |current| (Pick::Track(None), "Off".to_string(), vec![], current);
+        let eng = (Pick::Track(Some(1)), "eng".to_string(), vec!["External"], false);
+        assert_eq!(rows(&plan(json!({}))), [off(true), eng.clone(), french(false)]);
+        let burned = plan(json!({
+            "subtitle": { "mode": "burn_in", "inventory": plan(json!({})).subtitle.inventory },
+            "selected_tracks": { "subtitle": { "id": "file:42:subtitle:3", "index": 3 } },
+        }));
+        assert_eq!(rows(&burned), [off(false), eng.clone(), french(true)]);
+        let direct = plan(json!({ "delivery": "original_http" }));
+        assert_eq!(rows(&direct), [off(true), eng], "direct play shows the tracks of the file");
     }
 
     #[test]

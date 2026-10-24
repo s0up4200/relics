@@ -415,6 +415,29 @@ fn a_quality_step_replans_with_its_label_and_no_failure() {
 }
 
 #[test]
+fn a_subtitle_change_replans_as_a_track_change_with_the_tracks_and_no_failure() {
+    let (client, seen) = fake("playback_start_opaque_ids.json");
+    block_on(client.start_playback("movie:heat-1995", None)).unwrap();
+    let selected_tracks =
+        json!({ "audio": { "id": "file:42:audio:0", "index": 0 }, "subtitle": { "id": "", "index": 3 } });
+    let replan = Replan {
+        session_id: SESSION.into(),
+        attempt_id: "attempt".into(),
+        failed_plan_id: "plan:478677870860e5e5108c18bff749b34b".into(),
+        plan_attempt_key: "v3:f0144c47fa349e3e".into(),
+        attempted_plan_keys: vec![],
+        selected_tracks: selected_tracks.clone(),
+        position: 1800.0,
+        operation: Operation::TrackChange,
+        quality: Quality { preference: "auto".into(), bandwidth_cap_kbps: None },
+    };
+    block_on(client.replan(&replan)).unwrap();
+    let body = body_of(&seen, "POST", "/replan");
+    assert_eq!((&body["operation"], &body["selected_tracks"]), (&json!("track_change"), &selected_tracks));
+    assert!(body.get("failure").is_none(), "nothing failed");
+}
+
+#[test]
 fn media_headers_carry_the_token_and_the_profile() {
     let (client, _) = fake("playback_start_opaque_ids.json");
     let headers = client.media_access().headers;
