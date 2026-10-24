@@ -475,7 +475,18 @@ impl Session {
                     self.settings.apply_item(&item);
                 }
                 match decision {
-                    Decision::Playable { session_id, plan, audio_language, markers, attempt_id } => {
+                    Decision::Playable {
+                        session_id,
+                        plan,
+                        audio_language,
+                        markers,
+                        attempt_id,
+                        quality_preference,
+                    } => {
+                        // The start request gives the quality of the session: `original` after a refused transcode.
+                        if let Some(quality) = quality_preference {
+                            self.quality = quality;
+                        }
                         self.audio_language = audio_language;
                         self.access = Some(access);
                         let start = plan.timeline.player_start_seconds;
@@ -508,18 +519,22 @@ impl Session {
                 }
             }
             Input::Replanned(decision) if self.chain == Chain::Replanning => match decision {
-                Some(Decision::Playable { session_id, plan, .. }) => {
+                Some(Decision::Playable { session_id, plan, attempt_id, quality_preference, .. }) => {
                     self.chain = Chain::Replanned;
-                    self.play_replan(session_id, &plan)
+                    // A recovery can end in a new start, with its own attempt and quality.
+                    if let Some(quality) = quality_preference {
+                        self.quality = quality;
+                    }
+                    self.play_replan(session_id, attempt_id, &plan)
                 }
                 _ => self.lose(),
             },
             Input::Replanned(decision) if self.changing.is_some() => {
                 let label = self.changing.take().unwrap_or_default();
                 match decision {
-                    Some(Decision::Playable { session_id, plan, .. }) => {
+                    Some(Decision::Playable { session_id, plan, attempt_id, .. }) => {
                         self.quality = label;
-                        self.play_replan(session_id, &plan)
+                        self.play_replan(session_id, attempt_id, &plan)
                     }
                     // The old plan still plays.
                     _ => Vec::new(),
@@ -821,7 +836,7 @@ impl Session {
     }
 
     /// Plays the new plan of a replan at the source position that plays now. The Markers keep their source time.
-    fn play_replan(&mut self, session_id: String, plan: &wire::PlaybackPlan) -> Vec<Command> {
+    fn play_replan(&mut self, session_id: String, attempt_id: String, plan: &wire::PlaybackPlan) -> Vec<Command> {
         let Some(old) = &self.plan else {
             return Vec::new();
         };
@@ -832,7 +847,8 @@ impl Session {
             .iter()
             .map(|marker| Marker { start: marker.start + old.offset, end: marker.end + old.offset, ..marker.clone() })
             .collect();
-        let attempt_id = old.attempt_id.clone();
+        // A replan keeps the attempt. A new start after the session ended gives a new one.
+        let attempt_id = if attempt_id.is_empty() { old.attempt_id.clone() } else { attempt_id };
         self.adopt(session_id, attempt_id, plan, markers);
         let start = (source - plan.timeline.timeline_offset_seconds).max(0.0);
         self.position = Some(start);

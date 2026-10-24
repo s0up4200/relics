@@ -33,6 +33,9 @@ fn fake_with(start: &'static str, settings: Value) -> (Client, Log) {
                 (200, fixture("list_catalog_item_episodes_ok.json"))
             }
             ("GET", "catalog/series/series:severance/seasons/2/episodes?image_size=small") => (200, season_two()),
+            // The server cannot transcode: it plays only the original file, and Auto picks it.
+            _ if start == NO_TRANSCODE && transcodes(req) => (201, fixture(REFUSED)),
+            ("POST", "playback/start") if start == NO_TRANSCODE => (201, fixture("playback_start_opaque_ids.json")),
             ("POST", "playback/start") => (201, fixture(start)),
             ("POST", "auth/refresh") => (
                 200,
@@ -48,6 +51,18 @@ fn fake_with(start: &'static str, settings: Value) -> (Client, Log) {
     let client = common::client(http, "https://silo.test/media/");
     client.set_profile(Some("p-owner".into()));
     (client, seen)
+}
+
+/// The start fixture of a fake server that cannot transcode.
+const NO_TRANSCODE: &str = "no transcode";
+const REFUSED: &str = "../own/playback_start_adaptation_unavailable.json";
+
+/// A start or replan request that asks for a fixed resolution.
+fn transcodes(req: &common::Seen) -> bool {
+    let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
+    req.method == "POST"
+        && (req.path == "playback/start" || req.path.ends_with("/replan"))
+        && !matches!(body["quality_preference"].as_str(), Some("auto" | "original"))
 }
 
 /// The Markers of file 120: two intros (a cold open and the title sequence) and the credits.
@@ -199,6 +214,96 @@ fn an_adaptation_unavailable_decision_carries_the_server_message() {
             if reason == "transcoding_disabled" && message.starts_with("The server does not allow transcoding")),
         "{decision:?}"
     );
+}
+
+/// The body of each request whose path ends with `suffix`, in order.
+fn bodies(seen: &Log, suffix: &str) -> Vec<Value> {
+    let seen = seen.lock().unwrap();
+    seen.iter().filter(|s| s.path.ends_with(suffix)).map(|s| serde_json::from_str(&s.body).unwrap()).collect()
+}
+
+/// The quality, the bitrate cap and the start position of each start request.
+fn asked(seen: &Log) -> Vec<(Value, Value, Value)> {
+    let starts = bodies(seen, "playback/start");
+    starts
+        .iter()
+        .map(|b| (b["quality_preference"].clone(), b["bandwidth_cap_kbps"].clone(), b["start_position"].clone()))
+        .collect()
+}
+
+fn hd() -> Quality {
+    Quality { preference: "720p".into(), bandwidth_cap_kbps: Some(4000) }
+}
+
+#[test]
+fn a_fixed_resolution_that_the_server_cannot_transcode_starts_again_at_the_original_with_the_same_cap() {
+    let (client, seen) = fake(NO_TRANSCODE);
+    let decision = block_on(client.start_version("movie:heat-1995", None, Some(60.0), &hd())).unwrap();
+    let Decision::Playable { quality_preference: quality, attempt_id, .. } = decision else { panic!("{decision:?}") };
+    assert_eq!(quality.as_deref(), Some("original"));
+    assert_eq!(
+        asked(&seen),
+        vec![(json!("720p"), json!(4000), json!(60.0)), (json!("original"), json!(4000), json!(60.0))]
+    );
+    let starts = bodies(&seen, "playback/start");
+    assert_ne!(starts[0]["playback_attempt_id"], starts[1]["playback_attempt_id"], "the server refuses a reused id");
+    assert_eq!(starts[1]["playback_attempt_id"], json!(attempt_id));
+}
+
+#[test]
+fn a_refusal_of_auto_the_original_or_the_second_start_shows_the_server_message() {
+    for preference in ["auto", "original"] {
+        let (client, seen) = fake(REFUSED);
+        let quality = Quality { preference: preference.into(), bandwidth_cap_kbps: None };
+        let decision = block_on(client.start_version("movie:heat-1995", None, None, &quality)).unwrap();
+        assert!(matches!(decision, Decision::Unavailable { .. }), "{decision:?}");
+        assert_eq!(asked(&seen).len(), 1, "{preference} asks for no transcode");
+    }
+    // The server refuses `original` too, for example under a server-wide bitrate cap.
+    let (client, seen) = fake(REFUSED);
+    let decision = block_on(client.start_version("movie:heat-1995", None, None, &hd())).unwrap();
+    assert!(matches!(decision, Decision::Unavailable { .. }), "{decision:?}");
+    assert_eq!(asked(&seen).len(), 2);
+}
+
+/// Starts the fixture session at Auto on a server that cannot transcode, and asks for a replan at 720p.
+fn replan_at_hd(operation: Operation) -> (Decision, Log) {
+    let (client, seen) = fake(NO_TRANSCODE);
+    let Decision::Playable { attempt_id, .. } = block_on(client.start_playback("movie:heat-1995", None)).unwrap()
+    else {
+        panic!("not playable");
+    };
+    let replan = Replan {
+        session_id: SESSION.into(),
+        attempt_id,
+        failed_plan_id: "plan:478677870860e5e5108c18bff749b34b".into(),
+        plan_attempt_key: "v3:f0144c47fa349e3e".into(),
+        attempted_plan_keys: vec![],
+        selected_tracks: json!({}),
+        position: 1800.0,
+        operation,
+        quality: hd(),
+    };
+    (block_on(client.replan(&replan)).unwrap(), seen)
+}
+
+#[test]
+fn a_recovery_that_the_server_cannot_transcode_starts_again_at_the_original_at_the_position() {
+    let (decision, seen) = replan_at_hd(Operation::FailureRecovery);
+    assert!(
+        matches!(&decision, Decision::Playable { quality_preference: Some(q), .. } if q == "original"),
+        "{decision:?}"
+    );
+    assert_eq!(asked(&seen)[1..], [(json!("original"), json!(4000), json!(1800.0))]);
+    assert!(body_of(&seen, "DELETE", SESSION)["stop_id"].is_string(), "the old Playback session stops");
+}
+
+#[test]
+fn a_quality_pick_that_the_server_cannot_transcode_does_not_start_again() {
+    let (decision, seen) = replan_at_hd(Operation::QualityChange);
+    assert!(matches!(decision, Decision::Unavailable { .. }), "{decision:?}");
+    assert_eq!(asked(&seen).len(), 1, "only the first start");
+    assert!(!seen.lock().unwrap().iter().any(|s| s.method == "DELETE"), "the old plan keeps playing");
 }
 
 #[test]
