@@ -287,6 +287,8 @@ pub struct Session {
     runtime: Option<f64>,
     /// The Server settings of the Profile when the session started, with the subtitle values of the Item over them.
     settings: ServerSettings,
+    /// The subtitle track that the web player remembers for the series of the Item, from the Item detail.
+    remembered_subtitle: Option<wire::WatchSubtitleSignature>,
     plan: Option<Plan>,
     ended: bool,
     /// mpv opened the file of the last load. The session drops the events of the old file until then.
@@ -382,6 +384,7 @@ impl Session {
             runtime,
             quality: settings.preferred_quality.clone(),
             settings,
+            remembered_subtitle: None,
             plan: None,
             ended: false,
             loaded: false,
@@ -473,6 +476,7 @@ impl Session {
             Input::Started { decision, access, item } => {
                 if let Some(item) = item {
                     self.settings.apply_item(&item);
+                    self.remembered_subtitle = item.effective_subtitle_track_signature.clone();
                 }
                 match decision {
                     Decision::Playable {
@@ -791,7 +795,9 @@ impl Session {
     /// Makes `plan` the plan of the session. `markers` are in source time.
     fn adopt(&mut self, session_id: String, attempt_id: String, plan: &wire::PlaybackPlan, markers: Vec<Marker>) {
         let tracks = &plan.subtitle.inventory;
-        let default = || subtitles::choose(tracks, &self.settings, self.audio_language.as_deref());
+        let default = || {
+            subtitles::choose(tracks, &self.settings, self.audio_language.as_deref(), self.remembered_subtitle.as_ref())
+        };
         let chosen = match &self.carry.subtitle {
             Some(choice @ Choice::Track { .. }) => subtitles::carried(tracks, choice).or_else(default),
             _ => default(),

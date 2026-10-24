@@ -811,6 +811,25 @@ fn the_subtitle_choice_uses_the_effective_values_of_the_item_that_mpris_also_get
 }
 
 #[gpui::test]
+fn the_subtitle_choice_takes_the_remembered_series_track_of_the_item(cx: &mut TestAppContext) {
+    let rig = rig(cx);
+    rig.server.detail(json!({
+        "effective_subtitle_language": "en", "effective_subtitle_mode": "always",
+        "effective_subtitle_track_signature": {
+            "source": "embedded", "language": "eng", "codec": "ass", "label": "English (Signs)",
+            "forced": true, "hearing_impaired": false,
+        },
+    }));
+    rig.play(movie(), cx);
+    rig.loaded(7200.0, 300.0, cx);
+    assert_eq!(
+        subtitles(&rig),
+        [Op::SelectSubtitle(Some(1))],
+        "the signs track of the file, not the external full track"
+    );
+}
+
+#[gpui::test]
 fn without_values_of_the_item_the_subtitle_choice_uses_the_profile_values_and_an_empty_language_shows_none(
     cx: &mut TestAppContext,
 ) {

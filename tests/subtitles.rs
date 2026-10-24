@@ -3,8 +3,8 @@
 //! (silo-server web/src/player/utils/subtitleSort.test.ts). The web
 //! `findPreferredSubtitleIndex` cases go through `always` mode, which uses the same match.
 
-use relics::api::wire::SubtitleInventoryItemV3;
-use relics::playback::subtitles::choose;
+use relics::api::wire::{SubtitleInventoryItemV3, WatchSubtitleSignature};
+use relics::playback::subtitles;
 use relics::settings::{ServerSettings, SubtitleMode};
 use serde_json::{Value, json};
 
@@ -16,6 +16,21 @@ fn sub(fields: Value) -> SubtitleInventoryItemV3 {
     });
     track.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
     serde_json::from_value(track).unwrap()
+}
+
+/// The choice with no remembered series track.
+fn choose(tracks: &[SubtitleInventoryItemV3], settings: &ServerSettings, audio: Option<&str>) -> Option<i64> {
+    subtitles::choose(tracks, settings, audio, None)
+}
+
+/// The remembered series track of the Item detail: an embedded English ASS track, with `fields` over it.
+fn remembered(fields: Value) -> WatchSubtitleSignature {
+    let mut signature = json!({
+        "source": "embedded", "language": "en", "codec": "ass", "label": "English", "forced": false,
+        "hearing_impaired": false,
+    });
+    signature.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+    serde_json::from_value(signature).unwrap()
 }
 
 fn tracks(fields: &[Value]) -> Vec<SubtitleInventoryItemV3> {
@@ -298,4 +313,63 @@ fn a_forced_bitmap_track_shows_in_off_mode() {
         json!({"combined_index": 1, "codec": "hdmv_pgs_subtitle", "forced": true}),
     ]);
     assert_eq!(choose(&t, &settings(Off, None, Some("en")), Some("en")), Some(1));
+}
+
+// The remembered series track.
+
+/// Two English tracks of an anime episode: the full dialogue, and the signs and songs only.
+fn anime() -> Vec<SubtitleInventoryItemV3> {
+    tracks(&[
+        json!({"combined_index": 0, "codec": "ass", "label": "Full"}),
+        json!({"combined_index": 1, "codec": "ass", "label": "Signs & Songs"}),
+    ])
+}
+
+#[test]
+fn always_picks_the_remembered_track_over_the_best_track_of_the_language() {
+    let signs = remembered(json!({"label": "Signs & Songs"}));
+    assert_eq!(subtitles::choose(&anime(), &settings(Always, Some("en"), None), None, Some(&signs)), Some(1));
+}
+
+#[test]
+fn always_picks_the_remembered_track_without_a_subtitle_language() {
+    let signs = remembered(json!({"label": "Signs & Songs"}));
+    assert_eq!(subtitles::choose(&anime(), &settings(Always, None, None), None, Some(&signs)), Some(1));
+}
+
+#[test]
+fn a_remembered_track_without_a_label_matches_each_label() {
+    let t = tracks(&[
+        json!({"combined_index": 0, "codec": "ass", "label": "Full"}),
+        json!({"combined_index": 1, "codec": "ass", "label": "Signs & Songs", "forced": true}),
+    ]);
+    let forced = remembered(json!({"label": "", "forced": true}));
+    assert_eq!(subtitles::choose(&t, &settings(Always, None, None), None, Some(&forced)), Some(1));
+}
+
+#[test]
+fn without_an_exact_match_the_closest_track_of_the_language_wins() {
+    // The episode has the remembered label, but not as an external file.
+    let signs = remembered(json!({"source": "external", "codec": "srt", "label": "Signs & Songs"}));
+    let settings = settings(Always, Some("en"), None);
+    assert_eq!(subtitles::choose(&anime(), &settings, None, Some(&signs)), Some(1));
+    assert_eq!(choose(&anime(), &settings, None), Some(0), "the full track without a remembered track");
+}
+
+#[test]
+fn auto_picks_the_remembered_track_of_the_language() {
+    let signs = remembered(json!({"label": "Signs & Songs"}));
+    let settings = settings(Auto, Some("en"), Some("en"));
+    assert_eq!(subtitles::choose(&anime(), &settings, Some("ja"), Some(&signs)), Some(1));
+}
+
+#[test]
+fn auto_ranks_the_language_tag_before_the_remembered_track() {
+    let t = tracks(&[
+        json!({"combined_index": 0, "codec": "ass", "label": "Full"}),
+        json!({"combined_index": 1, "codec": "ass", "label": "Signs & Songs", "language": "en-US"}),
+    ]);
+    let signs = remembered(json!({"label": "Signs & Songs", "language": "en-US"}));
+    let settings = settings(Auto, Some("en"), Some("en"));
+    assert_eq!(subtitles::choose(&t, &settings, Some("ja"), Some(&signs)), Some(0));
 }
