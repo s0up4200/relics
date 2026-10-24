@@ -289,6 +289,7 @@ pub struct Session {
     settings: ServerSettings,
     plan: Option<Plan>,
     ended: bool,
+    /// mpv opened the file of the last load. The session drops the events of the old file until then.
     loaded: bool,
     position: Option<f64>,
     duration: Option<f64>,
@@ -635,7 +636,8 @@ impl Session {
                 commands.push(Command::PlayPrevious);
                 commands
             }
-            Input::EndOfFile if self.still_watching.is_some() => Vec::new(),
+            // An end before the file loads is the end of the old file. mpv can send it after the next load returns.
+            Input::EndOfFile if !self.loaded || self.still_watching.is_some() => Vec::new(),
             Input::EndOfFile => {
                 let (position, normal) = self.end_position();
                 if normal && self.auto_next() && !self.cancelled {
