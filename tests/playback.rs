@@ -783,6 +783,50 @@ fn a_pick_of_the_step_that_plays_is_the_quality_of_a_later_recovery() {
     assert_eq!(quality.preference, "original");
 }
 
+/// The recovery replan after `session` fails two times at `time`.
+fn recovery(session: &mut Session, time: u64) -> Replan {
+    session.step(Input::LoadFailed, at(time));
+    session.step(Input::Refreshed(Some(refreshed(time))), at(time + 1));
+    let commands = session.step(Input::LoadFailed, at(time + 2));
+    let [Command::Replan(replan @ Replan { operation: Operation::FailureRecovery, .. })] = &commands[..] else {
+        panic!("{commands:?}");
+    };
+    replan.clone()
+}
+
+#[test]
+fn a_start_at_the_original_after_a_refused_transcode_is_the_quality_of_the_session() {
+    let settings = ServerSettings { preferred_quality: "720p".into(), ..ServerSettings::default() };
+    let mut session = Session::new(None, settings);
+    let mut decision = decision(|_| {});
+    let Decision::Playable { quality_preference: quality, .. } = &mut decision else { unreachable!() };
+    *quality = Some("original".into());
+    session.step(Input::Started { decision, access: access(), item: None }, at(0));
+    assert_eq!(session.quality(), "original");
+    session.step(Input::FileLoaded, at(0));
+    assert_eq!(recovery(&mut session, 10).quality.preference, "original");
+}
+
+#[test]
+fn a_recovery_that_starts_again_at_the_original_gives_the_quality_and_the_attempt_of_the_session() {
+    let mut session = failed_at(3600.0);
+    session.step(Input::PickQuality("1080p-medium".into()), at(2));
+    session.step(Input::Replanned(Some(replanned())), at(3));
+    session.step(Input::FileLoaded, at(4));
+    let replan = recovery(&mut session, 10);
+    assert_eq!(replan.quality.preference, "1080p-medium", "a replan in the same session keeps the quality");
+    assert_eq!(replan.attempt_id, "attempt-1");
+    let mut start = decision(|_| {});
+    let Decision::Playable { quality_preference: quality, attempt_id, .. } = &mut start else { unreachable!() };
+    *quality = Some("original".into());
+    *attempt_id = "attempt-2".into();
+    session.step(Input::Replanned(Some(start)), at(13));
+    assert_eq!(session.quality(), "original");
+    session.step(Input::FileLoaded, at(14));
+    session.step(Input::Position(3700.0), at(15));
+    assert_eq!(recovery(&mut session, 20).attempt_id, "attempt-2", "the new start has its own attempt");
+}
+
 #[test]
 fn a_version_switch_ends_the_session_at_the_position_and_starts_the_other_file_there() {
     let mut session = playing(None);

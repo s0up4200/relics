@@ -670,24 +670,37 @@ impl Client {
         }
         body.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
         let path = format!("playback/{}/replan", replan.session_id);
-        let decision: wire::PlaybackDecision = match self.call(Method::POST, &path, Some(body)).await {
+        let item = self.sessions.lock().unwrap().get(&replan.session_id).cloned();
+        let position = Some(replan.position.max(0.0));
+        let decision = match self.call::<wire::PlaybackDecision>(Method::POST, &path, Some(body)).await {
             // The server ended the Playback session, for example after 45 s with no report. A new start
             // request at the position gives a new session.
             Err(Error::Problem(problem))
                 if matches!(problem.code(), "playback_session_ended" | "playback_session_not_found") =>
             {
-                let item = self.sessions.lock().unwrap().get(&replan.session_id).cloned();
-                let Some(item) = item else {
+                let Some(item) = &item else {
                     return Err(Error::Problem(problem));
                 };
-                let position = Some(replan.position.max(0.0));
-                return self.start_version(&item.content_id, item.file_id.as_deref(), position, &replan.quality).await;
+                self.start_once(&item.content_id, item.file_id.as_deref(), position, &replan.quality).await?
             }
-            result => result?,
+            result => {
+                let mut decision = Decision::from(result?);
+                if let Decision::Playable { plan, .. } = &mut decision {
+                    self.absolute_urls(plan)?;
+                }
+                decision
+            }
         };
-        let mut decision = Decision::from(decision);
-        if let Decision::Playable { plan, .. } = &mut decision {
-            self.absolute_urls(plan)?;
+        // A refused Quality ladder pick keeps the old plan, so only a recovery starts again at the `original`
+        // quality. The new start gives a new Playback session, so the old one stops.
+        if replan.operation == Operation::FailureRecovery
+            && let Some(original) = original_fallback(&decision, &replan.quality)
+            && let Some(item) = &item
+        {
+            if let Err(err) = self.stop_playback(&replan.session_id, None).await {
+                eprintln!("relics: cannot stop the old Playback session: {err}");
+            }
+            return self.start_once(&item.content_id, item.file_id.as_deref(), position, &original).await;
         }
         Ok(decision)
     }
@@ -719,8 +732,24 @@ impl Client {
 
     /// Starts a Playback session like `start_playback`, for the file version `file_id` from the Version picker.
     /// The server then keeps that file, also for a quality change and a failure recovery. With no `file_id`, or
-    /// a file that the Item no longer has, the first version plays and the server can pick another one.
+    /// a file that the Item no longer has, the first version plays and the server can pick another one. When the
+    /// server cannot transcode to the fixed resolution of `quality`, the Item starts again at the `original` quality.
     pub async fn start_version(
+        &self,
+        content_id: &str,
+        file_id: Option<&str>,
+        start_position: Option<f64>,
+        quality: &Quality,
+    ) -> Result<Decision, Error> {
+        let decision = self.start_once(content_id, file_id, start_position, quality).await?;
+        match original_fallback(&decision, quality) {
+            Some(original) => self.start_once(content_id, file_id, start_position, &original).await,
+            None => Ok(decision),
+        }
+    }
+
+    /// Sends one start request: `start_version` with no second start at the `original` quality.
+    async fn start_once(
         &self,
         content_id: &str,
         file_id: Option<&str>,
@@ -754,7 +783,10 @@ impl Client {
         }
         let decision: wire::PlaybackDecision = self.call(Method::POST, "playback/start", Some(body)).await?;
         let mut decision = Decision::from(decision);
-        if let Decision::Playable { session_id, plan, audio_language, markers, attempt_id } = &mut decision {
+        if let Decision::Playable { session_id, plan, audio_language, markers, attempt_id, quality_preference } =
+            &mut decision
+        {
+            *quality_preference = Some(quality.preference.clone());
             let item = SessionItem {
                 content_id: content_id.to_string(),
                 duration: version.duration,
@@ -1388,6 +1420,15 @@ async fn send_to<T: DeserializeOwned>(
     } else {
         Err(Error::Status(status.as_u16()))
     }
+}
+
+/// The quality of a second start when the server refused `quality` because it cannot transcode (#149): `original`,
+/// with the same bitrate cap. `None` when the server refused for another reason, or when `quality` is not a fixed
+/// resolution, because then no transcode was asked for.
+fn original_fallback(decision: &Decision, quality: &Quality) -> Option<Quality> {
+    let refused = matches!(decision, Decision::Unavailable { reason, .. } if reason == "transcoding_disabled");
+    let fixed = !matches!(quality.preference.as_str(), "auto" | "original");
+    (refused && fixed).then(|| Quality { preference: "original".into(), ..quality.clone() })
 }
 
 /// The body of a playback protocol v3 start request. mpv uses FFmpeg, which decodes
