@@ -50,9 +50,9 @@ pub fn retry_delay(attempt: u32) -> Duration {
 pub struct LibraryWindow {
     state: State,
     state_dir: PathBuf,
-    /// A test session. It reads the tokens from `tokens`, saves no PIN token, and has no video, no release check and
-    /// no Live updates socket for the pages that it opens. A token refresh and a sign-out still use the Secret
-    /// Service.
+    /// A test session. It reads the tokens from `tokens`, saves no PIN token, and has no release check and no Live
+    /// updates socket for the pages that it opens. A `Session` with `video` gives it video. A token refresh
+    /// and a sign-out still use the Secret Service.
     isolated: bool,
     /// The tokens of each saved Account of a test session, keyed by Server id and Account id. A test session reads
     /// them in place of the Secret Service.
@@ -149,6 +149,8 @@ pub struct Session {
     pub profiles: Vec<wire::Profile>,
     /// The tokens of each saved Account, keyed by Server id and Account id, in place of the Secret Service.
     pub tokens: HashMap<(String, String), Tokens>,
+    /// The window plays video in its video surface. mpv writes its log to `mpv.log` in `directory`.
+    pub video: bool,
 }
 
 impl LibraryWindow {
@@ -184,6 +186,7 @@ impl LibraryWindow {
             }
         });
         let isolated = session.is_some();
+        let video = session.as_ref().is_none_or(|session| session.video);
         let (state, state_dir, tokens, browsing) = match session {
             Some(session) => (
                 session.state,
@@ -202,8 +205,9 @@ impl LibraryWindow {
         };
         let device =
             Device { id: state.device_id.clone(), name: gethostname::gethostname().to_string_lossy().into_owned() };
-        let video = if isolated { None } else { video::Surface::new(window) };
-        let media = video.clone().map(|video| Box::new(mpv::InView(video)) as Box<dyn Media>);
+        let video = if video { video::Surface::new(window) } else { None };
+        let test_dir = isolated.then(|| state_dir.clone());
+        let media = video.clone().map(|video| Box::new(mpv::InView { video, test_dir }) as Box<dyn Media>);
         let player = cx.new(|cx| Controller::new(media, cx));
         let player_view = video.map(|video| cx.new(|cx| PlayerView::new(player.clone(), video, cx)));
         let view_closed = cx.subscribe_in(&player, window, |this, _, _: &ViewClosed, window, cx| {

@@ -2,7 +2,8 @@
 //!
 //! The app sends its API requests to the in-memory fake, so no API request leaves the process. A listener on
 //! 127.0.0.1 serves the events socket, takes the same API calls from `curl`, and sends a socket frame on
-//! `POST /rig/event`. All app state goes to the directory in the first argument.
+//! `POST /rig/event`. It also serves the test video of `tests/media` to mpv, and `POST /rig/playback/fail` makes
+//! the next request for the video fail. All app state and the mpv log go to the directory in the first argument.
 //!
 //! Run: `cargo run --example rig -- <scratch dir>`
 // The rig plays the Server of the events socket, as tests/live.rs does (clippy.toml).
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,6 +36,8 @@ use relics::state::{SavedAccount, SavedServer, State};
 use serde_json::{Value, json};
 
 const PROFILE: &str = "p-owner";
+/// The length of `tests/media/sample.mp4` and of its HLS copy, in seconds.
+const VIDEO_SECONDS: f64 = 6.0;
 
 /// The state of the fake Server that the agent changes.
 #[derive(Clone, Default)]
@@ -44,6 +48,10 @@ struct Fake {
     sockets: Arc<Mutex<Vec<Sender<String>>>>,
     /// The fixture of each successful operation in `tests/fixtures/silo/index.json`, by method and path.
     fixtures: Arc<HashMap<(String, String), String>>,
+    /// The number of plans that the fake gave. It numbers the Playback sessions and the plans.
+    plans: Arc<AtomicU32>,
+    /// The number of requests for the test video that fail before the video plays again.
+    failing: Arc<AtomicU32>,
 }
 
 impl Fake {
@@ -99,10 +107,90 @@ impl Fake {
                 Some(_) => json(204, String::new()),
                 None => not_found(),
             },
+            ("POST", "playback/start", _) => json(201, self.plan(&req.body, None).to_string()),
+            ("POST", path, _)
+                if let Some(session) = path.strip_prefix("playback/").and_then(|p| p.strip_suffix("/replan")) =>
+            {
+                json(200, self.plan(&req.body, Some(session)).to_string())
+            }
+            ("POST", path, _) if path.starts_with("playback/") && path.ends_with("/progress") => {
+                ok("playback_progress_applied.json")
+            }
+            ("DELETE", path, _) if path.starts_with("playback/") => ok("playback_stop_completed.json"),
             (method, path, _) => match self.fixtures.get(&(method.to_string(), path.to_string())) {
                 Some(file) => ok(file),
                 None => not_found(),
             },
+        }
+    }
+
+    /// The playable answer to the start or replan request `body` for the test video, in the Playback session
+    /// `session`. A start has no session, so the fake gives it a new one. The quality `original`, `auto` or none
+    /// gives the Original file. Each other quality gives a transcode plan, at the step of the Quality ladder with
+    /// that label, or else at the 1080p Medium step. A start position past the end of the video starts at 0.
+    fn plan(&self, body: &str, session: Option<&str>) -> Value {
+        let body: Value = serde_json::from_str(body).unwrap_or_default();
+        let quality = body["quality_preference"].as_str().unwrap_or_default();
+        let original = matches!(quality, "" | "auto" | "original");
+        let (fixture, url) = match original {
+            true => ("playback_start_opaque_ids.json", "rig/media/sample.mp4"),
+            false => ("../own/playback_start_transcode.json", "rig/media/hls/index.m3u8"),
+        };
+        let steps = json!([
+            {"label": "original", "display_name": "Original", "height": 180, "bitrate_kbps": 60, "preserves_source": true},
+            {"label": "1080p-medium", "display_name": "1080p Medium", "height": 1080, "bitrate_kbps": 6000, "preserves_source": false},
+            {"label": "720p-low", "display_name": "720p Low", "height": 720, "bitrate_kbps": 1500, "preserves_source": false},
+        ]);
+        let position = body["start_position"].as_f64().or(body["position_seconds"].as_f64());
+        let position = position.filter(|position| *position < VIDEO_SECONDS).unwrap_or(0.0);
+        let n = self.plans.fetch_add(1, Ordering::SeqCst) + 1;
+        let session = session.map_or_else(|| format!("rig-{n}"), str::to_string);
+        let mut decision: Value = serde_json::from_str(&common::fixture(fixture)).unwrap();
+        decision["session_id"] = session.clone().into();
+        let plan = &mut decision["playback_plan"];
+        plan["session_id"] = session.into();
+        plan["plan_id"] = format!("plan:rig-{n}").into();
+        plan["plan_attempt_key"] = format!("v3:rig-{n}").into();
+        plan["stream"]["url"] = url.into();
+        plan["timeline"] = json!({
+            "source_start_seconds": position, "stream_origin_seconds": 0, "player_start_seconds": position,
+            "timeline_offset_seconds": 0, "can_seek_anywhere": true, "seek_restoration": "player_position",
+        });
+        plan["subtitle"]["inventory"] = json!([]);
+        plan["source"]["duration_seconds"] = VIDEO_SECONDS.into();
+        if !original {
+            let step = steps.as_array().unwrap().iter().skip(1).find(|step| step["label"] == quality);
+            let step = step.unwrap_or(&steps[1]);
+            plan["effective_recipe"]["height"] = step["height"].clone();
+            plan["effective_recipe"]["bitrate_kbps"] = step["bitrate_kbps"].clone();
+        }
+        plan["available_qualities"] = steps;
+        decision
+    }
+
+    /// The reply to `GET /rig/media/<name>`: the file `tests/media/<name>` from the first byte of the `Range`
+    /// header, or a 503 while `failing` is above 0.
+    fn media(&self, name: &str, range: Option<&str>) -> (u16, &'static str, String, Vec<u8>) {
+        if self.failing.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+            return (503, "text/plain", String::new(), Vec::new());
+        }
+        let file = format!("{}/tests/media/{name}", env!("CARGO_MANIFEST_DIR"));
+        let Some(bytes) = (!name.contains("..")).then(|| std::fs::read(file).ok()).flatten() else {
+            return (404, "text/plain", String::new(), Vec::new());
+        };
+        let kind = match name.rsplit('.').next() {
+            Some("m3u8") => "application/vnd.apple.mpegurl",
+            Some("ts") => "video/mp2t",
+            _ => "video/mp4",
+        };
+        // A range is `bytes=start-` or `bytes=start-end`. The rig sends each byte from the start to the end.
+        let first = range.and_then(|r| r.strip_prefix("bytes=")?.split('-').next()?.parse().ok());
+        match first {
+            Some(first) if first < bytes.len() => {
+                let extra = format!("Content-Range: bytes {first}-{}/{}\r\n", bytes.len() - 1, bytes.len());
+                (206, kind, extra, bytes[first..].to_vec())
+            }
+            _ => (200, kind, String::new(), bytes),
         }
     }
 
@@ -150,10 +238,20 @@ fn connection(stream: TcpStream, fake: &Fake) -> anyhow::Result<()> {
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
     let body = String::from_utf8(body)?;
-    let (status, body) = if (method.as_str(), target.as_str()) == ("POST", "/rig/event") {
+    let (mut content_type, mut more_headers) = ("application/json", String::new());
+    let (status, body) = if let Some(name) = target.strip_prefix("/rig/media/") {
+        let reply = fake.media(name, header("Range").as_deref());
+        eprintln!("rig: {method} {target} -> {}", reply.0);
+        (content_type, more_headers) = (reply.1, reply.2);
+        (reply.0, reply.3)
+    } else if (method.as_str(), target.as_str()) == ("POST", "/rig/playback/fail") {
+        let failing = fake.failing.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!("rig: the next {failing} request(s) for the video fail");
+        (200, format!("{{\"failing\":{failing}}}").into_bytes())
+    } else if (method.as_str(), target.as_str()) == ("POST", "/rig/event") {
         let sockets = fake.send(&body);
         eprintln!("rig: event to {sockets} socket(s): {body}");
-        (200, format!("{{\"sockets\":{sockets}}}"))
+        (200, format!("{{\"sockets\":{sockets}}}").into_bytes())
     } else {
         let path = target.split_once("/api/v2/").map_or(target.as_str(), |(_, path)| path).to_string();
         let seen = Seen { method, url: target.clone(), path, headers, body };
@@ -162,16 +260,16 @@ fn connection(stream: TcpStream, fake: &Fake) -> anyhow::Result<()> {
                 let status = reply.status().as_u16();
                 let mut body = String::new();
                 futures::executor::block_on(reply.into_body().read_to_string(&mut body))?;
-                (status, body)
+                (status, body.into_bytes())
             }
-            None => (502, String::new()),
+            None => (502, Vec::new()),
         }
     };
     let head = format!(
-        "HTTP/1.1 {status} rig\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} rig\r\nContent-Type: {content_type}\r\n{more_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    (&stream).write_all(format!("{head}{body}").as_bytes())?;
+    (&stream).write_all(&[head.into_bytes(), body].concat())?;
     Ok(())
 }
 
@@ -244,7 +342,8 @@ fn main() {
             },
             move |window, cx| {
                 let pages = cx.new(|cx| Pages::new(client.clone(), "Laura".into(), window, cx));
-                let session = Session { state, directory: dir, client, pages, profiles: profiles.items, tokens };
+                let session =
+                    Session { state, directory: dir, client, pages, profiles: profiles.items, tokens, video: true };
                 cx.new(|cx| LibraryWindow::with_session(session, window, cx))
             },
         )

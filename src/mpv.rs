@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_types)]
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -20,21 +21,30 @@ use crate::video::Surface;
 
 /// The media of the Player view. Each handle plays with no window, and the render thread of the Player view
 /// draws its video in the video surface of the Library window.
-pub struct InView(pub Rc<Surface>);
+pub struct InView {
+    pub video: Rc<Surface>,
+    /// The state directory of a test session (`library::Session`), for example the live-run rig. mpv reads the
+    /// Local settings there and writes its log to `mpv.log` there, and the media keys do not reach it.
+    pub test_dir: Option<PathBuf>,
+}
 
 impl Media for InView {
     fn open(&self) -> Result<(Box<dyn Handle>, UnboundedReceiver<Input>), String> {
         // Each new handle reads the hardware decoding Local setting again.
-        let hwdec = LocalSettings::load(&LocalSettings::dir()).hwdec();
+        let settings = self.test_dir.clone().unwrap_or_else(LocalSettings::dir);
+        let hwdec = LocalSettings::load(&settings).hwdec();
+        let log = self.test_dir.as_ref().map(|dir| dir.join("mpv.log").to_string_lossy().into_owned());
+        let mut options = vec![("vo", "libmpv")];
+        options.extend(log.as_deref().map(|log| ("log-file", log)));
         let (tx, rx) = mpsc::unbounded();
-        let player = Player::open(hwdec, &[("vo", "libmpv")], move |input| drop(tx.unbounded_send(input)))
+        let player = Player::open(hwdec, &options, move |input| drop(tx.unbounded_send(input)))
             .map_err(|err| err.to_string())?;
-        self.0.start(player.video())?;
-        Ok((Box::new(Open { player, video: self.0.clone() }), rx))
+        self.video.start(player.video())?;
+        Ok((Box::new(Open { player, video: self.video.clone() }), rx))
     }
 
     fn media_keys(&self) -> bool {
-        true
+        self.test_dir.is_none()
     }
 }
 
