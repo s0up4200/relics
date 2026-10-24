@@ -239,6 +239,7 @@ fn make_rig(
                 pages: pages.clone(),
                 profiles,
                 tokens,
+                video: false,
             };
             cx.new(|cx| relics::library::LibraryWindow::with_session(session, window, cx))
         });
