@@ -377,6 +377,7 @@ impl Detail {
             season: self.season,
             shuffle: usize::from(self.shufflable_season().is_some()),
             episodes: self.episodes.len(),
+            status: self.episodes.is_empty() && (self.episode_load.visible_loading() || self.episode_error.is_some()),
             cast: self.item.as_ref().map_or(0, |item| item.cast.len()),
             crew: self.item.as_ref().map_or(0, |item| item.crew.len()),
             trailers: self.item.as_ref().map_or(0, |item| trailers(item).len()),
@@ -859,6 +860,7 @@ impl Detail {
             .h(px(height))
             .flex_none()
             .overflow_hidden()
+            .debug_selector(|| "detail-hero".into())
             // The page tint, from the web `body` background. It shows only where the hero has no backdrop.
             .child(div().absolute().top_0().left_0().right_0().h(px(window.1 / 3.)).bg(linear_gradient(
                 180.,
@@ -1065,6 +1067,18 @@ impl Detail {
                 div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(t.bright).child("More Episodes")
             }))
             .child(div().flex().gap(px(GAP)).children(cards))
+            // The status takes the place of the episodes, so that the page above it does not move when they come.
+            .children(self.episodes.is_empty().then(|| match &self.episode_error {
+                Some(error) => div().flex().gap(px(14.)).text_color(t.danger).child(error.clone()).child(
+                    button("episodes-retry", "Retry episodes", ButtonVariant::Secondary, cx)
+                        .debug_selector(|| "episodes-retry".into())
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_episodes(cx))),
+                ),
+                None => div()
+                    .text_color(t.secondary)
+                    .child("Loading episodes…")
+                    .debug_selector(|| "episodes-loading".into()),
+            }))
             .into_any_element()
     }
 
@@ -1321,30 +1335,12 @@ impl Render for Detail {
                 .text_color(t.danger)
                 .child(notice)
         });
-        let episode_status = match &self.episode_error {
-            Some(error) => Some(
-                div().px(px(MARGIN)).flex().gap(px(14.)).text_color(t.danger).child(error.clone()).child(
-                    button("episodes-retry", "Retry episodes", ButtonVariant::Secondary, cx)
-                        .debug_selector(|| "episodes-retry".into())
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_episodes(cx))),
-                ),
-            ),
-            None if self.episode_load.visible_loading() => Some(
-                div()
-                    .px(px(MARGIN))
-                    .text_color(t.secondary)
-                    .child("Loading episodes…")
-                    .debug_selector(|| "episodes-loading".into()),
-            ),
-            None => None,
-        };
         div()
             .relative()
             .size_full()
             .flex()
             .flex_col()
             .children(status)
-            .children(episode_status)
             .child(page)
             .children(notice)
     }
@@ -1752,6 +1748,8 @@ pub struct Rows {
     /// The Shuffle season button: 1 when the chosen season has 2 episodes or more, else 0.
     pub shuffle: usize,
     pub episodes: usize,
+    /// The episodes load or failed, and none show. The grid then has one line for the status.
+    pub status: bool,
     pub cast: usize,
     pub crew: usize,
     pub trailers: usize,
@@ -1796,7 +1794,7 @@ impl Rows {
                 let lines = match row {
                     0 => 0,
                     1 => 1,
-                    EPISODE_ROW => self.episodes.div_ceil(self.columns),
+                    EPISODE_ROW => self.episodes.div_ceil(self.columns).max(usize::from(self.status)),
                     row => usize::from(self.len(row) > 0),
                 };
                 (0..lines).map(move |line| (row, line))
@@ -2083,6 +2081,7 @@ mod tests {
             season: 1,
             shuffle: 0,
             episodes: 5,
+            status: false,
             cast: 0,
             crew: 0,
             trailers: 0,
@@ -2110,6 +2109,7 @@ mod tests {
             season: 0,
             shuffle: 0,
             episodes: 0,
+            status: false,
             cast: 0,
             crew: 0,
             trailers: 0,
@@ -2141,6 +2141,7 @@ mod tests {
             season: 0,
             shuffle: 0,
             episodes: 4,
+            status: false,
             cast: 0,
             crew: 0,
             trailers: 0,
@@ -2172,6 +2173,7 @@ mod tests {
             season: 0,
             shuffle: 0,
             episodes: 0,
+            status: false,
             cast: 3,
             crew: 0,
             trailers: 0,
@@ -2276,6 +2278,7 @@ mod tests {
             season: 0,
             shuffle: 0,
             episodes: 0,
+            status: false,
             cast: 2,
             crew: 0,
             trailers: 0,
@@ -2381,6 +2384,7 @@ mod tests {
             season: 0,
             shuffle: 0,
             episodes: 5,
+            status: false,
             cast: 2,
             crew: 3,
             trailers: 1,
@@ -2427,6 +2431,7 @@ mod tests {
             season: 0,
             shuffle: 0,
             episodes: 0,
+            status: false,
             cast: 2,
             crew: 0,
             trailers: 1,
