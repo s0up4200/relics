@@ -1820,3 +1820,109 @@ fn an_open_choice_list_closes_when_its_row_goes_away(cx: &mut TestAppContext) {
     let bodies: Vec<_> = writes.iter().map(|req| (req.path.as_str(), req.body.as_str())).collect();
     assert_eq!(bodies, [("settings/values/playback.preferred_quality?scope=profile", r#"{"value":"480p"}"#)]);
 }
+
+/// Home with a Continue Watching card for the episode `ep-3` of `test-series`, season 2. Season 2 lists `s2e1`, `ep-3`
+/// and `ep-4`. More Like This of `ep-3` has `ep-4`.
+fn series_rig(cx: &mut TestAppContext) -> (&mut VisualTestContext, Server) {
+    let (_, cx, server, changes, _) = rig(cx);
+    let card = |id: &str| {
+        serde_json::json!({"content_id": id, "type": "episode", "title": id, "genres": [], "keywords": [],
+                           "status": "matched", "series_id": "test-series", "season_number": 2})
+    };
+    let sections = serde_json::json!({"sections": [{
+        "id": "cw", "section_type": "continue_watching", "title": "Continue Watching", "featured": false,
+        "item_limit": 20, "is_custom": false, "customized": false, "total_count": 1, "items": [card("ep-3")],
+    }]});
+    set_reply(&server, "home/layout", sections.clone());
+    set_reply(&server, "home/sections", sections);
+    let versions: serde_json::Value =
+        serde_json::from_str(&common::fixture("list_catalog_item_versions_ok.json")).unwrap();
+    for (id, number) in [("ep-3", 2), ("ep-4", 3)] {
+        let mut item: serde_json::Value = serde_json::from_str(&common::fixture("get_catalog_item_ok.json")).unwrap();
+        for (key, value) in [
+            ("content_id", id.into()),
+            ("type", "episode".into()),
+            ("title", id.into()),
+            ("series_id", "test-series".into()),
+            ("series_title", "Test Series".into()),
+            ("season_number", 2.into()),
+            ("episode_number", number.into()),
+            ("cast", serde_json::json!([])),
+            ("crew", serde_json::json!([])),
+            ("videos", serde_json::json!([])),
+        ] {
+            item[key] = value;
+        }
+        set_reply(&server, &format!("catalog/items/{id}?"), item);
+        set_reply(&server, &format!("catalog/items/{id}/versions"), versions.clone());
+    }
+    set_reply(&server, "recommendations/similar/ep-3", serde_json::json!({"items": [card("ep-4")]}));
+    let seasons: serde_json::Value = serde_json::from_str(&common::fixture("list_series_seasons_ok.json")).unwrap();
+    let season = |n: i64| {
+        let mut season = seasons["items"][0].clone();
+        (season["season_number"], season["content_id"]) = (n.into(), format!("s{n}").into());
+        season
+    };
+    set_reply(&server, "catalog/series/test-series/seasons?", serde_json::json!({"items": [season(1), season(2)]}));
+    let episodes: serde_json::Value = serde_json::from_str(&common::fixture("list_season_episodes_ok.json")).unwrap();
+    let episode = |(n, id): (i64, &str)| {
+        let mut episode = episodes["items"][0].clone();
+        (episode["content_id"], episode["season_number"], episode["episode_number"]) = (id.into(), 2.into(), n.into());
+        episode
+    };
+    let list: Vec<_> = [(1, "s2e1"), (2, "ep-3"), (3, "ep-4")].into_iter().map(episode).collect();
+    set_reply(&server, "catalog/series/test-series/seasons/2/episodes", serde_json::json!({"items": list}));
+    send(cx, &changes, LiveChange::Resync);
+    (cx, server)
+}
+
+#[gpui::test]
+fn the_series_link_of_an_episode_opens_its_season_with_the_episode_focused_and_esc_goes_back_past_it(
+    cx: &mut TestAppContext,
+) {
+    let (cx, server) = series_rig(cx);
+    click(cx, "home-card-cw-0");
+    assert_eq!(server.count("catalog/items/ep-3?"), 1, "the episode opens");
+    assert!(drawn(cx, "detail-series"), "the series name is a link");
+    let season = "catalog/series/test-series/seasons/2/episodes";
+    let more_episodes = server.count(season);
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/items/test-series?"), 1, "the series opens");
+    assert_eq!(server.count(season), more_episodes + 1, "on the season of the episode");
+    assert_eq!(server.count("catalog/series/test-series/seasons/1/episodes"), 0);
+    assert!(!drawn(cx, "detail-series"), "a series has no series link");
+    // The menu of the focused card marks the episode watched.
+    cx.simulate_keystrokes("o enter");
+    cx.run_until_parked();
+    let marks: Vec<_> =
+        server.seen.lock().unwrap().iter().filter(|r| r.path.starts_with("watched/")).cloned().collect();
+    assert_eq!(
+        marks.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+        ["watched/ep-3"],
+        "the episode has the focus"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(drawn(cx, "home-card-cw-0"), "Esc goes back to Home, not to the episode");
+}
+
+#[gpui::test]
+fn esc_from_the_series_goes_back_to_the_episode_before_the_one_that_linked_to_it(cx: &mut TestAppContext) {
+    let (cx, server) = series_rig(cx);
+    click(cx, "home-card-cw-0");
+    // Down through More Episodes to More Like This, which opens ep-4.
+    cx.simulate_keystrokes("down down down down enter");
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/items/ep-4?"), 1);
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert_eq!(server.count("catalog/items/test-series?"), 1);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(drawn(cx, "detail-series"), "an episode page shows");
+    assert!(!drawn(cx, "home-card-cw-0"));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(drawn(cx, "home-card-cw-0"), "ep-3 was the page before ep-4, and Home the page before ep-3");
+}

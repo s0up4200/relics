@@ -1,8 +1,9 @@
 //! The detail page of an Item: a hero with the backdrop, the poster, the type and the studio or network, the title
 //! logo or the title, the tagline, the metadata line, the quality badges, the ratings, the overview, the Directed by
 //! and Written by line, and the buttons. A series shows its season cards and a grid of 16:9 episode cards. An
-//! episode shows the other episodes of its season under More Episodes. Then come the Cast, Crew, Trailers and More
-//! Like This sections. Each request asks for the artwork rung that the page needs at the window scale.
+//! episode shows the other episodes of its season under More Episodes. Above its title, an episode names its series,
+//! the season and the number, and the series name is a link to the series. Then come the Cast, Crew, Trailers and
+//! More Like This sections. Each request asks for the artwork rung that the page needs at the window scale.
 
 use std::sync::Arc;
 
@@ -54,6 +55,10 @@ pub struct Detail {
     season: usize,
     /// The season number to choose when the seasons load, from an episode or season card.
     wanted_season: Option<i64>,
+    /// The id of the episode to focus when the episodes of the season load, from the series link of an episode.
+    wanted_episode: Option<String>,
+    /// The page scrolls to the focus when it next draws.
+    reveal: bool,
     episodes: Vec<wire::Episode>,
     focus: Focus,
     /// The page has the keyboard focus, so the focused control shows the focus ring.
@@ -82,7 +87,7 @@ pub struct Detail {
     /// The items of the page list when it last drew, from `Rows::items`.
     items: Vec<(usize, usize)>,
     /// The sideways scroll of each row of cards, by the row number of `Focus::place`.
-    row_scrolls: [ScrollHandle; 9],
+    row_scrolls: [ScrollHandle; 10],
     /// The width of the window when the page last drew.
     viewport: f32,
     /// The height of the hero content when the page last drew.
@@ -116,6 +121,14 @@ impl Reload for Detail {
 impl EventEmitter<Play> for Detail {}
 impl EventEmitter<OpenPerson> for Detail {}
 impl EventEmitter<Open> for Detail {}
+impl EventEmitter<OpenSeries> for Detail {}
+
+/// Opens the detail page of the series of an episode, on the season of the episode, with the focus on its card.
+pub struct OpenSeries {
+    pub series: String,
+    pub season: Option<i64>,
+    pub episode: String,
+}
 
 impl Detail {
     pub fn new(client: Arc<Client>, id: String, season: Option<i64>, window: &Window, cx: &mut Context<Self>) -> Self {
@@ -139,6 +152,8 @@ impl Detail {
             seasons: Vec::new(),
             season: 0,
             wanted_season: season,
+            wanted_episode: None,
+            reveal: false,
             episodes: Vec::new(),
             focus: Focus::Action(0),
             active: false,
@@ -170,6 +185,13 @@ impl Detail {
         };
         detail.load(cx);
         detail
+    }
+
+    /// The page with the focus on the card of `episode` when the episodes load. The focus stays where it goes when
+    /// the episode is not in the list.
+    pub fn with_episode(mut self, episode: Option<String>) -> Self {
+        self.wanted_episode = episode;
+        self
     }
 
     /// Loads More Like This. A failure leaves the row out, or keeps the row of the last load: the page works without
@@ -314,6 +336,11 @@ impl Detail {
             |this, result, cx| match result {
                 Ok(episodes) => {
                     this.replace_episodes(episodes, cx);
+                    let wanted = this.wanted_episode.take();
+                    if let Some(i) = this.episodes.iter().position(|e| Some(&e.content_id) == wanted.as_ref()) {
+                        this.focus = Focus::Episode(i);
+                        this.reveal = true;
+                    }
                 }
                 Err(err) => this.episode_error = Some(err.to_string()),
             },
@@ -342,6 +369,7 @@ impl Detail {
 
     fn rows(&self) -> Rows {
         Rows {
+            series: usize::from(self.item.as_ref().and_then(series_link).is_some()),
             actions: self.item.as_ref().map_or(0, |item| actions(item, &self.seasons).len()),
             versions: self.picker_len(),
             version: self.version,
@@ -376,6 +404,8 @@ impl Detail {
         let Some(item) = &self.item else {
             return false;
         };
+        // A key before the episodes load keeps the focus where the user moves it.
+        self.wanted_episode = None;
         // The menu of a season or episode card takes each key.
         self.menu = self.open_menu();
         if let Some(mark) = self.menu {
@@ -388,6 +418,7 @@ impl Detail {
             return true;
         }
         match (self.focus, key) {
+            (Focus::Series(_), Key::Other("enter")) => self.open_series(cx),
             (Focus::Action(i), Key::Other("enter")) => {
                 if let Some(&action) = actions(item, &self.seasons).get(i) {
                     self.act(action, cx);
@@ -689,6 +720,19 @@ impl Detail {
         cx.notify();
     }
 
+    /// Opens the detail page of the series of the episode.
+    fn open_series(&mut self, cx: &mut Context<Self>) {
+        self.focus = Focus::Series(0);
+        let Some(item) = &self.item else {
+            return;
+        };
+        if let Some((series, _)) = series_link(item) {
+            let (series, season, episode) = (series.to_string(), item.season_number, self.id.clone());
+            cx.emit(OpenSeries { series, season, episode });
+        }
+        cx.notify();
+    }
+
     /// Opens the detail page of a More Like This Item.
     fn open_similar(&mut self, index: usize, cx: &mut Context<Self>) {
         self.focus = Focus::Similar(index);
@@ -870,7 +914,7 @@ impl Detail {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            .child(div().text_size(px(11.)).text_color(t.secondary).child(kind_line(item)))
+                            .child(self.kind_row(item, cx))
                             .child(title)
                             .children(
                                 item.tagline
@@ -887,6 +931,34 @@ impl Detail {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The line above the title. On an episode, the series title is a link to the series.
+    fn kind_row(&self, item: &wire::CatalogItemDetail, cx: &Context<Self>) -> AnyElement {
+        let t = cx.omarchy();
+        let mut parts = kind_parts(item);
+        let row = div().flex().items_center().text_size(px(11.)).text_color(t.secondary);
+        if series_link(item).is_none() {
+            return row.child(parts.join(" · ")).into_any_element();
+        }
+        let focused = self.active && self.focus == Focus::Series(0);
+        // The padding of the link takes the place of the space before the first dot.
+        let rest = parts.split_off(1);
+        let rest = (!rest.is_empty()).then(|| format!("· {}", rest.join(" · ")));
+        let link = div()
+            .id("detail-series")
+            .debug_selector(|| "detail-series".into())
+            .clickable()
+            .px(px(4.))
+            .ml(px(-6.))
+            .rounded(px(4.))
+            .border_2()
+            .border_color(if focused { t.accent } else { gpui::transparent_black() })
+            .text_color(if focused { t.bright } else { t.foreground })
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(parts.remove(0))
+            .on_click(cx.listener(|this, _, _, cx| this.open_series(cx)));
+        row.child(link).children(rest).into_any_element()
     }
 
     /// An element that fills the hero content and stores its height in `content_height` after layout. When the height
@@ -1204,6 +1276,12 @@ impl Render for Detail {
             self.page.reset(items.len());
             self.page.scroll_to(top);
             self.items = items;
+            // The reveal needs the heights of the new items, so it waits until the list lays them out.
+            if self.reveal {
+                window.request_animation_frame();
+            }
+        } else if std::mem::take(&mut self.reveal) {
+            self.page.scroll_to_reveal_item(self.rows().child(self.focus));
         }
         self.viewport = viewport;
         let window_size = (viewport, window.viewport_size().height.to_f64() as f32);
@@ -1214,10 +1292,10 @@ impl Render for Detail {
                     return div().into_any_element();
                 };
                 let child = match row {
-                    0 => this.hero(item, window_size, cx),
-                    1 => this.version_pills(cx),
-                    2 => this.season_cards(cx),
-                    3 => this.shuffle_season_button(cx),
+                    1 => this.hero(item, window_size, cx),
+                    2 => this.version_pills(cx),
+                    3 => this.season_cards(cx),
+                    4 => this.shuffle_season_button(cx),
                     EPISODE_ROW => this.episode_line(item, line, cx),
                     row => this.section(row, item, cx),
                 };
@@ -1577,10 +1655,12 @@ fn watch_data(data: &mut Option<wire::WatchRollup>) -> &mut wire::WatchRollup {
     })
 }
 
-/// The focused control, by index: a hero button, a version pill, a season card, an episode card, a cast card, a
-/// crew card, a trailer card or a More Like This card.
+/// The focused control, by index: the series link, a hero button, a version pill, a season card, an episode card, a
+/// cast card, a crew card, a trailer card or a More Like This card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
+    /// The link to the series of an episode, in the hero above the buttons. The row has one control.
+    Series(usize),
     Action(usize),
     Version(usize),
     Season(usize),
@@ -1597,6 +1677,7 @@ impl Focus {
     /// The control at `index` in row `row` of the page, from the top.
     fn at(row: usize, index: usize) -> Self {
         [
+            Focus::Series,
             Focus::Action,
             Focus::Version,
             Focus::Season,
@@ -1612,21 +1693,22 @@ impl Focus {
     /// The row of the control, from the top, and its index in the row.
     fn place(self) -> (usize, usize) {
         match self {
-            Focus::Action(i) => (0, i),
-            Focus::Version(i) => (1, i),
-            Focus::Season(i) => (2, i),
-            Focus::ShuffleSeason(i) => (3, i),
-            Focus::Episode(i) => (4, i),
-            Focus::Cast(i) => (5, i),
-            Focus::Crew(i) => (6, i),
-            Focus::Trailer(i) => (7, i),
-            Focus::Similar(i) => (8, i),
+            Focus::Series(i) => (0, i),
+            Focus::Action(i) => (1, i),
+            Focus::Version(i) => (2, i),
+            Focus::Season(i) => (3, i),
+            Focus::ShuffleSeason(i) => (4, i),
+            Focus::Episode(i) => (5, i),
+            Focus::Cast(i) => (6, i),
+            Focus::Crew(i) => (7, i),
+            Focus::Trailer(i) => (8, i),
+            Focus::Similar(i) => (9, i),
         }
     }
 }
 
 /// The row of the episode grid. The other rows go left and right only.
-const EPISODE_ROW: usize = 4;
+const EPISODE_ROW: usize = 5;
 
 const SEASONS: Row = Row { width: SEASON_WIDTH, gap: GAP, pad: MARGIN };
 
@@ -1637,7 +1719,9 @@ fn sideways(row: usize) -> Option<Row> {
         Focus::Cast(_) | Focus::Crew(_) => CAST_WIDTH,
         Focus::Trailer(_) => TRAILER_WIDTH,
         Focus::Similar(_) => crate::grid::POSTER_WIDTH,
-        Focus::Action(_) | Focus::Version(_) | Focus::ShuffleSeason(_) | Focus::Episode(_) => return None,
+        Focus::Series(_) | Focus::Action(_) | Focus::Version(_) | Focus::ShuffleSeason(_) | Focus::Episode(_) => {
+            return None;
+        }
     };
     Some(Row { width, gap: GAP, pad: 0. })
 }
@@ -1655,6 +1739,8 @@ pub enum Step {
 /// The number of controls in each row of the page. The page shows a row only when it has a control.
 #[derive(Debug, Clone, Copy)]
 pub struct Rows {
+    /// The link to the series of an episode: 1 when the page has it, else 0.
+    pub series: usize,
     pub actions: usize,
     /// The pills of the Version picker. The page shows the picker only for more than one version.
     pub versions: usize,
@@ -1686,28 +1772,30 @@ impl Rows {
     }
 
     fn len(&self, row: usize) -> usize {
-        let Rows { actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar, .. } = *self;
-        [actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar][row]
+        let Rows { series, actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar, .. } = *self;
+        [series, actions, versions, seasons, shuffle, episodes, cast, crew, trailers, similar][row]
     }
 
     /// The control that the focus goes to in `row`: the chosen version or season, the first card of the last
     /// episode row when the focus comes from below, else the first control.
     fn enter(&self, row: usize, from_below: bool) -> Focus {
         match row {
-            1 => Focus::Version(self.version),
-            2 => Focus::Season(self.season),
+            2 => Focus::Version(self.version),
+            3 => Focus::Season(self.season),
             EPISODE_ROW if from_below => Focus::Episode((self.episodes - 1) / self.columns * self.columns),
             row => Focus::at(row, 0),
         }
     }
 
     /// The items of the page list, as the row and the line of the episode grid: the hero, one item for each other
-    /// row that is not empty, and one for each line of the episode grid.
+    /// row that is not empty, and one for each line of the episode grid. The hero is the item of the buttons, and it
+    /// also holds the series link.
     pub fn items(&self) -> Vec<(usize, usize)> {
-        (0..9)
+        (0..10)
             .flat_map(|row| {
                 let lines = match row {
-                    0 => 1,
+                    0 => 0,
+                    1 => 1,
                     EPISODE_ROW => self.episodes.div_ceil(self.columns),
                     row => usize::from(self.len(row) > 0),
                 };
@@ -1719,6 +1807,8 @@ impl Rows {
     /// The index of the page item that holds the control.
     pub fn child(&self, focus: Focus) -> usize {
         let (row, i) = focus.place();
+        // The series link is in the hero.
+        let row = row.max(1);
         let line = if row == EPISODE_ROW { i / self.columns } else { 0 };
         self.items().iter().position(|&item| item == (row, line)).unwrap_or(0)
     }
@@ -1727,7 +1817,7 @@ impl Rows {
         let (row, i) = focus.place();
         let leave = |down: bool| {
             let next =
-                if down { (row + 1..9).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
+                if down { (row + 1..10).find(|&r| self.len(r) > 0) } else { (0..row).rev().find(|&r| self.len(r) > 0) };
             next.map_or(Step::Stay, |next| Step::To(self.enter(next, !down)))
         };
         if row == EPISODE_ROW {
@@ -1767,11 +1857,31 @@ pub fn meta_line(item: &wire::CatalogItemDetail) -> String {
         .join(" · ")
 }
 
-/// The line above the title: the type, and the network of a series or the first studio, for example
-/// "SERIES · APPLE TV".
-pub fn kind_line(item: &wire::CatalogItemDetail) -> String {
-    let company = if item.type_ == "series" { item.networks.first() } else { None }.or(item.studios.first());
-    [Some(&item.type_), company].into_iter().flatten().map(|part| part.to_uppercase()).collect::<Vec<_>>().join(" · ")
+/// The parts of the line above the title, in upper case. An episode with a series link has the series title, the
+/// season and the number, for example "SILO", "SEASON 2", "EPISODE 3". Each other Item has the type, and the network
+/// of a series or the first studio, for example "SERIES", "APPLE TV".
+pub fn kind_parts(item: &wire::CatalogItemDetail) -> Vec<String> {
+    let parts = match series_link(item) {
+        Some((_, title)) => vec![
+            Some(title.to_string()),
+            item.season_number.map(|n| if n == 0 { "Specials".into() } else { format!("Season {n}") }),
+            item.episode_number.map(|n| format!("Episode {n}")),
+        ],
+        None => {
+            let company = if item.type_ == "series" { item.networks.first() } else { None }.or(item.studios.first());
+            vec![Some(item.type_.clone()), company.cloned()]
+        }
+    };
+    parts.into_iter().flatten().map(|part| part.to_uppercase()).collect()
+}
+
+/// The series id and the series title of an episode, for the link to its series. `None` when the Server does not
+/// send both.
+pub fn series_link(item: &wire::CatalogItemDetail) -> Option<(&str, &str)> {
+    if item.type_ != "episode" {
+        return None;
+    }
+    Some((item.series_id.as_deref()?, item.series_title.as_deref().filter(|title| !title.is_empty())?))
 }
 
 /// The ratings from each source that the server sends, in its order, for example "IMDb 8.3 · TMDB 7.9".
@@ -1965,6 +2075,7 @@ mod tests {
     fn hjkl_moves_between_the_buttons_the_seasons_and_the_episode_grid() {
         // 3 buttons, 2 seasons with season 1 chosen, 5 episodes in 2 columns.
         let rows = Rows {
+            series: 0,
             actions: 3,
             versions: 0,
             version: 0,
@@ -1991,6 +2102,7 @@ mod tests {
         assert_eq!(rows.step(Focus::Episode(2), Key::Left), Step::OutLeft);
         assert_eq!(rows.step(Focus::Action(0), Key::Up), Step::Stay);
         let movie = Rows {
+            series: 0,
             actions: 2,
             versions: 0,
             version: 0,
@@ -2019,8 +2131,40 @@ mod tests {
     }
 
     #[test]
+    fn up_from_the_buttons_of_an_episode_goes_to_the_series_link_and_down_goes_back() {
+        let episode = Rows {
+            series: 1,
+            actions: 3,
+            versions: 0,
+            version: 0,
+            seasons: 0,
+            season: 0,
+            shuffle: 0,
+            episodes: 4,
+            cast: 0,
+            crew: 0,
+            trailers: 0,
+            similar: 0,
+            columns: 2,
+        };
+        let to = |focus| Step::To(focus);
+        assert_eq!(episode.step(Focus::Action(2), Key::Up), to(Focus::Series(0)));
+        assert_eq!(episode.step(Focus::Series(0), Key::Down), to(Focus::Action(0)), "back to Play");
+        assert_eq!(episode.step(Focus::Series(0), Key::Up), Step::Stay);
+        assert_eq!(episode.step(Focus::Series(0), Key::Right), Step::Stay);
+        assert_eq!(episode.step(Focus::Series(0), Key::Left), Step::OutLeft);
+        assert_eq!(episode.step(Focus::Episode(1), Key::Up), to(Focus::Action(0)));
+        assert_eq!(episode.child(Focus::Series(0)), 0, "the link is in the hero");
+        assert_eq!(episode.child(Focus::Episode(2)), 2, "the hero, then the lines of More Episodes");
+        let no_link = Rows { series: 0, ..episode };
+        assert_eq!(no_link.step(Focus::Action(0), Key::Up), Step::Stay);
+        assert_eq!(no_link.clamp(Focus::Series(0)), Focus::Action(0), "the link is gone");
+    }
+
+    #[test]
     fn hjkl_moves_between_the_buttons_and_the_cast_of_a_movie() {
         let movie = Rows {
+            series: 0,
             actions: 2,
             versions: 0,
             version: 0,
@@ -2124,6 +2268,7 @@ mod tests {
     #[test]
     fn hjkl_moves_through_the_version_picker_of_a_movie() {
         let movie = Rows {
+            series: 0,
             actions: 2,
             versions: 3,
             version: 1,
@@ -2159,11 +2304,34 @@ mod tests {
 
     #[test]
     fn the_kind_line_names_the_network_of_a_series_and_the_studio_of_a_movie() {
-        assert_eq!(kind_line(&detail(json!({}))), "MOVIE");
+        let line = |item: &wire::CatalogItemDetail| kind_parts(item).join(" · ");
+        assert_eq!(line(&detail(json!({}))), "MOVIE");
         let movie = detail(json!({"studios": ["Crossbow Productions", "Gruskoff"], "networks": []}));
-        assert_eq!(kind_line(&movie), "MOVIE · CROSSBOW PRODUCTIONS");
+        assert_eq!(line(&movie), "MOVIE · CROSSBOW PRODUCTIONS");
         let series = detail(json!({"type": "series", "studios": ["AMC Studios"], "networks": ["Apple TV"]}));
-        assert_eq!(kind_line(&series), "SERIES · APPLE TV");
+        assert_eq!(line(&series), "SERIES · APPLE TV");
+        assert!(series_link(&series).is_none());
+    }
+
+    #[test]
+    fn the_kind_line_of_an_episode_names_its_series_season_and_number() {
+        let line = |item: &wire::CatalogItemDetail| kind_parts(item).join(" · ");
+        let fields = json!({"type": "episode", "series_id": "series:silo", "series_title": "Silo", "season_number": 2,
+                            "episode_number": 3, "studios": ["Apple TV"]});
+        let episode = detail(fields.clone());
+        assert_eq!(line(&episode), "SILO · SEASON 2 · EPISODE 3");
+        assert_eq!(series_link(&episode), Some(("series:silo", "Silo")));
+        let mut special = fields.clone();
+        special["season_number"] = 0.into();
+        assert_eq!(line(&detail(special)), "SILO · SPECIALS · EPISODE 3");
+        let mut untitled = fields.clone();
+        untitled["series_title"] = serde_json::Value::Null;
+        let untitled = detail(untitled);
+        assert_eq!(line(&untitled), "EPISODE · APPLE TV", "no series title, no link");
+        assert_eq!(series_link(&untitled), None);
+        let mut no_id = fields;
+        no_id["series_id"] = serde_json::Value::Null;
+        assert_eq!(series_link(&detail(no_id)), None);
     }
 
     #[test]
@@ -2205,6 +2373,7 @@ mod tests {
     fn hjkl_moves_down_through_the_episodes_cast_crew_and_trailers_of_a_series() {
         // 2 seasons, 5 episodes in 2 columns, then 2 cast, 3 crew and 1 trailer.
         let series = Rows {
+            series: 0,
             actions: 2,
             versions: 0,
             version: 0,
@@ -2250,6 +2419,7 @@ mod tests {
     #[test]
     fn hjkl_moves_down_from_the_trailers_into_more_like_this() {
         let movie = Rows {
+            series: 0,
             actions: 2,
             versions: 0,
             version: 0,

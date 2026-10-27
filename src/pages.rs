@@ -21,7 +21,7 @@ use crate::api::{Client, wire};
 use crate::browse;
 use crate::click::Clickable as _;
 use crate::collections::{Collections, OpenCollection, Scope};
-use crate::detail::{self, Detail};
+use crate::detail::{self, Detail, OpenSeries};
 use crate::grid::{GridPage, Source};
 use crate::home::{Home, Open, OpenGrid, Play, Rows};
 use crate::keys::Key;
@@ -299,12 +299,32 @@ impl Pages {
     /// Opens the detail page of an Item. For a season, the page of its series with the season.
     fn open_item(&mut self, item: &wire::CatalogItem, window: &mut Window, cx: &mut Context<Self>) {
         let (id, season) = detail::target(item);
+        let page = self.detail_page(id, season, None, window, cx);
+        self.open(Page::Detail(page), cx);
+    }
+
+    /// Shows the detail page of the series of an episode in place of the page of the episode, so that Esc goes back
+    /// to the page before the episode.
+    fn open_series(&mut self, open: &OpenSeries, window: &mut Window, cx: &mut Context<Self>) {
+        let page = self.detail_page(open.series.clone(), open.season, Some(open.episode.clone()), window, cx);
+        self.show(Page::Detail(page), cx);
+    }
+
+    fn detail_page(
+        &mut self,
+        id: String,
+        season: Option<i64>,
+        episode: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Detail> {
         let client = self.client.clone();
-        let page = cx.new(|cx| Detail::new(client, id, season, window, cx));
+        let page = cx.new(|cx| Detail::new(client, id, season, window, cx).with_episode(episode));
         cx.subscribe(&page, |_, _, Play(item), cx| cx.emit(Play(item.clone()))).detach();
         cx.subscribe_in(&page, window, |this, _, person, window, cx| this.open_person(person, window, cx)).detach();
         cx.subscribe_in(&page, window, |this, _, Open(item), window, cx| this.open_item(item, window, cx)).detach();
-        self.open(Page::Detail(page), cx);
+        cx.subscribe_in(&page, window, |this, _, open, window, cx| this.open_series(open, window, cx)).detach();
+        page
     }
 
     /// Opens the Person page.

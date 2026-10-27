@@ -69,6 +69,10 @@ _Avoid_: Shelf, carousel, rail
 A Home section that the server marks as featured. The Library window shows it as a hero above the other rows.
 _Avoid_: Banner
 
+**Detail page**:
+The page of one Item, with the Hero, the actions and the sections under it. On an episode, the Detail page names its series and links to it.
+_Avoid_: item page, episode view
+
 **Hero**:
 The top block of a page, with the Backdrop, the title and the actions. On the detail page, the Hero clips the Backdrop and scrolls away with the page.
 _Avoid_: Banner, header
