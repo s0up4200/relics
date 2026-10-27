@@ -712,12 +712,17 @@ fn episodes_retry_without_restarting_the_item_or_similar_rows(cx: &mut TestAppCo
         .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
     pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail), cx));
     cx.run_until_parked();
+    // The error takes the place of the episode grid, below the hero.
+    let hero = bounds(cx, "detail-hero");
+    wheel(cx, hero.center(), 0., -2000.);
     assert!(drawn(cx, "episodes-retry"));
+    let failed = bounds(cx, "detail-hero").origin.y;
     let item = server.count("catalog/items/test-series?");
     let similar = server.count("recommendations/similar/test-series");
     server.fail(&[]);
     click(cx, "episodes-retry");
     assert!(!drawn(cx, "episodes-retry"));
+    assert_eq!(bounds(cx, "detail-hero").origin.y, failed, "the hero stays in place when the episodes come");
     assert_eq!(server.count(episodes), 2);
     assert_eq!(server.count("catalog/items/test-series?"), item);
     assert_eq!(server.count("recommendations/similar/test-series"), similar);
@@ -935,6 +940,9 @@ fn episodes_show_loading_during_retry_and_main_content_stays_available(cx: &mut 
         .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
     pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail), cx));
     cx.run_until_parked();
+    // The error and the text take the place of the episode grid, below the hero.
+    let hero = bounds(cx, "detail-hero");
+    wheel(cx, hero.center(), 0., -2000.);
     server.fail(&[]);
     server.hold(&[episodes]);
     click(cx, "episodes-retry");
@@ -1925,4 +1933,20 @@ fn esc_from_the_series_goes_back_to_the_episode_before_the_one_that_linked_to_it
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(drawn(cx, "home-card-cw-0"), "ep-3 was the page before ep-4, and Home the page before ep-3");
+}
+
+#[gpui::test]
+fn loading_episodes_does_not_move_the_page(cx: &mut TestAppContext) {
+    let (pages, cx, server, _, client) = rig(cx);
+    let episodes = "catalog/series/test-series/seasons/1/episodes";
+    server.hold(&[episodes]);
+    let detail = cx
+        .update(|window, cx| cx.new(|cx| relics::detail::Detail::new(client, "test-series".into(), None, window, cx)));
+    pages.update(cx, |pages, cx| pages.open(relics::pages::Page::Detail(detail), cx));
+    cx.run_until_parked();
+    let loading = bounds(cx, "detail-hero").origin.y;
+    server.hold(&[]);
+    server.release();
+    cx.run_until_parked();
+    assert_eq!(bounds(cx, "detail-hero").origin.y, loading, "the hero stays in place when the episodes come");
 }
