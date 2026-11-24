@@ -9,7 +9,7 @@ This skill installs the app from source for one user, to try a build that is not
 1. Build the release binary. Run the build from the root of this checkout:
 
    ```sh
-   CARGO_TARGET_DIR=$HOME/.cache/relics-target nice -n 19 cargo build --release -j 4
+   CARGO_TARGET_DIR=$HOME/.cache/relics-target taskset -c 0-3 nice -n 19 cargo build --release -j 4
    ```
 
    The step is done when cargo prints `Finished`. If the build fails, stop and report the error.

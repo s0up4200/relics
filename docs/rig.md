@@ -21,7 +21,7 @@ Read the dotfiles `agents/docs/desktop.md` before you start. The test video has 
 1. Build the rig. Run only one cargo command at a time.
 
    ```bash
-   CARGO_TARGET_DIR=$HOME/.cache/relics-target nice -n 19 cargo build --example rig -j 4
+   CARGO_TARGET_DIR=$HOME/.cache/relics-target taskset -c 0-3 nice -n 19 cargo build --example rig -j 4
    ```
 
 2. Make sure that `hyprctl monitors all` lists `BENCH`. If it does not, run `hyprctl output create headless BENCH`. Then add the window rule:

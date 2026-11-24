@@ -47,7 +47,7 @@ def build():
     """The path of the release build, built with the same profile as the AUR package."""
     # The shared target dir of the repo. A second target dir is a cold build of about 16 GB.
     target = Path(os.environ.get("CARGO_TARGET_DIR", Path.home() / ".cache/relics-target"))
-    command = ["nice", "-n", "19", "cargo", "build", "--release", "-j", "4"]
+    command = ["taskset", "-c", "0-3", "nice", "-n", "19", "cargo", "build", "--release", "-j", "4"]
     subprocess.run(command, cwd=REPO, env=dict(os.environ, CARGO_TARGET_DIR=str(target)), check=True)
     return target / "release" / "relics"
 
