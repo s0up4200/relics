@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,23 +28,21 @@ struct Stub {
     requests: Arc<Mutex<Vec<Request>>>,
 }
 
-/// Starts the stub. After `ok_requests` requests, it answers each request with 401.
-fn stub(ok_requests: usize) -> Stub {
+fn stub(answers_401: fn(&str) -> bool) -> Stub {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
     let log = requests.clone();
-    let count = Arc::new(AtomicUsize::new(0));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let (log, count) = (log.clone(), count.clone());
-            std::thread::spawn(move || serve(stream, &log, count.fetch_add(1, Ordering::SeqCst) >= ok_requests));
+            let log = log.clone();
+            std::thread::spawn(move || serve(stream, &log, answers_401));
         }
     });
     Stub { url, requests }
 }
 
-fn serve(mut stream: TcpStream, log: &Mutex<Vec<Request>>, refuse: bool) {
+fn serve(mut stream: TcpStream, log: &Mutex<Vec<Request>>, answers_401: fn(&str) -> bool) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -67,7 +64,9 @@ fn serve(mut stream: TcpStream, log: &Mutex<Vec<Request>>, refuse: bool) {
     log.lock().unwrap().push(Request { path: path.clone(), authorization, device_name });
     let file = format!("{}/tests/media{path}", env!("CARGO_MANIFEST_DIR"));
     let reply = match std::fs::read(&file) {
-        _ if refuse => b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        _ if answers_401(&path) => {
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+        }
         Err(_) => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
         Ok(bytes) => {
             // A range is `bytes=start-` or `bytes=start-end`.
@@ -137,7 +136,7 @@ fn assert_each_request_has_the_header(stub: &Stub) {
 
 #[test]
 fn an_mp4_plays_from_the_start_position_with_the_header_on_each_request() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/sample.mp4", stub.url), &headers(), 3.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
@@ -149,7 +148,7 @@ fn an_mp4_plays_from_the_start_position_with_the_header_on_each_request() {
 
 #[test]
 fn hls_plays_with_the_header_on_the_manifest_and_each_segment() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
@@ -162,7 +161,7 @@ fn hls_plays_with_the_header_on_the_manifest_and_each_segment() {
 
 #[test]
 fn a_401_shows_as_a_load_failure() {
-    let stub = stub(0);
+    let stub = stub(|_| true);
     let (player, rx) = open();
     player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::LoadFailed));
@@ -171,7 +170,7 @@ fn a_401_shows_as_a_load_failure() {
 
 #[test]
 fn the_end_of_a_file_shows_as_end_of_file() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/sample.mp4", stub.url), &headers(), 5.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::EndOfFile));
@@ -179,9 +178,8 @@ fn the_end_of_a_file_shows_as_end_of_file() {
 }
 
 #[test]
-fn a_401_in_the_middle_of_an_hls_stream_ends_it_before_the_duration() {
-    // The manifest and the first segment load, then each request gets a 401, as when the token expires.
-    let stub = stub(2);
+fn a_401_on_each_hls_segment_ends_the_stream_before_the_duration() {
+    let stub = stub(|path| path.ends_with(".ts"));
     let (player, rx) = open();
     player.load(&format!("{}/hls/index.m3u8", stub.url), &headers(), 0.0, None).unwrap();
     let mut position = 0.0;
@@ -243,7 +241,7 @@ fn wait_for_property(player: &Player, name: &str, want: &str) {
 
 #[test]
 fn an_added_subtitle_shows_and_its_request_has_the_header() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
@@ -257,7 +255,7 @@ fn an_added_subtitle_shows_and_its_request_has_the_header() {
 
 #[test]
 fn a_seek_ends_in_seeked_with_the_new_position_and_set_pause_pauses() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/sample.mp4", stub.url), &headers(), 0.0, None).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
@@ -269,7 +267,7 @@ fn a_seek_ends_in_seeked_with_the_new_position_and_set_pause_pauses() {
 
 #[test]
 fn direct_play_plays_the_chosen_audio_track_and_shows_an_embedded_subtitle_track() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/tracks.mkv", stub.url), &headers(), 0.0, Some(2)).unwrap();
     wait_for(&rx, |input| matches!(input, Input::FileLoaded));
@@ -289,7 +287,7 @@ fn tracks_of(input: &Input, kind: Kind) -> Vec<(i64, String, bool)> {
 
 #[test]
 fn mpv_reports_the_track_list_and_a_pick_by_id_selects_the_audio_and_subtitle_track() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let (player, rx) = open();
     player.load(&format!("{}/tracks.mkv", stub.url), &headers(), 0.0, None).unwrap();
     let audio = |eng, jpn| vec![(1, "eng".to_string(), eng), (2, "jpn".to_string(), jpn)];
@@ -502,7 +500,7 @@ fn is_property(raw: &Raw, name: &str, value: &str) -> bool {
 
 #[test]
 fn the_end_file_of_the_old_load_comes_after_the_next_load_returns_and_names_its_entry() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let rec = recorder();
     let a = rec.load(&format!("{}/sample.mp4", stub.url), 0.0);
     let at =
@@ -528,7 +526,7 @@ fn the_end_file_of_the_old_load_comes_after_the_next_load_returns_and_names_its_
 
 #[test]
 fn a_file_at_its_end_reports_eof_reached_once_and_ends_with_stop_at_the_next_load() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let rec = recorder();
     let a = rec.load(&format!("{}/sample.mp4", stub.url), 5.0);
     let eof = rec.wait(0, |r| is_property(r, "eof-reached", "yes"));
@@ -592,7 +590,7 @@ fn a_value_of_the_old_file_counts_as_late_only_after_its_end_file() {
 
 #[test]
 fn no_value_of_the_old_file_arrives_after_its_end_file_and_no_end_before_the_file_loads() {
-    let stub = stub(usize::MAX);
+    let stub = stub(|_| false);
     let rec = recorder();
     let mut files = HashMap::new();
     // File 'a' reaches its end about 2 s after it loads, so the replacements fall before, at and after its end.
@@ -622,9 +620,7 @@ fn no_value_of_the_old_file_arrives_after_its_end_file_and_no_end_before_the_fil
 
 #[test]
 fn an_hls_load_that_cannot_open_ends_three_more_entries_with_an_error() {
-    // The stub answers the two manifest requests. Then the segment requests get a 401, so the HLS demuxer fails,
-    // and mpv opens the manifest as a playlist of the three segments.
-    let stub = stub(2);
+    let stub = stub(|path| path.ends_with(".ts"));
     let rec = recorder();
     rec.load(&format!("{}/hls/index.m3u8", stub.url), 0.0);
     // The id of the manifest entry comes from its start-file, because the redirect can replace the first entry of the
