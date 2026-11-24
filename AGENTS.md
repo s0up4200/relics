@@ -13,6 +13,10 @@ A full GPUI build overloads this machine (16 cores, 19 GB of RAM, about 16 GB pe
 
 To run the real app against a fake Silo server, change the Server, and take screenshots, follow `docs/rig.md`.
 
+## Silo API
+
+Before you add or change a Silo call, update the Silo pin, or work on a `silo-drift` issue, read `docs/silo-upstream.md`.
+
 ## Pull requests
 
 To show screenshots or recordings in a pull request: if brrbin is on `PATH`, run `brrbin publish --help` and follow it. If it exits with code 4, stop and ask the user to run `brrbin login`. If brrbin is not installed, or it exits with code 6, attach the screenshots to the pull request. Mask each token in every capture. A brrbin Evidence is private to the maintainers, so publish it without a review by the user. A screenshot that you attach to the pull request is public, because the repo is public. Also mask the Silo server address in it, and show it to the user before you attach it.

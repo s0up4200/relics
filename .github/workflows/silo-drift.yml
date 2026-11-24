@@ -1,0 +1,42 @@
+name: Silo drift
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - tests/fixtures/silo/SERVER_COMMIT
+      - api/operations.txt
+      - scripts/upstream-drift.py
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: silo-drift
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 scripts/upstream-drift.py > drift.md
+      - name: Update the drift issue
+        run: |
+          number=$(gh issue list --label silo-drift --state open --json number --jq '.[0].number // empty')
+          if [ -s drift.md ]; then
+            gh label create silo-drift --color FBCA04 --description "Silo API changes since the pinned commit" --force
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --body-file drift.md
+            else
+              gh issue create --title "Silo API changes since the pinned commit" --label silo-drift --body-file drift.md
+            fi
+          elif [ -n "$number" ]; then
+            gh issue close "$number" --comment "The Silo API that Relics uses matches the pinned commit again."
+          fi
