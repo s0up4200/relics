@@ -4,10 +4,14 @@ Relics is an unofficial Silo client for Linux, with extras for Omarchy. The libr
 
 ## Builds
 
-A full GPUI build overloads this machine (16 cores, 19 GB of RAM, about 16 GB per target dir).
+A full GPUI build takes every core it can get and about 16 GB of disk per target dir, and other agents share the machine.
 
-- Run every cargo command as `nice -n 19 cargo ... -j 4`, with `CARGO_TARGET_DIR=$HOME/.cache/relics-target`. The shared target dir also applies in a worktree, so a new worktree rebuilds only the app crate.
+- Run every cargo command as `CARGO_TARGET_DIR=$HOME/.cache/relics-target taskset -c 0-3 nice -n 19 cargo ... -j 4`. The shared target dir also applies in a worktree, so a new worktree rebuilds only the app crate.
 - Run one cargo command at a time, and one implementer agent at a time.
+- Clean up before your final reply of the task:
+  1. Stop each rig that you started, as `docs/rig.md` says.
+  2. Delete `target/` in the worktree, if a cargo command ran without `CARGO_TARGET_DIR`.
+  3. If `du -sh ~/.cache/relics-target` shows more than 30 GB and `pgrep -x cargo` finds no build, delete `~/.cache/relics-target`.
 
 ## Live runs
 
