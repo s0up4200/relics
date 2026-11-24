@@ -12,8 +12,10 @@ UPSTREAM = "Silo-Server/silo-server"
 SPEC = "contracts/api/v2/openapi.json"
 PREFIX = "#/components/schemas/"
 WORDING = {"description", "summary", "title", "example", "examples", "externalDocs"}
-RULES = {"format", "pattern", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+RULES = {"enum", "format", "pattern", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
          "minLength", "maxLength", "minItems", "maxItems", "uniqueItems"}
+NAMES = {"properties", "patternProperties", "$defs", "dependentSchemas", "dependentRequired",
+         "headers", "content", "encoding", "responses", "links", "callbacks", "mapping"}
 REQUEST, RESPONSE = "request", "response"
 HELP = """Report how the Silo API v2 changed since the server commit that Relics pins
 in tests/fixtures/silo/SERVER_COMMIT. Compares the operations in api/operations.txt
@@ -80,9 +82,11 @@ def sides(doc, op):
     return out
 
 
-def strip(node):
+def strip(node, keyed_by_name=False):
     if isinstance(node, dict):
-        return {k: strip(v) for k, v in node.items() if k not in WORDING and not k.startswith("x-")}
+        if keyed_by_name:
+            return {k: strip(v) for k, v in node.items()}
+        return {k: strip(v, k in NAMES) for k, v in node.items() if k not in WORDING and not k.startswith("x-")}
     if isinstance(node, list):
         return [strip(v) for v in node]
     return node
@@ -110,6 +114,8 @@ def diff(old, new, path=()):
                     yield "removed field", path + (name,), ""
                 for name in sorted(a.keys() & b.keys()):
                     yield from diff(a[name], b[name], path + (name,))
+            elif key in RULES and a is None:
+                yield "new rule", path, f"{key} {json.dumps(b)}"
             elif key in ("required", "enum") and isinstance(a or [], list) and isinstance(b or [], list):
                 added, gone = sorted(names(b) - names(a)), sorted(names(a) - names(b))
                 more, less = ("now required", "now optional") if key == "required" else ("new value", "removed value")
@@ -139,8 +145,6 @@ def diff(old, new, path=()):
                 yield "changed type", path, (a.removeprefix(PREFIX), b.removeprefix(PREFIX))
             elif key == "deprecated":
                 yield "deprecated", path, ""
-            elif key in RULES and a is None:
-                yield "new rule", path, f"{key} {json.dumps(b)}"
             else:
                 yield "changed", path, f"{key}: {json.dumps(a)} → {json.dumps(b)}"
     elif isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
